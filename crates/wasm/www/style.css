@@ -1,0 +1,118 @@
+/* ─── Reset & base ──────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: #1a1a2e; color: #e0e0e0; min-height: 100vh;
+}
+#app { max-width: 680px; margin: 0 auto; padding: 1.5rem; }
+
+header { text-align: center; margin-bottom: 1.5rem; }
+header h1 { font-size: 2rem; color: #f0c040; letter-spacing: 2px; }
+header .subtitle { color: #888; font-size: 0.9rem; margin-top: 0.25rem; }
+
+/* ─── Punktestand ────────────────────────────────────────────────────────────── */
+#scorebar { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
+.score {
+  flex: 1; min-width: 110px; background: #16213e; border-radius: 8px;
+  padding: 0.5rem 0.75rem; font-size: 0.9rem;
+  display: flex; justify-content: space-between; align-items: center;
+  border-left: 4px solid transparent;
+}
+.score span { font-weight: bold; font-size: 1.1rem; }
+.score.red    { border-color: #e74c3c; }
+.score.blue   { border-color: #3498db; }
+.score.yellow { border-color: #f1c40f; }
+.score.green  { border-color: #2ecc71; }
+
+/* ─── Brett ──────────────────────────────────────────────────────────────────── */
+#board-container {
+  position: relative; display: inline-block;
+  border-radius: 4px; overflow: hidden;
+  box-shadow: 0 8px 32px rgba(0,0,0,.6); margin-bottom: 1rem;
+}
+#board { display: block; cursor: pointer; }
+#overlay-msg {
+  position: absolute; inset: 0; background: rgba(0,0,0,.75);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 2rem; font-weight: bold; color: #f0c040; border-radius: 4px;
+}
+#overlay-msg.hidden { display: none; }
+
+/* ─── Controls ───────────────────────────────────────────────────────────────── */
+#controls { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; margin-bottom: 1rem; }
+.control-group {
+  display: flex; align-items: center; gap: 0.5rem;
+  background: #16213e; padding: 0.4rem 0.75rem; border-radius: 8px;
+}
+.control-group label { font-size: 0.85rem; color: #aaa; }
+input[type=range] { width: 90px; accent-color: #f0c040; }
+
+button {
+  background: #0f3460; color: #e0e0e0; border: none; border-radius: 8px;
+  padding: 0.5rem 1rem; cursor: pointer; font-size: 0.9rem; transition: background 0.2s;
+}
+button:hover  { background: #1a5276; }
+button:active { background: #0a2540; }
+button:disabled { opacity: 0.4; cursor: default; }
+
+/* ─── Status ─────────────────────────────────────────────────────────────────── */
+#status { display: flex; justify-content: space-between; font-size: 0.9rem; color: #aaa; margin-bottom: 1rem; }
+#turn-indicator strong { color: #f0c040; }
+#engine-info { font-style: italic; }
+
+/* ─── Neuronales Netz ────────────────────────────────────────────────────────── */
+#net-section {
+  background: #16213e; border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1rem;
+}
+#net-section summary { cursor: pointer; color: #f0c040; margin-bottom: 0.5rem; }
+#net-status { font-size: 0.85rem; color: #aaa; margin-bottom: 0.5rem; font-style: italic; }
+#net-status.ok  { color: #2ecc71; font-style: normal; }
+#net-status.err { color: #e74c3c; font-style: normal; }
+
+.net-buttons { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
+.file-btn {
+  background: #0f3460; color: #e0e0e0; border-radius: 8px;
+  padding: 0.5rem 1rem; cursor: pointer; font-size: 0.9rem;
+  transition: background 0.2s; user-select: none;
+}
+.file-btn:hover { background: #1a5276; }
+.file-btn input[type=file] { display: none; }
+
+/* Eval bars */
+#net-eval-bars { margin-top: 0.5rem; }
+.eval-label { font-size: 0.8rem; color: #888; margin-bottom: 0.5rem; }
+.eval-bar-wrap { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.35rem; }
+.eval-color { font-size: 0.8rem; width: 38px; text-align: right; }
+.eval-color.red    { color: #e74c3c; }
+.eval-color.blue   { color: #3498db; }
+.eval-color.yellow { color: #f1c40f; }
+.eval-color.green  { color: #2ecc71; }
+.eval-track { flex: 1; height: 14px; background: #0d1b2a; border-radius: 7px; overflow: hidden; }
+.bar-fill { height: 100%; width: 50%; border-radius: 7px; transition: width 0.3s ease; }
+.red-fill    { background: #e74c3c; }
+.blue-fill   { background: #3498db; }
+.yellow-fill { background: #f1c40f; }
+.green-fill  { background: #2ecc71; }
+.eval-val { font-size: 0.8rem; font-family: monospace; width: 48px; color: #ccc; }
+
+/* ─── PGN ────────────────────────────────────────────────────────────────────── */
+#pgn-section { background: #16213e; border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1rem; }
+#pgn-section summary { cursor: pointer; color: #f0c040; margin-bottom: 0.5rem; }
+#pgn-input {
+  width: 100%; background: #0d1b2a; color: #e0e0e0;
+  border: 1px solid #0f3460; border-radius: 6px;
+  padding: 0.5rem; font-family: monospace; font-size: 0.85rem;
+  resize: vertical; margin-bottom: 0.5rem;
+}
+.pgn-buttons { display: flex; gap: 0.5rem; }
+#pgn-output { margin-top: 0.75rem; font-family: monospace; font-size: 0.8rem; color: #aaa; white-space: pre-wrap; }
+
+/* ─── Zugprotokoll ───────────────────────────────────────────────────────────── */
+#movelog { background: #16213e; border-radius: 8px; padding: 0.75rem 1rem; }
+#movelog h3 { font-size: 0.95rem; color: #f0c040; margin-bottom: 0.5rem; }
+#movelist {
+  max-height: 180px; overflow-y: auto; padding-left: 1.25rem;
+  font-family: monospace; font-size: 0.85rem; color: #ccc;
+}
+#movelist li { padding: 2px 0; }
+#movelist li:last-child { color: #f0c040; }

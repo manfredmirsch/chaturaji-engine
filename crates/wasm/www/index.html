@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chaturaji Analyse</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>&#9822; Chaturaji Analyse</h1>
+      <p class="subtitle">Ancient 4-player chess &middot; chess.com variant</p>
+    </header>
+
+    <main>
+      <!-- Punktestand -->
+      <div id="scorebar">
+        <div class="score red">   &#128308; Rot    <span id="score-red">0</span></div>
+        <div class="score blue">  &#128309; Blau   <span id="score-blue">0</span></div>
+        <div class="score yellow">&#128993; Gelb   <span id="score-yellow">0</span></div>
+        <div class="score green"> &#128994; Grün   <span id="score-green">0</span></div>
+      </div>
+
+      <!-- Brett -->
+      <div id="board-container">
+        <canvas id="board" width="560" height="560"></canvas>
+        <div id="overlay-msg" class="hidden"></div>
+      </div>
+
+      <!-- Steuerung -->
+      <div id="controls">
+        <div class="control-group">
+          <label>Suchtiefe</label>
+          <input id="depth" type="range" min="1" max="6" value="3" />
+          <span id="depth-val">3</span>
+        </div>
+        <button id="btn-engine-move">&#129302; Engine zieht</button>
+        <button id="btn-undo">&#8617; Rückgängig</button>
+        <button id="btn-reset">&#128260; Neu starten</button>
+      </div>
+
+      <!-- Status -->
+      <div id="status">
+        <span id="turn-indicator">Zug: <strong>Rot</strong></span>
+        <span id="engine-info"></span>
+      </div>
+
+      <!-- Neuronales Netz -->
+      <details id="net-section">
+        <summary>&#129504; Neuronales Netz</summary>
+        <div id="net-status">Kein Netz geladen &ndash; Engine nutzt Alpha-Beta</div>
+        <div class="net-buttons">
+          <label class="file-btn" id="net-file-label">
+            &#128196; Gewichte laden (.json)
+            <input type="file" id="net-file-input" accept=".json">
+          </label>
+          <button id="btn-unload-net" disabled>Netz entladen</button>
+        </div>
+        <div id="net-eval-bars" class="hidden">
+          <div class="eval-label">Netz-Bewertung der aktuellen Stellung (tanh, &minus;1 bis +1):</div>
+          <div class="eval-bar-wrap">
+            <span class="eval-color red">Rot</span>
+            <div class="eval-track"><div id="bar-red"    class="bar-fill red-fill"   ></div></div>
+            <span id="val-red"    class="eval-val">0.000</span>
+          </div>
+          <div class="eval-bar-wrap">
+            <span class="eval-color blue">Blau</span>
+            <div class="eval-track"><div id="bar-blue"   class="bar-fill blue-fill"  ></div></div>
+            <span id="val-blue"   class="eval-val">0.000</span>
+          </div>
+          <div class="eval-bar-wrap">
+            <span class="eval-color yellow">Gelb</span>
+            <div class="eval-track"><div id="bar-yellow" class="bar-fill yellow-fill"></div></div>
+            <span id="val-yellow" class="eval-val">0.000</span>
+          </div>
+          <div class="eval-bar-wrap">
+            <span class="eval-color green">Grün</span>
+            <div class="eval-track"><div id="bar-green"  class="bar-fill green-fill" ></div></div>
+            <span id="val-green"  class="eval-val">0.000</span>
+          </div>
+        </div>
+      </details>
+
+      <!-- PGN -->
+      <details id="pgn-section">
+        <summary>PGN laden / exportieren</summary>
+        <textarea id="pgn-input" rows="5" placeholder="PGN hier einfügen..."></textarea>
+        <div class="pgn-buttons">
+          <button id="btn-load-pgn">Laden</button>
+          <button id="btn-export-pgn">Exportieren</button>
+        </div>
+        <pre id="pgn-output"></pre>
+      </details>
+
+      <!-- Zugprotokoll -->
+      <div id="movelog">
+        <h3>Zugprotokoll</h3>
+        <ol id="movelist"></ol>
+      </div>
+    </main>
+  </div>
+
+  <script type="module" src="index.js"></script>
+</body>
+</html>

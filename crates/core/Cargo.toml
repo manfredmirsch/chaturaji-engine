@@ -1,0 +1,10 @@
+[package]
+name    = "chaturaji-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# intentionally zero external deps – no_std compatible
+
+[dev-dependencies]
+# nothing needed for unit tests

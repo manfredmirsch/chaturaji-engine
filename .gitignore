@@ -1,0 +1,12 @@
+# Rust build artifacts
+target/
+*.db          # SQLite-Trainingsdatenbank (kann sehr groß werden)
+
+# WASM build output
+crates/wasm/www/pkg/
+
+# VS Code
+.vscode/
+
+# Backup-Archive
+*.tar.gz
