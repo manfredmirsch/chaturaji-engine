@@ -14,90 +14,144 @@
     </header>
 
     <main>
-      <!-- Punktestand -->
-      <div id="scorebar">
-        <div class="score red">   &#128308; Rot    <span id="score-red">0</span></div>
-        <div class="score blue">  &#128309; Blau   <span id="score-blue">0</span></div>
-        <div class="score yellow">&#128993; Gelb   <span id="score-yellow">0</span></div>
-        <div class="score green"> &#128994; Grün   <span id="score-green">0</span></div>
-      </div>
+      <div class="main-left">
 
-      <!-- Brett -->
-      <div id="board-container">
-        <canvas id="board" width="560" height="560"></canvas>
-        <div id="overlay-msg" class="hidden"></div>
-      </div>
-
-      <!-- Steuerung -->
-      <div id="controls">
-        <div class="control-group">
-          <label>Suchtiefe</label>
-          <input id="depth" type="range" min="1" max="6" value="3" />
-          <span id="depth-val">3</span>
-        </div>
-        <button id="btn-engine-move">&#129302; Engine zieht</button>
-        <button id="btn-undo">&#8617; Rückgängig</button>
-        <button id="btn-reset">&#128260; Neu starten</button>
-      </div>
-
-      <!-- Status -->
-      <div id="status">
-        <span id="turn-indicator">Zug: <strong>Rot</strong></span>
-        <span id="engine-info"></span>
-      </div>
-
-      <!-- Neuronales Netz -->
-      <details id="net-section">
-        <summary>&#129504; Neuronales Netz</summary>
-        <div id="net-status">Kein Netz geladen &ndash; Engine nutzt Alpha-Beta</div>
-        <div class="net-buttons">
-          <label class="file-btn" id="net-file-label">
-            &#128196; Gewichte laden (.json)
-            <input type="file" id="net-file-input" accept=".json">
-          </label>
-          <button id="btn-unload-net" disabled>Netz entladen</button>
-        </div>
-        <div id="net-eval-bars" class="hidden">
-          <div class="eval-label">Netz-Bewertung der aktuellen Stellung (tanh, &minus;1 bis +1):</div>
-          <div class="eval-bar-wrap">
-            <span class="eval-color red">Rot</span>
-            <div class="eval-track"><div id="bar-red"    class="bar-fill red-fill"   ></div></div>
-            <span id="val-red"    class="eval-val">0.000</span>
+        <!-- Brett mit Punktestand drum herum -->
+        <div id="board-area">
+          <div id="score-top">
+            <div class="score blue">&#128309; <span class="score-name">Blau</span><span id="score-blue">0</span></div>
+            <div class="score yellow">&#128993; <span class="score-name">Gelb</span><span id="score-yellow">0</span></div>
           </div>
-          <div class="eval-bar-wrap">
-            <span class="eval-color blue">Blau</span>
-            <div class="eval-track"><div id="bar-blue"   class="bar-fill blue-fill"  ></div></div>
-            <span id="val-blue"   class="eval-val">0.000</span>
+          <div id="board-container">
+            <canvas id="board" width="560" height="560"></canvas>
+            <div id="overlay-msg" class="hidden"></div>
           </div>
-          <div class="eval-bar-wrap">
-            <span class="eval-color yellow">Gelb</span>
-            <div class="eval-track"><div id="bar-yellow" class="bar-fill yellow-fill"></div></div>
-            <span id="val-yellow" class="eval-val">0.000</span>
-          </div>
-          <div class="eval-bar-wrap">
-            <span class="eval-color green">Grün</span>
-            <div class="eval-track"><div id="bar-green"  class="bar-fill green-fill" ></div></div>
-            <span id="val-green"  class="eval-val">0.000</span>
+          <div id="score-bottom">
+            <div class="score red">&#128308; <span class="score-name">Rot</span><span id="score-red">0</span></div>
+            <div class="score green">&#128994; <span class="score-name">Gr&uuml;n</span><span id="score-green">0</span></div>
           </div>
         </div>
-      </details>
 
-      <!-- PGN -->
-      <details id="pgn-section">
-        <summary>PGN laden / exportieren</summary>
-        <textarea id="pgn-input" rows="5" placeholder="PGN hier einfügen..."></textarea>
-        <div class="pgn-buttons">
-          <button id="btn-load-pgn">Laden</button>
-          <button id="btn-export-pgn">Exportieren</button>
+        <!-- Spiel laden -->
+        <details id="game-loader-section">
+          <summary>&#128194; Spiel laden (game_data JSON)</summary>
+          <div class="game-loader-inner">
+            <label class="file-btn">
+              &#128196; Spiel &ouml;ffnen
+              <input type="file" id="game-json-input" accept=".json">
+            </label>
+            <label class="file-btn">
+              &#128200; Analyse laden
+              <input type="file" id="analysis-json-input" accept=".json">
+            </label>
+            <div id="game-info"></div>
+          </div>
+        </details>
+
+        <!-- Steuerung -->
+        <div id="controls">
+          <div class="control-group">
+            <label>Suchtiefe</label>
+            <input id="depth" type="range" min="1" max="6" value="3" />
+            <span id="depth-val">3</span>
+          </div>
+          <button id="btn-engine-move">&#129302; Engine zieht</button>
+          <button id="btn-undo">&#8617; R&uuml;ckg&auml;ngig</button>
+          <button id="btn-reset">&#128260; Neu starten</button>
         </div>
-        <pre id="pgn-output"></pre>
-      </details>
 
-      <!-- Zugprotokoll -->
-      <div id="movelog">
-        <h3>Zugprotokoll</h3>
-        <ol id="movelist"></ol>
+        <!-- Status -->
+        <div id="status">
+          <span id="turn-indicator">Zug: <strong>Rot</strong></span>
+          <span id="engine-info"></span>
+        </div>
+
+        <!-- Neuronales Netz -->
+        <details id="net-section">
+          <summary>&#129504; Neuronales Netz</summary>
+          <div id="net-status">Kein Netz geladen &ndash; Engine nutzt Alpha-Beta</div>
+          <div class="net-buttons">
+            <label class="file-btn" id="net-file-label">
+              &#128196; Gewichte laden (.json)
+              <input type="file" id="net-file-input" accept=".json">
+            </label>
+            <button id="btn-unload-net" disabled>Netz entladen</button>
+          </div>
+          <div id="net-eval-bars" class="hidden">
+            <div class="eval-label">Netz-Bewertung der aktuellen Stellung (tanh, &minus;1 bis +1):</div>
+            <div class="eval-bar-wrap">
+              <span class="eval-color red">Rot</span>
+              <div class="eval-track"><div id="bar-red"    class="bar-fill red-fill"   ></div></div>
+              <span id="val-red"    class="eval-val">0.000</span>
+            </div>
+            <div class="eval-bar-wrap">
+              <span class="eval-color blue">Blau</span>
+              <div class="eval-track"><div id="bar-blue"   class="bar-fill blue-fill"  ></div></div>
+              <span id="val-blue"   class="eval-val">0.000</span>
+            </div>
+            <div class="eval-bar-wrap">
+              <span class="eval-color yellow">Gelb</span>
+              <div class="eval-track"><div id="bar-yellow" class="bar-fill yellow-fill"></div></div>
+              <span id="val-yellow" class="eval-val">0.000</span>
+            </div>
+            <div class="eval-bar-wrap">
+              <span class="eval-color green">Gr&uuml;n</span>
+              <div class="eval-track"><div id="bar-green"  class="bar-fill green-fill" ></div></div>
+              <span id="val-green"  class="eval-val">0.000</span>
+            </div>
+          </div>
+        </details>
+
+        <!-- PGN -->
+        <details id="pgn-section">
+          <summary>PGN laden / exportieren</summary>
+          <textarea id="pgn-input" rows="5" placeholder="PGN hier einf&uuml;gen..."></textarea>
+          <div class="pgn-buttons">
+            <button id="btn-load-pgn">Laden</button>
+            <button id="btn-export-pgn">Exportieren</button>
+          </div>
+          <pre id="pgn-output"></pre>
+        </details>
+
+      </div><!-- .main-left -->
+
+      <!-- Rechte Spalte: Replay + Chat -->
+      <div class="main-right">
+
+        <div class="main-right-col">
+          <!-- Replay-Steuerung -->
+          <div id="replay-controls" class="hidden">
+            <button id="btn-replay-start" title="Anfang">&#9198;</button>
+            <button id="btn-replay-prev"  title="Zur&uuml;ck (&#8592;)">&#9664;</button>
+            <span id="replay-pos">0 / 0</span>
+            <button id="btn-replay-next"  title="Vor (&#8594;)">&#9654;</button>
+            <button id="btn-replay-end"   title="Ende">&#9197;</button>
+          </div>
+
+          <!-- Zugprotokoll -->
+          <div id="movelog">
+            <h3>Zugprotokoll</h3>
+            <ol id="movelist"></ol>
+          </div>
+
+          <!-- Top-Züge Panel -->
+          <div id="top-moves-panel" class="hidden">
+            <h3>Top-Z&uuml;ge</h3>
+            <div id="top-moves-list"></div>
+          </div>
+        </div>
+
+        <div class="main-right-col">
+          <div id="chat-panel">
+            <h3>&#128172; Chat</h3>
+            <div id="chat-messages">
+              <p class="chat-empty">Kein Spiel geladen.</p>
+            </div>
+          </div>
+        </div>
+
       </div>
+
     </main>
   </div>
 

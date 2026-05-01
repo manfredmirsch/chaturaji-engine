@@ -10,3 +10,5 @@ crates/wasm/www/pkg/
 
 # Backup-Archive
 *.tar.gz
+crates/trainer/chaturaji.db
+weights.json

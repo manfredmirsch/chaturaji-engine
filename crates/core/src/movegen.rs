@@ -81,18 +81,16 @@ impl MoveGen {
                 }
             }
 
-            // Schlagzüge
+            // Schlagzüge (aktive und Zombie-Figuren)
             for &(df, dr) in cap_dirs {
                 if let Some(to) = Self::try_sq(f + df, r + dr) {
                     if bit(to) & friendly == 0 {
                         if let Some(cap) = board.piece_at(to) {
-                            if board.active[cap.color.idx()] {
-                                let promoted = Self::promotes(mover, to);
-                                let mut mv = Move::new(from, to, mover);
-                                mv.captured = Some(cap);
-                                mv.promoted = promoted;
-                                moves.push(mv);
-                            }
+                            let promoted = Self::promotes(mover, to);
+                            let mut mv = Move::new(from, to, mover);
+                            mv.captured = Some(cap);
+                            mv.promoted = promoted;
+                            moves.push(mv);
                         }
                     }
                 }
@@ -147,7 +145,7 @@ impl MoveGen {
                 if let Some(to) = Self::try_sq(f+df, r+dr) {
                     if bit(to) & friendly != 0 { continue; }
                     let mut mv = Move::new(from, to, mover);
-                    mv.captured = board.piece_at(to).filter(|p| board.active[p.color.idx()]);
+                    mv.captured = board.piece_at(to);
                     moves.push(mv);
                 }
             }
@@ -183,7 +181,7 @@ impl MoveGen {
                     let to = sq(f as u8, r as u8);
                     if bit(to) & friendly != 0 { break; }
                     let mut mv = Move::new(from, to, mover);
-                    mv.captured = board.piece_at(to).filter(|p| board.active[p.color.idx()]);
+                    mv.captured = board.piece_at(to);
                     moves.push(mv);
                     if bit(to) & all_occ != 0 { break; } // blocked after capture
                     f += df; r += dr;

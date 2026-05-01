@@ -9,7 +9,7 @@ use chaturaji_core::board::Board;
 use chaturaji_core::notation::{move_to_str, parse_move, GameRecord};
 use chaturaji_core::piece::Color;
 use chaturaji_core::rules::Rules;
-use chaturaji_engine::search::Engine as SearchEngine;
+use chaturaji_engine::search::{Engine as SearchEngine, RankedMove};
 use network::{extract, Network};
 
 // ─── JS-facing types ──────────────────────────────────────────────────────────
@@ -37,6 +37,13 @@ pub struct MoveInfo {
     pub notation: String,
     pub captures: bool,
     pub promoted: bool,
+}
+
+#[derive(Serialize)]
+pub struct TopMove {
+    pub mv:    String,   // engine notation, e.g. "d2d3"
+    pub score: i32,      // current player's raw score for this move
+    pub pct:   u8,       // 0-100: score relative to best move (best = 100)
 }
 
 #[derive(Serialize)]
@@ -149,6 +156,32 @@ impl WasmEngine {
             used_network: self.network.is_some(),
         };
         serde_wasm_bindgen::to_value(&er).unwrap()
+    }
+
+    /// Returns the top-`n` moves at the current position as a JS array of
+    /// `{mv, score, pct}` objects.  `pct` is 0–100 with 100 = best move.
+    pub fn top_moves(&mut self, depth: u8, n: u8) -> JsValue {
+        let ranked = self.engine.top_n(&self.board, depth, n as usize);
+        let mover_idx = self.board.to_move.idx();
+
+        let best_score = ranked.first()
+            .map(|r| r.scores[mover_idx])
+            .unwrap_or(1);
+        let best_score = if best_score == 0 { 1 } else { best_score };
+
+        let top: Vec<TopMove> = ranked.iter().map(|r| {
+            let raw = r.scores[mover_idx];
+            let pct = if best_score > 0 {
+                ((raw.max(0) as f64 / best_score.max(1) as f64) * 100.0).round().min(100.0) as u8
+            } else { 0 };
+            TopMove {
+                mv:    move_to_str(&r.mv),
+                score: raw,
+                pct,
+            }
+        }).collect();
+
+        serde_wasm_bindgen::to_value(&top).unwrap()
     }
 
     pub fn engine_move(&mut self, depth: u8) -> bool {

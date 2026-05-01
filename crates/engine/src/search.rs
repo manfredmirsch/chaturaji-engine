@@ -31,6 +31,13 @@ pub struct SearchResult {
     pub nodes:      u64,
 }
 
+/// One entry in the top-N result.
+#[derive(Debug, Clone)]
+pub struct RankedMove {
+    pub mv:     Move,
+    pub scores: [i32; 4],
+}
+
 // ─── Engine ───────────────────────────────────────────────────────────────────
 
 pub struct Engine {
@@ -79,6 +86,30 @@ impl Engine {
         }
 
         result
+    }
+
+    /// Run a full search, then return the top-`n` moves at the root ranked by
+    /// the current player's score.  Child positions are looked up in the TT
+    /// (filled by the preceding iterative deepening), so this adds almost no
+    /// extra work.
+    pub fn top_n(&mut self, board: &Board, max_depth: u8, n: usize) -> Vec<RankedMove> {
+        self.search(board, max_depth);
+
+        let mover_idx = board.to_move.idx();
+        let moves     = Rules::legal_moves(board);
+
+        let mut scored: Vec<RankedMove> = moves.into_iter().map(|mv| {
+            let child  = Rules::apply_with_effects(board, mv);
+            let hash   = hash_board(&child, &self.keys);
+            let scores = self.tt.probe(hash)
+                .map(|e| e.scores)
+                .unwrap_or_else(|| evaluate(&child));
+            RankedMove { mv, scores }
+        }).collect();
+
+        scored.sort_by(|a, b| b.scores[mover_idx].cmp(&a.scores[mover_idx]));
+        scored.truncate(n);
+        scored
     }
 
     // ─── Max^n ────────────────────────────────────────────────────────────────
