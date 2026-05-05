@@ -4,31 +4,30 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Chaturaji Analyse</title>
+  <link rel="icon" type="image/x-icon" href="favicon.ico" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div id="app">
     <header>
-      <h1>&#9822; Chaturaji Analyse</h1>
-      <p class="subtitle">Ancient 4-player chess &middot; chess.com variant</p>
+      <h1>Freds Chaturaji Analyse <span id="gameNr"></span></h1>
     </header>
-
     <main>
       <div class="main-left">
 
         <!-- Brett mit Punktestand drum herum -->
         <div id="board-area">
           <div id="score-top">
-            <div class="score blue">&#128309; <span class="score-name">Blau</span><span id="score-blue">0</span></div>
-            <div class="score yellow">&#128993; <span class="score-name">Gelb</span><span id="score-yellow">0</span></div>
+            <div class="score blue"><span id="score-blue" class="score-pts">0</span><span class="score-name">Blau</span><span class="score-time" data-color="blue"></span></div>
+            <div class="score yellow"><span class="score-name">Gelb</span><span class="score-time" data-color="yellow"></span><span id="score-yellow" class="score-pts">0</span></div>
           </div>
           <div id="board-container">
-            <canvas id="board" width="560" height="560"></canvas>
+            <canvas id="board" width="660" height="660"></canvas>
             <div id="overlay-msg" class="hidden"></div>
           </div>
           <div id="score-bottom">
-            <div class="score red">&#128308; <span class="score-name">Rot</span><span id="score-red">0</span></div>
-            <div class="score green">&#128994; <span class="score-name">Gr&uuml;n</span><span id="score-green">0</span></div>
+            <div class="score red"><span id="score-red" class="score-pts">0</span><span class="score-name">Rot</span><span class="score-time" data-color="red"></span></div>
+            <div class="score green"><span class="score-name">Gr&uuml;n</span><span class="score-time" data-color="green"></span><span id="score-green" class="score-pts">0</span></div>
           </div>
         </div>
 
@@ -45,20 +44,27 @@
               <input type="file" id="analysis-json-input" accept=".json">
             </label>
             <div id="game-info"></div>
+            <div id="game-filter-box">
+              <input type="text" id="game-filter" placeholder="Filter: Spielernamen (Leerzeichen = UND) &hellip;" />
+              <select id="game-filter-color" title="Farbe des ersten genannten Spielers">
+                <option value="">Farbe: alle</option>
+                <option value="0">Rot</option>
+                <option value="1">Blau</option>
+                <option value="2">Gelb</option>
+                <option value="3">Gr&uuml;n</option>
+              </select>
+              <select id="game-filter-placement" title="Platzierung des ersten genannten Spielers">
+                <option value="">Platz: alle</option>
+                <option value="1">1. Platz</option>
+                <option value="2">2. Platz</option>
+                <option value="3">3. Platz</option>
+                <option value="4">4. Platz</option>
+              </select>
+              <span id="game-filter-count"></span>
+            </div>
+            <ul id="game-filter-results"></ul>
           </div>
         </details>
-
-        <!-- Steuerung -->
-        <div id="controls">
-          <div class="control-group">
-            <label>Suchtiefe</label>
-            <input id="depth" type="range" min="1" max="6" value="3" />
-            <span id="depth-val">3</span>
-          </div>
-          <button id="btn-engine-move">&#129302; Engine zieht</button>
-          <button id="btn-undo">&#8617; R&uuml;ckg&auml;ngig</button>
-          <button id="btn-reset">&#128260; Neu starten</button>
-        </div>
 
         <!-- Status -->
         <div id="status">
@@ -142,6 +148,18 @@
         </div>
 
         <div class="main-right-col">
+          <!-- Steuerung (Engine, Suchtiefe, Undo, Reset) -->
+          <div id="controls">
+            <div class="control-group">
+              <label>Suchtiefe</label>
+              <input id="depth" type="range" min="1" max="6" value="3" />
+              <span id="depth-val">3</span>
+            </div>
+            <button id="btn-engine-move" title="Engine zieht">&#129302;</button>
+            <button id="btn-undo" title="Rückgängig">&#8617;</button>
+            <button id="btn-reset" title="Neu starten">&#128260;</button>
+          </div>
+
           <div id="chat-panel">
             <h3>&#128172; Chat</h3>
             <div id="chat-messages">

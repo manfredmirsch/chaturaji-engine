@@ -10,6 +10,8 @@
 //!   4. Checkpoint alle N Partien in SQLite speichern
 
 use rand::SeedableRng;
+use chaturaji_core::zobrist::ZobristKeys;
+use chaturaji_engine::book::OpeningBook;
 use crate::db::{self, GameRecord};
 use crate::network::{Network, Traces};
 use crate::selfplay::{final_targets, play_game, SelfPlayConfig};
@@ -34,6 +36,8 @@ pub struct TrainConfig {
     pub selfplay: SelfPlayConfig,
     /// Lernraten-Abfall pro Checkpoint-Intervall
     pub lr_decay: f32,
+    /// Optionales Eröffnungsbuch für die Self-Play-Eröffnungen.
+    pub book: Option<OpeningBook>,
 }
 
 impl Default for TrainConfig {
@@ -48,6 +52,7 @@ impl Default for TrainConfig {
             momentum:    0.9,
             selfplay:    SelfPlayConfig::default(),
             lr_decay:    0.99,
+            book:        None,
         }
     }
 }
@@ -59,6 +64,11 @@ pub fn run(cfg: TrainConfig) {
     println!("Partien   : {}", cfg.total_games);
     println!("\u{03bb}         : {}", cfg.lambda);
     println!("Lernrate  : {}", cfg.lr);
+    match &cfg.book {
+        Some(b) => println!("Buch      : {} Stellungen, max {} Halbzüge",
+                            b.len(), cfg.selfplay.book_max_plies),
+        None    => println!("Buch      : (kein Eröffnungsbuch)"),
+    }
     println!("{}", "-".repeat(60));
 
     let conn = db::open(&cfg.db_path).expect("Datenbank konnte nicht geöffnet werden");
@@ -85,6 +95,7 @@ pub fn run(cfg: TrainConfig) {
 
     let mut rng     = rand::rngs::SmallRng::seed_from_u64(42);
     let mut epsilon = cfg.selfplay.epsilon_start;
+    let zkeys       = ZobristKeys::new();
 
     // Akkumulatoren für Logging
     let mut acc_loss  = 0.0f32;
@@ -93,7 +104,8 @@ pub fn run(cfg: TrainConfig) {
 
     for game_idx in 1..=cfg.total_games {
         // 1. Self-Play-Partie
-        let result = play_game(&net, &cfg.selfplay, epsilon, &mut rng);
+        let result = play_game(&net, &cfg.selfplay, epsilon, &mut rng,
+                               cfg.book.as_ref(), &zkeys);
         let final_target = final_targets(&result.final_board);
         let n_steps = result.steps.len();
 

@@ -72,13 +72,26 @@ fn parse_game(text: &str) -> Option<ParsedGame> {
     let mut outcome_opt: Option<[f32; 4]> = None;
     let mut move_text = String::new();
 
+    // chess.com-Headers können mehrzeilig sein (z.B. `[StartFen4 "..."]` läuft
+    // über alle 14 Brett-Reihen). Wir tracken explizit, ob wir noch in einem
+    // Tag-Block sind, sonst rutschen die FEN-Zeilen als „Züge" durch.
+    let mut in_header = false;
     for line in text.lines() {
         let line = line.trim();
-        if line.starts_with("[Result ") {
-            if let Some(val) = extract_tag_value(line) {
-                outcome_opt = parse_result_tag(&val);
+        if in_header {
+            if line.ends_with(']') { in_header = false; }
+            continue;
+        }
+        if line.starts_with('[') {
+            if line.starts_with("[Result ") {
+                if let Some(val) = extract_tag_value(line) {
+                    outcome_opt = parse_result_tag(&val);
+                }
             }
-        } else if !line.starts_with('[') && !line.is_empty() {
+            if !line.ends_with(']') { in_header = true; }
+            continue;
+        }
+        if !line.is_empty() {
             move_text.push(' ');
             move_text.push_str(line);
         }
@@ -122,7 +135,7 @@ fn tokenize_moves(text: &str) -> Vec<&str> {
 
 /// Wandelt externe chess.com-Koordinaten in einen internen Feldindex um.
 /// Externe Datei d-k → interne 0-7; externer Rang 4-11 → interne 0-7.
-fn to_internal_sq(file: char, rank: u8) -> Option<u8> {
+pub fn to_internal_sq(file: char, rank: u8) -> Option<u8> {
     if rank < 4 || rank > 11 { return None; }
     let f: u8 = match file {
         'd' => 0, 'e' => 1, 'f' => 2, 'g' => 3,
@@ -137,7 +150,7 @@ fn to_internal_sq(file: char, rank: u8) -> Option<u8> {
 ///
 /// Unterstützte Formate:
 ///   "g5-g6", "Bf4-g5+", "Nf6xe8", "Kh9xBg10#", "e4-d4=R"
-fn parse_move_token(s: &str) -> Option<(u8, u8)> {
+pub fn parse_move_token(s: &str) -> Option<(u8, u8)> {
     // Schach/Matt-Suffix und Umwandlung abschneiden
     let s = s.trim_end_matches(['#', '+']);
     let s = if let Some(p) = s.rfind('=') { &s[..p] } else { s };
@@ -262,5 +275,39 @@ mod tests {
         assert!(parse_move_token("R").is_none());
         assert!(parse_move_token("..").is_none());
         assert!(parse_move_token("*").is_none());
+    }
+
+    /// Regression: chess.com-PGN hat einen mehrzeiligen `[StartFen4 "..."]`-
+    /// Header. Wenn `parse_game` nur die erste Zeile als Header erkennt,
+    /// rutschen die folgenden 14 FEN-Reihen als „Züge" durch und verbrauchen
+    /// die Token-Quote, bevor die echten Halbzüge geparst werden.
+    #[test]
+    fn parse_game_handles_multiline_startfen_header() {
+        let pgn = "\
+[GameNr \"1\"]
+[Variant \"FFA\"]
+[StartFen4 \"R-0,0,0,0-0,0,0,0-0,0,0,0-0,0,0,0-0-{'dim':'8x8','boxOffset':1}-
+x,x,x,x,x,x,x,x,x,x,x,x,x,x/
+x,x,x,x,x,x,x,x,x,x,x,x,x,x/
+x,x,x,bR,bP,2,yK,yB,yN,yR,x,x,x/
+x,x,x,bN,bP,2,yP,yP,yP,yP,x,x,x/
+x,x,x,bB,bP,6/
+x,x,x,bK,bP,6/
+x,x,x,6,gP,gK,x,x,x/
+x,x,x,6,gP,gB,x,x,x/
+x,x,x,rP,rP,rP,rP,2,gP,gN,x,x,x/
+x,x,x,rR,rN,rB,rK,2,gP,gR,x,x,x/
+x,x,x,x,x,x,x,x,x,x,x,x,x,x/
+x,x,x,x,x,x,x,x,x,x,x,x,x,x\"]
+[Result \"A: 10 - B: 12 - C: 8 - D: 11\"]
+
+1. f5-f6 .. e9-f9 .. h10-h9 .. j6-i6
+2. e5-e6 .. e10-f10 .. h9-h8 .. j5-i5
+";
+        let g = parse_game(pgn).expect("multi-line header must not break parse_game");
+        // 8 Halbzüge im Text → 8 Stellungen aufgezeichnet
+        assert_eq!(g.positions.len(), 8,
+            "got {} positions, expected 8 — Header-Filter greift nicht durch?",
+            g.positions.len());
     }
 }

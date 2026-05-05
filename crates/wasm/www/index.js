@@ -1,10 +1,13 @@
 // ─── WASM bootstrap ──────────────────────────────────────────────────────────
+// Die gesamte Spiel-Logik (Zuggenerierung, Suche, Bewertung) liegt in Rust und
+// wird per wasm-bindgen exportiert. `engine` hält den einzigen globalen Spiel-
+// zustand; alles UI-seitige (Highlights, Animation, Chat) lebt in dieser Datei.
 import init, { WasmEngine } from './pkg/chaturaji_wasm.js';
 await init();
 const engine = new WasmEngine();
 
 // ─── Konstanten ───────────────────────────────────────────────────────────────
-const BOARD_SIZE = 560;
+const BOARD_SIZE = 660;
 const CELL = BOARD_SIZE / 8;
 const MOVE_ANIM_MS = 180; // Animationsdauer in ms (0 = deaktiviert)
 
@@ -13,7 +16,6 @@ const COLOR_HEX = {
 };
 const BOARD_LIGHT = '#f0d9b5';
 const BOARD_DARK  = '#b58863';
-const GLYPH = { King:'\u265A', Bishop:'\u265D', Knight:'\u265E', Boat:'\u26F5', Pawn:'\u265F' };
 
 // ─── SVG Bild-Cache ───────────────────────────────────────────────────────────
 // Dateien unter: www/pieces/{farbe}-{figur}.svg (z.B. red-king.svg)
@@ -46,6 +48,9 @@ const unloadBtn  = document.getElementById('btn-unload-net');
 depthInput.addEventListener('input', () => { depthVal.textContent = depthInput.value; });
 
 // ─── Zustand ──────────────────────────────────────────────────────────────────
+// `state` ist eine Momentaufnahme aus der Engine (Felder, Punkte, aktive
+// Spieler, Spielende). Wird nach jedem Zug per `engine.get_state()` neu geholt
+// statt inkrementell gepflegt – die Rust-Seite bleibt die Single Source of Truth.
 let selected   = null;
 let legalMoves = [];
 let state      = null;
@@ -63,6 +68,9 @@ function draw() {
   updateNetEval();
 }
 
+// Engine indiziert Felder als rank*8 + file mit a1=0, h8=63. Canvas-Y wächst
+// nach unten, daher der Flip (7 - rank): rank 0 (Reihe 1) liegt am unteren
+// Rand. Die UI rendert immer aus Sicht von Rot unten — keine Brettdrehung.
 function sq2xy(sq) {
   return [sq % 8 * CELL, (7 - Math.floor(sq / 8)) * CELL];
 }
@@ -110,24 +118,22 @@ function drawHighlights() {
   }
 }
 
+// `isActive` = ist die Farbe noch im Spiel? Ausgeschiedene Spieler bleiben
+// als gedimmte Steine sichtbar (sie können noch geschlagen werden und zählen
+// weiter Punkte für den Schlagenden).
 function drawOnePiece(piece, x, y, isActive) {
-  ctx.globalAlpha = isActive ? 1.0 : 0.3;
   const img = getPieceImage(piece.color, piece.kind);
-  if (img) {
-    const pad = CELL * 0.06;
-    ctx.drawImage(img, x + pad, y + pad, CELL - pad * 2, CELL - pad * 2);
-  } else {
-    ctx.fillStyle = COLOR_HEX[piece.color];
-    ctx.beginPath();
-    ctx.arc(x + CELL / 2, y + CELL / 2, CELL * 0.38, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#111';
-    ctx.font = Math.round(CELL * 0.6) + 'px serif';
-    ctx.fillText(GLYPH[piece.kind] || '?', x + CELL / 2, y + CELL / 2 + 1);
-  }
+  if (!img) return; // SVG noch nicht geladen → in dem Frame nichts zeichnen,
+                    // onload löst danach automatisch ein draw() aus.
+  ctx.globalAlpha = isActive ? 1.0 : 0.3;
+  const pad = CELL * 0.06;
+  ctx.drawImage(img, x + pad, y + pad, CELL - pad * 2, CELL - pad * 2);
   ctx.globalAlpha = 1;
 }
 
+// `skipSq` lässt ein Feld ungezeichnet — wird während einer Animation für
+// das Startfeld der wandernden Figur verwendet, damit sie nicht doppelt
+// (statisch + animiert) erscheint.
 function drawPieces(skipSq = -1) {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -199,6 +205,8 @@ function updateStatus() {
 }
 
 // ─── Netz-Bewertungsbalken ────────────────────────────────────────────────────
+// Liefert `null`, wenn kein neuronales Netz geladen ist — dann arbeitet die
+// Engine rein mit Alpha-Beta und es gibt nichts anzuzeigen.
 function updateNetEval() {
   const vals = engine.evaluate_position();
   if (!vals) { netBars.classList.add('hidden'); return; }
@@ -212,9 +220,14 @@ function updateNetEval() {
 }
 
 // ─── Klick-Interaktion ────────────────────────────────────────────────────────
+// Erster Klick wählt eine eigene Figur aus, zweiter Klick zieht (oder hebt
+// die Auswahl wieder auf). Während einer Top-Zug-Vorschau frisst der erste
+// Klick nur die Vorschau, ohne ein neues Feld zu selektieren.
 canvas.addEventListener('click', (e) => {
   if (state && state.is_over) return;
   if (previewMv !== null) { clearPreview(); draw(); return; }
+  // Skalierung Canvas-Pixel ↔ CSS-Pixel: das Brett kann per CSS verkleinert
+  // sein, intern wird aber immer mit BOARD_SIZE gerechnet.
   const rect = canvas.getBoundingClientRect();
   const x = (e.clientX - rect.left) * (BOARD_SIZE / rect.width);
   const y = (e.clientY - rect.top)  * (BOARD_SIZE / rect.height);
@@ -249,10 +262,15 @@ canvas.addEventListener('click', (e) => {
   draw();
 });
 
+// H\u00E4ngt einen Halbzug an die Zugliste an. Vier Halbz\u00FCge bilden eine "Runde"
+// (Rot, Blau, Gelb, Gr\u00FCn) und werden in einem einzigen <li> zusammengefasst.
+// F\u00FCr den ersten Zug einer Runde wird ein neues <li> angelegt, danach wird
+// der gesamte Zeileninhalt re-gerendert (einfacher als einzelne Zellen zu
+// patchen, kostet kaum etwas bei nur 4 Spalten).
 function appendMoveLog(mv) {
   const text = mv.notation
     + (mv.captures ? ' \u00D7' : '')
-    + (mv.promoted ? ' =B' : '');
+    + (mv.promoted ? ' =B' : ''); // chaturaji: Bauer wird beim Promotionsfeld zum Boat (=B)
   const entry = { text, color: PLY_COLORS[plyCount % 4] };
   moveLogEntries.push(entry);
   if (plyCount % 4 === 0) {
@@ -273,6 +291,9 @@ document.getElementById('btn-engine-move').addEventListener('click', () => {
   clearPreview();
   const depth = parseInt(depthInput.value);
   engineInfo.textContent = 'Suche bei Tiefe ' + depth + '\u2026';
+  // setTimeout(…, 10) gibt dem Browser einen Tick, um den "Suche…"-Text
+  // anzuzeigen, bevor die synchrone (und potenziell sekundenlange) WASM-
+  // Suche den Main-Thread blockiert.
   setTimeout(() => {
     const t0  = performance.now();
     const res = engine.best_move(depth);
@@ -319,11 +340,17 @@ document.getElementById('btn-reset').addEventListener('click', () => {
   selected = null; legalMoves = [];
   engineInfo.textContent = '';
   replayMoves = []; replayIdx = 0; replayEvals = [];
+  allForfeits = []; appliedForfeitStack.length = 0; forfeitsAppliedAtIdx.length = 0;
+  playerClocks = [null, null, null, null];
+  prevPlayerClocks.length = 0;
+  refreshAllScoreTimes();
   document.getElementById('replay-controls').classList.add('hidden');
   document.getElementById('top-moves-panel').classList.add('hidden');
   gameChat = []; gameChatUidToColor = {}; gameChatIdx = 0; maxChatFullMoveNr = 0;
   document.getElementById('chat-messages').innerHTML = '<p class="chat-empty">Kein Spiel geladen.</p>';
   document.getElementById('game-info').innerHTML = '';
+  const gameNrEl = document.getElementById('gameNr');
+  if (gameNrEl) gameNrEl.textContent = '';
   const defaults = ['Rot','Blau','Gelb','Grün'];
   ['red','blue','yellow','green'].forEach((c, i) => {
     const el = document.querySelector('.score.' + c + ' .score-name');
@@ -387,6 +414,36 @@ let replayMoves = [];
 let replayIdx   = 0;
 let replayEvals = [];   // vorberechnete Analysedaten (game_analysis/*.json)
 
+// Forfeits/Resignations aus dem Chat (Engine erkennt nur Königsschläge).
+// `appliedForfeitStack` = bereits angewandte Forfeits in chronologischer Reihen-
+// folge; `forfeitsAppliedAtIdx[i]` = wie viele Forfeits direkt vor dem Zug an
+// replayIdx=i angewandt wurden (für sauberes Undo).
+let allForfeits          = [];
+let appliedForfeitStack  = [];
+let forfeitsAppliedAtIdx = [];
+
+// Verbleibende Bedenkzeit pro Spieler in ms (null = noch kein Zug gespielt).
+// `prevPlayerClocks[idx]` speichert den vorherigen Wert für sauberes Undo:
+//   { pIdx: 0-3, prev: alter ms-Wert oder null }
+let playerClocks     = [null, null, null, null];
+let prevPlayerClocks = [];
+
+const COLOR_NAMES = ['red', 'blue', 'yellow', 'green'];
+
+function formatClock(ms) {
+  if (ms == null) return '';
+  return (Math.floor(ms / 100) / 10).toFixed(1); // truncate auf 1 Nachkommastelle
+}
+
+function updateScoreTime(pIdx) {
+  const el = document.querySelector('.score-time[data-color="' + COLOR_NAMES[pIdx] + '"]');
+  if (el) el.textContent = formatClock(playerClocks[pIdx]);
+}
+
+function refreshAllScoreTimes() {
+  for (let i = 0; i < 4; i++) updateScoreTime(i);
+}
+
 // ─── Zugprotokoll-Zustand ─────────────────────────────────────────────────────
 let plyCount = 0;
 const moveLogEntries = []; // {text, color, score?}
@@ -406,7 +463,11 @@ function roundHtml(entries) {
   return moves + scores;
 }
 
-// chess.com 14×14 koordinate → Engine a1-h8 (offset = 3)
+// chess.com nutzt für Chaturaji ein 14×14-Brett (a–n × 1–14): die äußeren
+// 3 Reihen pro Seite sind Startbereiche der vier Spieler, das eigentliche
+// Spielfeld ist das innere 8×8 (d4–k11 in cc-Notation = a1–h8 in Engine-
+// Notation). Daher Offset 3 in beide Richtungen. Felder außerhalb des
+// inneren Bretts liefern null — solche Züge kann die Engine nicht abbilden.
 function ccSqToEngine(sq) {
   const file = sq.charCodeAt(0) - 97;        // a=0 … n=13
   const rank = parseInt(sq.slice(1), 10);    // 1-14
@@ -442,6 +503,13 @@ function ccMoveToDisplay(cc) {
   return piece + from + (hasX ? 'x' : '-') + to + suffix;
 }
 
+// Parst chess.com-PGN4. Format-Eigenheiten:
+//  - Header-Zeilen `[Tag "..."]` werden vorab entfernt.
+//  - Rundenzähler stehen als `1.`, `2.` … (eine Runde = 4 Halbzüge).
+//  - `--` markiert einen Spieler, der aussetzen muss (eliminiert / no-move).
+//  - Optionaler Kommentar `{date=...}` direkt nach dem Zug enthält den
+//    Server-Zeitstempel des Halbzugs — wird für die Chat-Synchronisation
+//    benötigt (Nachrichten erscheinen, sobald ihr `time` ≤ Zug-`time`).
 function parsePgn4Moves(pgn4) {
   const movesText = pgn4.replace(/^\[.*\]\s*$/gm, '').trim();
   const pattern = /(\d+)\.+|(--|[KBNR]?[a-n]\d{1,2}[-x][KBNR]?[a-n]\d{1,2}[+#]?)\s*(?:\{([^}]*)\})?/g;
@@ -452,14 +520,16 @@ function parsePgn4Moves(pgn4) {
     if (m[1] !== undefined) { currentFullMoveNr = parseInt(m[1]); continue; }
     const cc = m[2];
     const comment = m[3] || '';
-    const dateMatch = comment.match(/date=(\S+)/);
-    const time = dateMatch ? new Date(dateMatch[1]).getTime() : null;
+    const dateMatch  = comment.match(/date=(\S+)/);
+    const clockMatch = comment.match(/clock=(\d+)/);
+    const time  = dateMatch  ? new Date(dateMatch[1]).getTime() : null;
+    const clock = clockMatch ? parseInt(clockMatch[1], 10)      : null; // ms verbleibend nach diesem Zug
     if (cc === '--') {
-      moves.push({ display: '--', engine: '--', time, fullMoveNr: currentFullMoveNr });
+      moves.push({ display: '--', engine: '--', time, clock, fullMoveNr: currentFullMoveNr });
     } else {
       const eng = ccMoveToEngine(cc);
       const dsp = ccMoveToDisplay(cc);
-      if (eng && dsp) moves.push({ display: dsp, engine: eng, time, fullMoveNr: currentFullMoveNr });
+      if (eng && dsp) moves.push({ display: dsp, engine: eng, time, clock, fullMoveNr: currentFullMoveNr });
     }
   }
   return moves;
@@ -498,6 +568,9 @@ function applyPreview(t, row) {
   const fromSq = engineSqIdx(t.mv.slice(0, 2));
   const toSq   = engineSqIdx(t.mv.slice(2, 4));
   const movingPiece = state?.squares[fromSq] ?? null;
+  // Vorberechnete Top-Züge enthalten keinen Promotionssuffix; falls der reine
+  // Zug abgelehnt wird, ist es vermutlich eine Bauernumwandlung — Retry mit
+  // 'p' (Promotion zu Boat, einzige Promotion in Chaturaji).
   if (engine.apply_move(t.mv) || engine.apply_move(t.mv + 'p')) {
     previewMv  = t.mv;
     previewRow = row;
@@ -521,6 +594,7 @@ function renderTopMoves() {
   const COLOR_CLASS = ['red', 'blue', 'yellow', 'green'];
   const playerIdx   = ['Red', 'Blue', 'Yellow', 'Green'].indexOf(st.to_move);
   const colorClass  = COLOR_CLASS[playerIdx] ?? '';
+  const barColor    = COLOR_HEX[st.to_move] ?? '#f0c040';
 
   list.innerHTML = '';
   previewMv = null; previewRow = null;
@@ -530,7 +604,7 @@ function renderTopMoves() {
     row.className = 'top-move-row';
     row.innerHTML =
       `<span class="top-move-notation ${colorClass}">${engineMoveToDisplay(t.mv)}</span>` +
-      `<div class="top-move-bar-wrap"><div class="top-move-bar" style="width:${t.pct}%"></div></div>` +
+      `<div class="top-move-bar-wrap"><div class="top-move-bar" style="width:${t.pct}%;background:${barColor}"></div></div>` +
       `<span class="top-move-pct">${t.pct}%</span>`;
     row.addEventListener('click', () => applyPreview(t, row));
     list.appendChild(row);
@@ -539,10 +613,14 @@ function renderTopMoves() {
 }
 
 // ─── Chat progressiv rendern ──────────────────────────────────────────────────
+// Chat-Nachrichten erscheinen synchron zum Replay: jede Nachricht hat einen
+// Server-Zeitstempel `time`, und sobald ein nachgespielter Zug einen späteren
+// `time` hat, werden alle dazwischen liegenden Nachrichten angefügt. So
+// entsteht beim Vor-/Zurückblättern dieselbe zeitliche Reihenfolge wie live.
 let gameChat = [];
 let gameChatUidToColor = {};
 let gameChatIdx = 0; // Index der nächsten noch nicht angezeigten Nachricht
-let maxChatFullMoveNr = 0;
+let maxChatFullMoveNr = 0; // letzte Runde, in der überhaupt gechattet wurde
 
 function buildChatMsgEl(msg) {
   const div = document.createElement('div');
@@ -577,6 +655,23 @@ function renderChatUpTo(upToTime) {
   if (added) container.scrollTop = container.scrollHeight;
 }
 
+// Aus Chat-Nachrichten Forfeits/Resignations extrahieren — Eliminierungen, die
+// nicht durch Königsschlag passieren und die die Engine sonst nicht erkennt.
+// Königsschlag-Mate ("X checkmated!") ignorieren wir, das macht die Engine selbst.
+function extractForfeits(chat) {
+  const out = [];
+  for (const m of chat) {
+    if (typeof m?.message !== 'string' || m.fullMoveNr == null) continue;
+    const match = m.message.match(/^(Red|Blue|Yellow|Green)\s+(forfeits|resigned)/i);
+    if (match) {
+      const c = match[1].toLowerCase();
+      out.push({ fmn: m.fullMoveNr, color: c[0].toUpperCase() + c.slice(1) });
+    }
+  }
+  out.sort((a, b) => a.fmn - b.fmn);
+  return out;
+}
+
 function initChatView(chat, uidToColor) {
   maxChatFullMoveNr = Math.max(0, ...chat.map(m => m.fullMoveNr || 0));
   gameChat = chat.filter(m => m.type !== 'info' || m.fullMoveNr).sort((a, b) => (a.time ?? 0) - (b.time ?? 0));
@@ -606,6 +701,9 @@ function loadGame(gameData) {
     if (username) players.push({ color: colors[i - 1].toLowerCase(), username });
   }
 
+  const gameNrEl = document.getElementById('gameNr');
+  if (gameNrEl) gameNrEl.textContent = gameData.gameNr ? '#' + gameData.gameNr : '';
+
   const gameInfo = document.getElementById('game-info');
   gameInfo.innerHTML =
     'Spiel #' + (gameData.gameNr || '?') +
@@ -619,12 +717,21 @@ function loadGame(gameData) {
   const scoreColors = ['red','blue','yellow','green'];
   for (let i = 1; i <= 4; i++) {
     const username = gameData['username' + i];
+    const rating   = gameData['rating'   + i];
     const el = document.querySelector('.score.' + scoreColors[i-1] + ' .score-name');
-    if (el && username) el.textContent = username;
+    if (el && username) {
+      el.textContent = rating ? `${username} (${rating})` : username;
+    }
   }
 
   replayMoves = parsePgn4Moves(pgn4);
   replayIdx   = 0;
+  allForfeits = extractForfeits(chat);
+  appliedForfeitStack.length = 0;
+  forfeitsAppliedAtIdx.length = 0;
+  playerClocks = [null, null, null, null];
+  prevPlayerClocks.length = 0;
+  refreshAllScoreTimes();
 
   previewMv = null; previewRow = null;
   engine.reset();
@@ -690,8 +797,26 @@ function replayApplyNext() {
   if (replayIdx >= replayMoves.length) return;
   const mv = replayMoves[replayIdx];
 
+  // Vor diesem Zug noch ausstehende Forfeits/Resignations anwenden, damit die
+  // Engine `to_move` korrekt weiterschiebt (sonst hängt sie auf einem
+  // ausgestiegenen Spieler fest und alle Folgezüge laufen ins Leere).
+  let forfeitsAppliedHere = 0;
+  for (const f of allForfeits) {
+    if (f.fmn <= (mv.fullMoveNr ?? Infinity) && !appliedForfeitStack.includes(f)) {
+      if (engine.forfeit_color(f.color)) {
+        appliedForfeitStack.push(f);
+        forfeitsAppliedHere++;
+      }
+    }
+  }
+  forfeitsAppliedAtIdx[replayIdx] = forfeitsAppliedHere;
+
   // Synthetische '--' für ausgeschiedene Spieler einfügen, damit die
   // Rundengruppierung (4 Züge pro Zeile) auch nach Eliminierungen stimmt.
+  // Beispiel: Blau ist eliminiert → Engine erwartet als nächstes Gelb. Damit
+  // die Gelb-Notation in der Gelb-Spalte landet, schiebt die Schleife einen
+  // '--'-Eintrag in der Blau-Spalte vor. `safety < 3` verhindert eine
+  // Endlosschleife, falls der Engine-Zustand inkonsistent zur Zugliste wird.
   const stBefore = engine.get_state();
   const playerIdx = PLY_COLORS.indexOf(stBefore.to_move.toLowerCase());
   let safety = 0;
@@ -714,7 +839,20 @@ function replayApplyNext() {
     fromSq = engineSqIdx(mv.engine.slice(0, 2));
     toSq   = engineSqIdx(mv.engine.slice(2, 4));
     movingPiece = state?.squares[fromSq] ?? null;
+    // Promotionsfallback (siehe applyPreview): chess.com-PGN4 markiert
+    // Bauernumwandlungen nicht explizit, daher ggf. mit 'p' nachreichen.
     engine.apply_move(mv.engine) || engine.apply_move(mv.engine + 'p');
+  }
+
+  // Bedenkzeit-Anzeige des ziehenden Spielers aktualisieren (nur wenn der
+  // PGN-Kommentar einen clock-Wert mitliefert). Vorherigen Wert für Undo merken.
+  if (mv.clock != null && movingPiece) {
+    const pIdx = COLOR_NAMES.indexOf(movingPiece.color.toLowerCase());
+    if (pIdx >= 0) {
+      prevPlayerClocks[replayIdx] = { pIdx, prev: playerClocks[pIdx] };
+      playerClocks[pIdx] = mv.clock;
+      updateScoreTime(pIdx);
+    }
   }
 
   const score = replayEvals[replayIdx]?.score ?? null;
@@ -733,6 +871,9 @@ function replayApplyNext() {
   replayIdx++;
   updateReplayPos();
   selected = null; legalMoves = [];
+  // Sobald die letzte Runde mit Chat erreicht ist, alle restlichen Nachrichten
+  // freigeben — sonst würden Post-Game-Kommentare (deren `time` nach dem
+  // letzten Zug liegt) bis zum Spielende stumm bleiben.
   const chatUpTo = (maxChatFullMoveNr > 0 && mv.fullMoveNr >= maxChatFullMoveNr) ? Infinity : mv.time;
   if (chatUpTo != null) renderChatUpTo(chatUpTo);
 
@@ -749,6 +890,23 @@ function replayUndoPrev() {
   if (replayMoves[replayIdx].engine !== '--') {
     engine.undo();
   }
+  // Forfeits zurücknehmen, die unmittelbar vor diesem Zug angewandt wurden.
+  // Reihenfolge im Engine-History-Stack: …, forfeit_n, …, forfeit_1, move →
+  // erst der move (oben) wurde gerade gepoppt, jetzt rückwärts die Forfeits.
+  const fc = forfeitsAppliedAtIdx[replayIdx] || 0;
+  for (let i = 0; i < fc; i++) {
+    engine.undo();
+    appliedForfeitStack.pop();
+  }
+  forfeitsAppliedAtIdx[replayIdx] = 0;
+
+  // Bedenkzeit zurückspulen
+  const pc = prevPlayerClocks[replayIdx];
+  if (pc) {
+    playerClocks[pc.pIdx] = pc.prev;
+    updateScoreTime(pc.pIdx);
+    delete prevPlayerClocks[replayIdx];
+  }
 
   // Letzten echten Zug entfernen
   plyCount--;
@@ -760,7 +918,9 @@ function replayUndoPrev() {
     li.innerHTML = roundHtml(moveLogEntries.slice(Math.floor(plyCount / 4) * 4, plyCount));
   }
 
-  // Vorausgehende synthetische '--'-Einträge ebenfalls entfernen
+  // Vorausgehende synthetische '--'-Einträge ebenfalls entfernen — sie
+  // wurden in replayApplyNext() hinzugefügt und haben kein Gegenstück in
+  // der Engine, dürfen also nicht "übrig bleiben".
   while (moveLogEntries.length > 0 && moveLogEntries[moveLogEntries.length - 1].text === '--') {
     plyCount--;
     moveLogEntries.pop();
@@ -791,6 +951,11 @@ document.getElementById('btn-replay-start').addEventListener('click', () => {
   moveList.innerHTML = '';
   plyCount = 0; moveLogEntries.length = 0;
   replayIdx = 0;
+  appliedForfeitStack.length = 0;
+  forfeitsAppliedAtIdx.length = 0;
+  playerClocks = [null, null, null, null];
+  prevPlayerClocks.length = 0;
+  refreshAllScoreTimes();
   selected = null; legalMoves = [];
   gameChatIdx = 0;
   document.getElementById('chat-messages').innerHTML = '';
@@ -805,12 +970,123 @@ document.getElementById('btn-replay-end').addEventListener('click', () => {
   while (replayIdx < replayMoves.length) replayApplyNext();
 });
 
+// Pfeiltasten als Replay-Navigation – aber nur wenn der Fokus nicht in
+// einem Eingabefeld liegt (sonst kollidiert es mit normalem Cursor-Movement
+// im PGN-Textarea).
 document.addEventListener('keydown', (e) => {
   if (replayMoves.length === 0) return;
   if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return;
   if (e.key === 'ArrowRight') { e.preventDefault(); replayApplyNext(); }
   if (e.key === 'ArrowLeft')  { e.preventDefault(); replayUndoPrev();  }
 });
+
+// ─── Spiel-Filter (games_index.json) ─────────────────────────────────────────
+let gamesIndex = []; // [{file, gameNr, date, result, players, ratings}, ...]
+
+function renderGameFilterResults() {
+  const input    = document.getElementById('game-filter');
+  const colorSel = document.getElementById('game-filter-color');
+  const placeSel = document.getElementById('game-filter-placement');
+  const list     = document.getElementById('game-filter-results');
+  const count    = document.getElementById('game-filter-count');
+  if (!input || !list) return;
+  const tokens = input.value.toLowerCase().split(/\s+/).filter(t => t.length > 0);
+  // "" → keine Auswahl. Empty values treated as "no filter" via NaN.
+  const colorIdx  = colorSel && colorSel.value !== '' ? parseInt(colorSel.value, 10) : NaN;
+  const placement = placeSel && placeSel.value !== '' ? parseInt(placeSel.value, 10) : NaN;
+
+  // Drei UND-verknüpfte Filter:
+  //   1. Jeder Suchtoken muss als Substring in irgendeinem Spielernamen vorkommen.
+  //   2. Falls Farbe gesetzt UND mind. ein Token getippt → der erste Token muss
+  //      genau zum Spieler in diesem Farb-Slot passen.
+  //   3. Falls Platzierung gesetzt → der „erste Spieler" muss diesen Platz haben.
+  //      Erster Spieler = Spieler im Farb-Slot (falls gesetzt) ODER erster
+  //      Slot, der zum ersten Token passt.
+  const matches = gamesIndex.filter(entry => {
+    const names = entry.players.map(p => (p || '').toLowerCase());
+
+    // 1. Namen-AND
+    if (!tokens.every(tok => names.some(n => n.includes(tok)))) return false;
+
+    // 2. Farbe verankert den ersten Token an einen bestimmten Slot.
+    if (!isNaN(colorIdx) && tokens.length > 0) {
+      if (!names[colorIdx].includes(tokens[0])) return false;
+    }
+
+    // 3. Platzierung des „ersten Spielers".
+    if (!isNaN(placement)) {
+      const slot = !isNaN(colorIdx)         ? colorIdx
+                 : tokens.length > 0        ? names.findIndex(n => n.includes(tokens[0]))
+                 : -1;
+      if (slot < 0) return false; // ohne Anker keine sinnvolle Anwendung
+      const placements = entry.placements || [0,0,0,0];
+      if (placements[slot] !== placement) return false;
+    }
+
+    return true;
+  });
+
+  count.textContent = `${matches.length} / ${gamesIndex.length}`;
+  list.innerHTML = '';
+  for (const e of matches) {
+    const li = document.createElement('li');
+    li.className = 'game-row';
+    const dateStr = e.date ? new Date(e.date).toISOString().slice(0, 10) : '';
+    const placeIcon = ['', '🥇', '🥈', '🥉', '4'];
+    const placements = e.placements || [0,0,0,0];
+    const playersHtml = e.players.map((p, i) => {
+      const c  = ['red','blue','yellow','green'][i];
+      const rt = e.ratings[i] != null ? ` (${e.ratings[i]})` : '';
+      const pl = placements[i] >= 1 && placements[i] <= 4 ? `${placeIcon[placements[i]]} ` : '';
+      return `<span class="player-badge ${c}">${pl}${p}${rt}</span>`;
+    }).join('');
+    li.innerHTML =
+      `<span class="gr-date">${dateStr}</span>` +
+      `<span class="gr-players">${playersHtml}</span>` +
+      `<span class="gr-nr">#${e.gameNr ?? '?'}</span>`;
+    li.addEventListener('click', () => loadGameFromIndex(e.file));
+    list.appendChild(li);
+  }
+}
+
+async function loadGameFromIndex(filename) {
+  try {
+    const r = await fetch('/game_analysis/' + filename);
+    if (!r.ok) { alert('Datei nicht erreichbar: ' + filename); return; }
+    const data = await r.json();
+    loadGame(data);
+    if (Array.isArray(data.evals)) {
+      replayEvals = data.evals;
+      renderTopMoves();
+    }
+  } catch (err) {
+    alert('Fehler beim Laden: ' + err.message);
+  }
+}
+
+(async () => {
+  try {
+    const r = await fetch('games_index.json');
+    if (!r.ok) return; // Index optional – ohne Server kein Filter
+    gamesIndex = await r.json();
+    renderGameFilterResults();
+    document.getElementById('game-filter')
+      .addEventListener('input', renderGameFilterResults);
+    const colorSel = document.getElementById('game-filter-color');
+    const placeSel = document.getElementById('game-filter-placement');
+    if (colorSel) colorSel.addEventListener('change', renderGameFilterResults);
+    if (placeSel) placeSel.addEventListener('change', renderGameFilterResults);
+  } catch { /* still ohne Server lauffähig */ }
+})();
+
+// URL-Parameter ?game=<stem> → entsprechendes Analyse-File auto-laden.
+// Akzeptiert mit oder ohne ".json"-Suffix.
+(async () => {
+  const param = new URLSearchParams(window.location.search).get('game');
+  if (!param) return;
+  const filename = param.endsWith('.json') ? param : param + '.json';
+  await loadGameFromIndex(filename);
+})();
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 draw();

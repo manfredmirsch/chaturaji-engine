@@ -7,6 +7,14 @@ edition = "2021"
 name = "train"
 path = "src/main.rs"
 
+[[bin]]
+name = "book"
+path = "src/bin/book.rs"
+
+[[bin]]
+name = "debug_book"
+path = "src/bin/debug_book.rs"
+
 [dependencies]
 chaturaji-core   = { path = "../core" }
 chaturaji-engine = { path = "../engine" }

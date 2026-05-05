@@ -15,6 +15,7 @@ use chaturaji_trainer::pgn_import::load_games_from_dir;
 use chaturaji_trainer::supervised::run_supervised;
 use chaturaji_trainer::db;
 use chaturaji_trainer::network::Network;
+use chaturaji_engine::book::OpeningBook;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -29,6 +30,10 @@ fn main() {
     let mut mode        = Mode::Train;
     let mut export_path = "weights.json".to_string();
     let mut pgn_dir     = String::new();
+    let mut book_path   = "/home/manfred/chaturaji/opening_book.json".to_string();
+    let mut use_book    = true;
+    let mut book_plies  = 16usize;
+    let mut book_min    = 2u32;
 
     let mut i = 1;
     while i < args.len() {
@@ -53,6 +58,10 @@ fn main() {
                 }
             }
             "--stats"      => { mode = Mode::Stats; }
+            "--book"       => { i += 1; if i < args.len() { book_path = args[i].clone(); } }
+            "--no-book"    => { use_book = false; }
+            "--book-plies" => { i += 1; if i < args.len() { book_plies = args[i].parse().unwrap_or(book_plies); } }
+            "--book-min"   => { i += 1; if i < args.len() { book_min = args[i].parse().unwrap_or(book_min); } }
             "--help" | "-h"=> { print_help(); return; }
             _ => {}
         }
@@ -85,6 +94,21 @@ fn main() {
             println!("  cargo run --release --bin train -- --games 5000 --depth 3");
         }
         Mode::Train => {
+            let book = if use_book {
+                match OpeningBook::load(&book_path) {
+                    Ok(b) => {
+                        println!("Eröffnungsbuch geladen: {} ({} Stellungen)",
+                                 book_path, b.len());
+                        Some(b)
+                    }
+                    Err(e) => {
+                        eprintln!("Warnung: Buch '{}' nicht ladbar ({}). Training ohne Buch.",
+                                  book_path, e);
+                        None
+                    }
+                }
+            } else { None };
+
             let cfg = TrainConfig {
                 db_path,
                 total_games,
@@ -94,10 +118,13 @@ fn main() {
                 lr,
                 momentum: 0.9,
                 selfplay: SelfPlayConfig {
-                    engine_depth: depth,
+                    engine_depth:   depth,
+                    book_max_plies: book_plies,
+                    book_min_count: book_min,
                     ..SelfPlayConfig::default()
                 },
                 lr_decay: 0.99,
+                book,
             };
             run(cfg);
         }
@@ -121,6 +148,10 @@ fn print_help() {
     println!("  --pgn-dir <pfad>     Supervised Training aus PGN-Verzeichnis");
     println!("  --stats              Trainingsstatistiken anzeigen");
     println!("  --export [pfad]      Gewichte als JSON exportieren [Standard: weights.json]");
+    println!("  --book <pfad>        Eröffnungsbuch [Standard: /home/manfred/chaturaji/opening_book.json]");
+    println!("  --no-book            Training ohne Eröffnungsbuch");
+    println!("  --book-plies <n>     Halbzüge mit Buch                [Standard: 16]");
+    println!("  --book-min <n>       Mindestbeobachtungen je Buchzug  [Standard: 2]");
     println!("  --help               Diese Hilfe\n");
     println!("WORKFLOW (empfohlen):");
     println!("  1. Supervised Pre-Training mit chess.com Exporten:");

@@ -1,7 +1,8 @@
 # Rust build artifacts
 target/
-*.db          # SQLite-Trainingsdatenbank (kann sehr groß werden)
-
+chaturaji.db
+chaturaji.db-wal
+*.db         
 # WASM build output
 crates/wasm/www/pkg/
 
@@ -12,3 +13,6 @@ crates/wasm/www/pkg/
 *.tar.gz
 crates/trainer/chaturaji.db
 weights.json
+chaturaji.db
+chaturaji.db-shm
+chaturaji.db-wal

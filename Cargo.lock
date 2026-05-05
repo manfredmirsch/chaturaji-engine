@@ -57,6 +57,8 @@ name = "chaturaji-engine"
 version = "0.1.0"
 dependencies = [
  "chaturaji-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

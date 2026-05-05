@@ -4,14 +4,14 @@ body {
   font-family: 'Segoe UI', system-ui, sans-serif;
   background: #1a1a2e; color: #e0e0e0; min-height: 100vh;
 }
-#app { max-width: 1280px; margin: 0 auto; padding: 1.5rem; }
+#app { max-width: 1380px; margin: 0 auto; padding: 1.5rem; }
 
 header { text-align: center; margin-bottom: 1.5rem; }
 header h1 { font-size: 2rem; color: #f0c040; letter-spacing: 2px; }
 header .subtitle { color: #888; font-size: 0.9rem; margin-top: 0.25rem; }
 
 /* ─── Brett mit Punkteboxen ──────────────────────────────────────────────────── */
-#board-area { display: flex; flex-direction: column; width: 560px; margin-bottom: 1rem; }
+#board-area { display: flex; flex-direction: column; width: 660px; margin-bottom: 1rem; }
 #score-top, #score-bottom { display: flex; justify-content: space-between; }
 #score-top  { margin-bottom: 4px; }
 #score-bottom { margin-top: 4px; }
@@ -22,7 +22,11 @@ header .subtitle { color: #888; font-size: 0.9rem; margin-top: 0.25rem; }
   border-left: 4px solid transparent;
 }
 
-.score span:last-child { font-weight: bold; font-size: 1rem; }
+.score-pts  { font-weight: bold; font-size: 1rem; }
+/* Punkte stehen LETZTES Kind (gelb/grün) → nach rechts schieben */
+.score-pts:last-child { margin-left: auto; }
+.score-time { font-family: monospace; }
+.score-time:not(:empty)::after { content: "s ";}
 .score.red  { border-color: #e74c3c; }
 .score.blue { border-color: #3498db; }
 .score.yellow {
@@ -37,7 +41,7 @@ header .subtitle { color: #888; font-size: 0.9rem; margin-top: 0.25rem; }
 
 /* ─── Zweispalten-Layout ─────────────────────────────────────────────────────── */
 main { display: flex; gap: 1.25rem; align-items: flex-start; }
-.main-left { flex: 0 0 580px; min-width: 0; }
+.main-left { flex: 0 0 680px; min-width: 0; }
 .main-right {
   flex: 1; min-width: 240px;
   display: flex; gap: 1rem; align-items: flex-start;
@@ -53,6 +57,37 @@ main { display: flex; gap: 1.25rem; align-items: flex-start; }
   display: flex; gap: 0.75rem; align-items: flex-start; flex-wrap: wrap; margin-top: 0.5rem;
 }
 #game-info { font-size: 0.85rem; color: #aaa; }
+
+/* ─── Spiel-Filter ───────────────────────────────────────────────────────────── */
+#game-filter-box {
+  flex: 1 1 100%; display: flex; align-items: center; gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+#game-filter {
+  flex: 1; background: #0f3460; color: #e0e0e0; border: 1px solid #1a5276;
+  border-radius: 6px; padding: 0.4rem 0.6rem; font-size: 0.85rem;
+}
+#game-filter:focus { outline: none; border-color: #f0c040; }
+#game-filter-color, #game-filter-placement {
+  background: #0f3460; color: #e0e0e0; border: 1px solid #1a5276;
+  border-radius: 6px; padding: 0.35rem 0.4rem; font-size: 0.82rem;
+}
+#game-filter-color:focus, #game-filter-placement:focus { outline: none; border-color: #f0c040; }
+#game-filter-count { font-size: 0.78rem; color: #888; min-width: 4rem; text-align: right; }
+#game-filter-results {
+  flex: 1 1 100%; max-height: 240px; overflow-y: auto; list-style: none;
+  padding: 0; margin: 0; font-size: 0.82rem;
+}
+#game-filter-results:empty { display: none; }
+.game-row {
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  padding: 0.35rem 0.5rem; border-radius: 4px; cursor: pointer;
+  border-bottom: 1px solid #0f3460;
+}
+.game-row:hover { background: #1a2a4a; }
+.game-row .gr-date { color: #888; font-family: monospace; min-width: 5.5rem; }
+.game-row .gr-nr   { color: #666; font-family: monospace; font-size: 0.75rem; }
+.game-row .gr-players { display: flex; gap: 0.3rem; flex-wrap: wrap; }
 .game-players { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.35rem; }
 .player-badge { padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.8rem; font-weight: bold; }
 .player-badge.red    { background: rgba(231,76,60,.2);  color: #e74c3c; border: 1px solid rgba(231,76,60,.5); }
@@ -111,7 +146,7 @@ main { display: flex; gap: 1.25rem; align-items: flex-start; }
 
 /* ─── Brett ──────────────────────────────────────────────────────────────────── */
 #board-container {
-  position: relative; display: block; width: 560px;
+  position: relative; display: block; width: 660px;
   border-radius: 4px; overflow: hidden;
   box-shadow: 0 8px 32px rgba(0,0,0,.6);
 }
@@ -130,11 +165,11 @@ main { display: flex; gap: 1.25rem; align-items: flex-start; }
   background: #16213e; padding: 0.4rem 0.75rem; border-radius: 8px;
 }
 .control-group label { font-size: 0.85rem; color: #aaa; }
-input[type=range] { width: 90px; accent-color: #f0c040; }
+input[type=range] { width: 60px; accent-color: #f0c040; }
 
 button {
   background: #0f3460; color: #e0e0e0; border: none; border-radius: 8px;
-  padding: 0.5rem 1rem; cursor: pointer; font-size: 0.9rem; transition: background 0.2s;
+  padding: 0.5rem 0.5rem; cursor: pointer; font-size: 0.9rem; transition: background 0.2s;
 }
 button:hover  { background: #1a5276; }
 button:active { background: #0a2540; }
@@ -196,16 +231,29 @@ button:disabled { opacity: 0.4; cursor: default; }
 #movelog { background: #16213e; border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 0.75rem; }
 #movelog h3 { font-size: 0.95rem; color: #f0c040; margin-bottom: 0.5rem; }
 #movelist {
-  max-height: 360px; overflow-y: auto; padding-left: 2.5rem;
+  max-height: 360px; overflow-y: auto; padding-left: 0; list-style: none;
   font-family: monospace; font-size: 0.85rem; color: #ccc;
+  counter-reset: round-num;
 }
 #movelist li {
   padding: 4px 0;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  /* Erste Spalte = Rundennummer (per CSS-Counter), dann 4 Spielerspalten. */
+  grid-template-columns: 2.2rem repeat(4, 1fr);
   grid-auto-rows: auto;
   column-gap: 0.4rem;
   row-gap: 0.1rem;
+  counter-increment: round-num;
+}
+#movelist li::before {
+  content: counter(round-num) ".";
+  grid-column: 1;
+  grid-row: 1 / span 2; /* Nummer überspannt Zug- und Score-Zeile */
+  align-self: center;
+  text-align: right;
+  padding-right: 0.4rem;
+  color: #888;
+  font-size: 0.78rem;
 }
 .mv-cell    { font-weight: bold; }
 .score-cell { font-size: 0.72rem; opacity: 0.65; }

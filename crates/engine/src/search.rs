@@ -18,6 +18,7 @@ use chaturaji_core::board::{Board, Move};
 use chaturaji_core::rules::Rules;
 use chaturaji_core::zobrist::{hash_board, ZobristKeys};
 
+use crate::book::OpeningBook;
 use crate::eval::evaluate;
 use crate::ordering::order_moves;
 use crate::tt::{NodeKind, TranspositionTable};
@@ -41,20 +42,43 @@ pub struct RankedMove {
 // ─── Engine ───────────────────────────────────────────────────────────────────
 
 pub struct Engine {
-    tt:      TranspositionTable,
-    keys:    ZobristKeys,
-    nodes:   u64,
+    tt:             TranspositionTable,
+    keys:           ZobristKeys,
+    nodes:          u64,
+    book:           Option<OpeningBook>,
+    book_min_count: u32,
 }
 
 impl Engine {
     /// Create an engine with a `tt_mb`-megabyte transposition table.
     pub fn new(tt_mb: usize) -> Self {
         Self {
-            tt:    TranspositionTable::new(tt_mb),
-            keys:  ZobristKeys::new(),
-            nodes: 0,
+            tt:             TranspositionTable::new(tt_mb),
+            keys:           ZobristKeys::new(),
+            nodes:          0,
+            book:           None,
+            book_min_count: 5,
         }
     }
+
+    /// Lade ein vom Trainer geschriebenes Eröffnungsbuch. Solange die Stellung
+    /// im Buch ist und ein Zug die Mindesthäufigkeit erreicht, wird `search()`
+    /// den Buchzug zurückgeben statt zu suchen.
+    pub fn set_book(&mut self, book: OpeningBook) { self.book = Some(book); }
+
+    /// Builder-Variante.
+    pub fn with_book(mut self, book: OpeningBook) -> Self {
+        self.book = Some(book); self
+    }
+
+    /// Mindesthäufigkeit, ab der ein Buchzug verwendet wird (Standard: 5).
+    pub fn set_book_min_count(&mut self, n: u32) { self.book_min_count = n; }
+
+    /// Buch wieder loswerden — nützlich für Endspiele.
+    pub fn clear_book(&mut self) { self.book = None; }
+
+    /// Hat die Engine ein Buch geladen?
+    pub fn has_book(&self) -> bool { self.book.is_some() }
 
     /// Clear the transposition table (call between games).
     pub fn new_game(&mut self) { self.tt.clear(); }
@@ -63,8 +87,24 @@ impl Engine {
 
     /// Search to increasing depths until `max_depth` is reached.
     /// Returns the best move and score vector from the deepest completed iteration.
+    ///
+    /// Wenn ein Buch geladen ist und die aktuelle Stellung darin steht, wird
+    /// der historisch beste Zug **ohne Suche** zurückgegeben. `depth = 0` und
+    /// `nodes = 0` signalisieren das (Engine hat nichts gerechnet).
     pub fn search(&mut self, board: &Board, max_depth: u8) -> SearchResult {
         self.nodes = 0;
+
+        if let Some(ref book) = self.book {
+            if let Some(mv) = book.probe(board, &self.keys, self.book_min_count) {
+                return SearchResult {
+                    best_move: Some(mv),
+                    scores:    evaluate(board),
+                    depth:     0,
+                    nodes:     0,
+                };
+            }
+        }
+
         let mut result = SearchResult {
             best_move: None,
             scores:    evaluate(board),
@@ -198,6 +238,45 @@ mod tests {
         let r = engine.search(&board, 3);
         assert_eq!(r.depth, 3);
         assert!(r.nodes > 0);
+    }
+
+    #[test]
+    fn book_move_returned_without_search() {
+        use std::collections::HashMap;
+        use crate::book::{MoveStats, OpeningBook};
+        use chaturaji_core::zobrist::{hash_board, ZobristKeys};
+
+        let board = Board::default();
+        let keys  = ZobristKeys::new();
+        let hash  = hash_board(&board, &keys);
+
+        // Buch mit genau einem Zug aus der Startposition: d2 (sq 11) → d3 (sq 19).
+        let mut moves = HashMap::new();
+        moves.insert(
+            format!("{}-{}", 11u8, 19u8),
+            MoveStats { count: 100, sum_rank: 200, sum_points: 1500,
+                        sum_rating_diff: 0.0, sum_rating: 0.0 },
+        );
+        let mut book = OpeningBook::default();
+        book.positions.insert(hash, moves);
+
+        let mut engine = Engine::new(4).with_book(book);
+        let r = engine.search(&board, 4);
+        assert_eq!(r.depth, 0, "book hit must signal depth=0");
+        assert_eq!(r.nodes, 0, "book hit must not visit any nodes");
+        let mv = r.best_move.expect("book must return a move");
+        assert_eq!(mv.from, 11);
+        assert_eq!(mv.to,   19);
+    }
+
+    #[test]
+    fn missing_book_falls_back_to_search() {
+        // Ohne Buch muss die normale Suche laufen (depth>0, nodes>0).
+        let board = Board::default();
+        let mut engine = Engine::new(4);
+        let r = engine.search(&board, 2);
+        assert!(r.nodes > 0, "search without book must visit nodes");
+        assert!(r.depth > 0);
     }
 
     #[test]

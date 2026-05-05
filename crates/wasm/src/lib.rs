@@ -140,6 +140,32 @@ impl WasmEngine {
         } else { false }
     }
 
+    /// Markiert einen Spieler als ausgeschieden (z.B. nach Time-Forfeit), die
+    /// im Gegensatz zum Königsschlag nicht aus dem Brett ableitbar sind.
+    /// Schiebt `to_move` weiter, falls der ausgeschiedene Spieler am Zug war.
+    /// Pusht den vorherigen Zustand auf den Undo-Stack.
+    pub fn forfeit_color(&mut self, color: &str) -> bool {
+        let c = match color.to_ascii_lowercase().as_str() {
+            "red"    => Color::Red,
+            "blue"   => Color::Blue,
+            "yellow" => Color::Yellow,
+            "green"  => Color::Green,
+            _ => return false,
+        };
+        if !self.board.active[c.idx()] { return false; }
+        self.history.push(self.board.clone());
+        self.board.active[c.idx()] = false;
+        if self.board.to_move == c {
+            let mut next = c.next();
+            for _ in 0..4 {
+                if self.board.active[next.idx()] { break; }
+                next = next.next();
+            }
+            self.board.to_move = next;
+        }
+        true
+    }
+
     // ── Engine ────────────────────────────────────────────────────────────────
 
     pub fn best_move(&mut self, depth: u8) -> JsValue {
