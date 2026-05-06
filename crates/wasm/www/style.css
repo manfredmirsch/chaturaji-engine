@@ -23,8 +23,26 @@ header .subtitle { color: #888; font-size: 0.9rem; margin-top: 0.25rem; }
 }
 
 .score-pts  { font-weight: bold; font-size: 1rem; }
-/* Punkte stehen LETZTES Kind (gelb/grün) → nach rechts schieben */
-.score-pts:last-child { margin-left: auto; }
+/* Bei Gelb/Grün steht .score-pts vor .captures, soll trotzdem rechts liegen. */
+.score.yellow > .score-pts, .score.green > .score-pts { margin-left: auto; }
+
+/* Erbeutete Figuren: kleine Icons, leicht überlappend. Bei Rot/Blau am
+   linken Rand der Box, bei Gelb/Grün am rechten. */
+.captures {
+  display: flex; flex-wrap: nowrap; align-items: center;
+  min-width: 0; max-width: 60%;
+  height: 20px;
+}
+.captures img {
+  width: 18px; height: 18px;
+  margin-left: -4px;
+  filter: drop-shadow(0 0 1px rgba(0,0,0,0.6));
+}
+.captures img:first-child { margin-left: 0; }
+/* Gleicher Figurentyp stapelt eng — nur ~4px der hinteren Figur sichtbar. */
+.captures img.stack { margin-left: -14px; }
+.score.yellow > .captures, .score.green > .captures { margin-left: 4px; }
+.score.red   > .captures, .score.blue   > .captures { margin-right: 4px; }
 .score-time { font-family: monospace; }
 .score-time:not(:empty)::after { content: "s ";}
 .score.red  { border-color: #e74c3c; }
@@ -104,6 +122,14 @@ main { display: flex; gap: 1.25rem; align-items: flex-start; }
 #replay-pos { font-size: 0.85rem; color: #aaa; font-family: monospace; min-width: 64px; text-align: center; }
 #replay-controls button { padding: 0.3rem 0.65rem; font-size: 1rem; }
 
+#play-replay-controls {
+  display: flex; gap: 0.5rem; align-items: center; justify-content: center;
+  background: #16213e; border-radius: 8px; padding: 0.4rem 0.75rem;
+  flex-basis: 100%;
+}
+#play-replay-controls.hidden { display: none; }
+#play-replay-controls button { padding: 0.3rem 0.65rem; font-size: 1rem; }
+
 /* ─── Chat-Panel ─────────────────────────────────────────────────────────────── */
 #top-moves-panel {
   background: #16213e; border-radius: 8px; padding: 0.75rem 1rem;
@@ -125,6 +151,26 @@ main { display: flex; gap: 1.25rem; align-items: flex-start; }
 .top-move-bar-wrap { flex: 1; background: #0d1b2a; border-radius: 3px; height: 10px; overflow: hidden; }
 .top-move-bar { height: 100%; border-radius: 3px; background: #f0c040; transition: width 0.25s; }
 .top-move-pct { min-width: 36px; text-align: right; color: #aaa; font-size: 0.78rem; }
+
+/* ─── Engine-Kandidaten (Top-3 nach Engine-Zug) ────────────────────────────── */
+#engine-candidates-panel {
+  background: #16213e; border-radius: 8px; padding: 0.6rem 0.9rem;
+  margin: 0.5rem 0 0.75rem;
+}
+#engine-candidates-panel.hidden { display: none; }
+.engine-cand-header { font-size: 0.85rem; color: #f0c040; margin-bottom: 0.4rem; }
+#engine-candidates-list { display: flex; flex-direction: column; gap: 0.3rem; }
+.engine-cand-row {
+  display: flex; align-items: center; gap: 0.5rem; font-size: 0.82rem;
+}
+.engine-cand-marker {
+  width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+}
+.engine-cand-rank { color: #888; min-width: 18px; }
+.engine-cand-mv   { font-family: monospace; min-width: 80px; font-weight: bold; }
+.engine-cand-bar-wrap { flex: 1; background: #0d1b2a; border-radius: 3px; height: 8px; overflow: hidden; }
+.engine-cand-bar { height: 100%; border-radius: 3px; transition: width 0.25s; }
+.engine-cand-pct { min-width: 36px; text-align: right; color: #aaa; font-size: 0.78rem; }
 
 #chat-panel {
   background: #16213e; border-radius: 8px; padding: 0.75rem 1rem;

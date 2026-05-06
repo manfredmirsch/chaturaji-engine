@@ -15,6 +15,7 @@
 //!   • Naturally anytime behaviour.
 
 use chaturaji_core::board::{Board, Move};
+use chaturaji_core::piece::{Color, PieceKind};
 use chaturaji_core::rules::Rules;
 use chaturaji_core::zobrist::{hash_board, ZobristKeys};
 
@@ -80,6 +81,9 @@ impl Engine {
     /// Hat die Engine ein Buch geladen?
     pub fn has_book(&self) -> bool { self.book.is_some() }
 
+    /// Anzahl der erfassten Buchstellungen, oder None wenn kein Buch geladen.
+    pub fn book_len(&self) -> Option<usize> { self.book.as_ref().map(|b| b.len()) }
+
     /// Clear the transposition table (call between games).
     pub fn new_game(&mut self) { self.tt.clear(); }
 
@@ -117,15 +121,38 @@ impl Engine {
             result.depth  = depth;
             result.scores = scores;
             result.nodes  = self.nodes;
-
-            // Retrieve best move from TT
-            let hash = hash_board(board, &self.keys);
-            if let Some(entry) = self.tt.probe(hash) {
-                result.best_move = entry.best;
-            }
         }
 
+        // Wurzel-Auswahl mit Sicherheitsfilter: Züge, die einem Gegner die
+        // direkte Könignahme erlauben, werden aussortiert (Fallback: alle, wenn
+        // jeder Zug verliert). Dies fängt taktische Mattdrohungen unabhängig
+        // vom Max^n-„Kingmaker"-Verhalten zuverlässig ab.
+        result.best_move = self.pick_best_root_move(board);
         result
+    }
+
+    fn pick_best_root_move(&mut self, board: &Board) -> Option<Move> {
+        let mover_idx = board.to_move.idx();
+        let moves     = Rules::legal_moves(board);
+        if moves.is_empty() { return None; }
+
+        let mut scored: Vec<(Move, i32, bool)> = moves.into_iter().map(|mv| {
+            let child  = Rules::apply_with_effects(board, mv);
+            let hash   = hash_board(&child, &self.keys);
+            let score  = self.tt.probe(hash)
+                .map(|e| e.scores[mover_idx])
+                .unwrap_or_else(|| evaluate(&child)[mover_idx]);
+            let safe = !leaves_king_capturable(board, mv);
+            (mv, score, safe)
+        }).collect();
+
+        let any_safe = scored.iter().any(|&(_, _, s)| s);
+        if any_safe {
+            scored.retain(|&(_, _, s)| s);
+        }
+        scored.into_iter()
+            .max_by_key(|&(_, sc, _)| sc)
+            .map(|(mv, _, _)| mv)
     }
 
     /// Run a full search, then return the top-`n` moves at the root ranked by
@@ -138,18 +165,25 @@ impl Engine {
         let mover_idx = board.to_move.idx();
         let moves     = Rules::legal_moves(board);
 
-        let mut scored: Vec<RankedMove> = moves.into_iter().map(|mv| {
+        let scored: Vec<(RankedMove, bool)> = moves.into_iter().map(|mv| {
             let child  = Rules::apply_with_effects(board, mv);
             let hash   = hash_board(&child, &self.keys);
             let scores = self.tt.probe(hash)
                 .map(|e| e.scores)
                 .unwrap_or_else(|| evaluate(&child));
-            RankedMove { mv, scores }
+            let safe = !leaves_king_capturable(board, mv);
+            (RankedMove { mv, scores }, safe)
         }).collect();
 
-        scored.sort_by(|a, b| b.scores[mover_idx].cmp(&a.scores[mover_idx]));
-        scored.truncate(n);
-        scored
+        let any_safe = scored.iter().any(|&(_, s)| s);
+        let mut pool: Vec<RankedMove> = scored.into_iter()
+            .filter(|&(_, s)| !any_safe || s)
+            .map(|(rm, _)| rm)
+            .collect();
+
+        pool.sort_by(|a, b| b.scores[mover_idx].cmp(&a.scores[mover_idx]));
+        pool.truncate(n);
+        pool
     }
 
     // ─── Max^n ────────────────────────────────────────────────────────────────
@@ -215,6 +249,64 @@ impl Engine {
 /// Pruning threshold (centipawns).  When a player reaches this score we assume
 /// no other move can improve it further and prune.
 const PRUNE_THRESHOLD: i32 = 50_000;
+
+/// Sicherheitsprüfung für die Wurzel-Auswahl. Liefert `true`, wenn nach `mv`
+///   (a) ein Gegner unseren König *direkt* schlagen kann (1-Halbzug-Matt), oder
+///   (b) ein Gegner einen Zug spielen kann, nach dem unser König angegriffen
+///       ist und wir keinen Zug haben, der diesen Angriff entschärft
+///       (2-Halbzug-Matt: „Schach + kein Ausweg").
+///
+/// Konservativ: jeder aktive Gegner wird geprüft (nicht nur der nächste am
+/// Zug), und es wird angenommen, dass die anderen Gegner uns nicht
+/// versehentlich verteidigen. Das erzeugt ggf. Falsch-Positive (Züge werden
+/// gemieden, die in der Praxis durch Mitspieler-Aktion gerettet würden), aber
+/// nie Falsch-Negative — was hier wichtig ist.
+pub fn leaves_king_capturable(board: &Board, mv: Move) -> bool {
+    let our      = board.to_move;
+    let after_my = Rules::apply_with_effects(board, mv);
+    let king_bb  = after_my.pieces(our, PieceKind::King);
+    if king_bb == 0 { return true; }
+
+    // (a) 1-Halbzug: Gegner schlägt direkt.
+    for opp in Color::ALL {
+        if opp == our || !after_my.active[opp.idx()] { continue; }
+        if Rules::attacked_squares(&after_my, opp) & king_bb != 0 {
+            return true;
+        }
+    }
+
+    // (b) 2-Halbzug: Gegner zieht in Angriffsstellung, wir können nicht
+    // ausweichen.
+    for opp in Color::ALL {
+        if opp == our || !after_my.active[opp.idx()] { continue; }
+        let mut opp_pos = after_my.clone();
+        opp_pos.to_move = opp;
+        for opp_mv in Rules::legal_moves(&opp_pos) {
+            let after_opp = Rules::apply_with_effects(&opp_pos, opp_mv);
+            let our_king  = after_opp.pieces(our, PieceKind::King);
+            if our_king == 0 { return true; }
+            if Rules::attacked_squares(&after_opp, opp) & our_king == 0 { continue; }
+
+            // Drohung steht — haben wir einen Zug, nach dem unser König von
+            // KEINEM Gegner angegriffen wird? Nur dann ist die Verteidigung
+            // sauber. Sonst wandert der König nur in die nächste Schusslinie.
+            let mut us_pos = after_opp.clone();
+            us_pos.to_move = our;
+            let any_escape = Rules::legal_moves(&us_pos).into_iter().any(|our_mv| {
+                let after_us = Rules::apply_with_effects(&us_pos, our_mv);
+                let new_king = after_us.pieces(our, PieceKind::King);
+                if new_king == 0 { return false; }
+                Color::ALL.iter().all(|&e| {
+                    e == our
+                        || !after_us.active[e.idx()]
+                        || Rules::attacked_squares(&after_us, e) & new_king == 0
+                })
+            });
+            if !any_escape { return true; }
+        }
+    }
+    false
+}
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 

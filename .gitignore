@@ -16,3 +16,4 @@ weights.json
 chaturaji.db
 chaturaji.db-shm
 chaturaji.db-wal
+crates/wasm/www/game_analysis/

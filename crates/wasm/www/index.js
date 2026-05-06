@@ -2,12 +2,15 @@
 // Die gesamte Spiel-Logik (Zuggenerierung, Suche, Bewertung) liegt in Rust und
 // wird per wasm-bindgen exportiert. `engine` hält den einzigen globalen Spiel-
 // zustand; alles UI-seitige (Highlights, Animation, Chat) lebt in dieser Datei.
-import init, { WasmEngine } from './pkg/chaturaji_wasm.js';
-await init();
+import init, { WasmEngine } from './pkg/chaturaji_wasm.js?v=2605062104';
+
+await init('./pkg/chaturaji_wasm_bg.wasm?v=2605062104');
 const engine = new WasmEngine();
 
 // ─── Konstanten ───────────────────────────────────────────────────────────────
 const BOARD_SIZE = 660;
+const MARGIN_COORDS = 8;
+
 const CELL = BOARD_SIZE / 8;
 const MOVE_ANIM_MS = 180; // Animationsdauer in ms (0 = deaktiviert)
 
@@ -56,6 +59,36 @@ let legalMoves = [];
 let state      = null;
 let animReq    = null; // laufender requestAnimationFrame-Handle
 
+// Sperrt während laufender Engine-Suche/Animation alle weiteren Aktionen,
+// damit Notation und Engine-Zustand nicht durcheinanderkommen.
+let isBusy = false;
+// Pro Aktion vergebene Epoche – setTimeout-Bodies prüfen, ob sie noch
+// "ihre" Epoche sehen, sonst brechen sie ab (z.B. nach Reset).
+let actionEpoch = 0;
+
+function setBusy(b) {
+  isBusy = b;
+  const ids = ['btn-engine-move', 'btn-undo', 'btn-reset', 'btn-play-prev', 'btn-play-next'];
+  for (const id of ids) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = b;
+  }
+  // Nach Freigabe Prev/Next-Status aus dem Redo-Stack rekonstruieren.
+  if (!b && typeof updatePlayReplayButtons === 'function') updatePlayReplayButtons();
+}
+
+// Engine-Suchergebnis-Visualisierung: Top-N-Züge die in der aktuellen Stellung
+// untersucht wurden, werden als farbige Pfeile auf dem Brett gezeichnet bis der
+// nächste Zug fällt. Format: [{mv, pct, rank}] sortiert nach Stärke.
+let engineCandidates = null;
+
+// Farben/Linienstärke pro Rang (0 = Bestmove). pct=Anteil von 1.0 für Alpha.
+const CANDIDATE_STYLE = [
+  { stroke: '#d22', width: 8, alpha: 0.85 }, // 1. Rot, dick
+  { stroke: '#e80', width: 6, alpha: 0.65 }, // 2. Orange
+  { stroke: '#dc3', width: 5, alpha: 0.55 }, // 3. Gelb
+];
+
 // ─── Zeichnen ─────────────────────────────────────────────────────────────────
 function draw() {
   state = engine.get_state();
@@ -63,9 +96,66 @@ function draw() {
   drawSquares();
   drawHighlights();
   drawPieces();
+  drawEngineCandidates();
   updateScores();
   updateStatus();
   updateNetEval();
+}
+
+// Pfeil von Feld `fromSq` nach `toSq` mit Stilangabe aus CANDIDATE_STYLE.
+function drawArrow(fromSq, toSq, style) {
+  const [fx, fy] = sq2xy(fromSq);
+  const [tx, ty] = sq2xy(toSq);
+  const x1 = fx + CELL / 2, y1 = fy + CELL / 2;
+  const x2 = tx + CELL / 2, y2 = ty + CELL / 2;
+  const dx = x2 - x1, dy = y2 - y1;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len, uy = dy / len;
+  // Schaft endet kurz vor dem Zielfeld, Pfeilkopf füllt den Rest
+  const headLen = Math.min(CELL * 0.45, len * 0.45);
+  const shaftEndX = x2 - ux * headLen * 0.6;
+  const shaftEndY = y2 - uy * headLen * 0.6;
+
+  ctx.save();
+  ctx.globalAlpha = style.alpha;
+  ctx.strokeStyle = style.stroke;
+  ctx.fillStyle   = style.stroke;
+  ctx.lineWidth   = style.width;
+  ctx.lineCap     = 'round';
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(shaftEndX, shaftEndY);
+  ctx.stroke();
+  // Pfeilspitze
+  const px = -uy, py = ux;
+  ctx.beginPath();
+  ctx.moveTo(x2, y2);
+  ctx.lineTo(x2 - ux * headLen + px * headLen * 0.45,
+             y2 - uy * headLen + py * headLen * 0.45);
+  ctx.lineTo(x2 - ux * headLen - px * headLen * 0.45,
+             y2 - uy * headLen - py * headLen * 0.45);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawEngineCandidates() {
+  if (!engineCandidates || engineCandidates.length === 0) return;
+  // Schwächste zuerst, damit der Bestmove obenauf liegt
+  for (let i = engineCandidates.length - 1; i >= 0; i--) {
+    const c = engineCandidates[i];
+    const fromSq = engineSqIdx(c.mv.slice(0, 2));
+    const toSq   = engineSqIdx(c.mv.slice(2, 4));
+    drawArrow(fromSq, toSq, CANDIDATE_STYLE[i] ?? CANDIDATE_STYLE[2]);
+  }
+}
+
+function clearEngineCandidates() {
+  if (engineCandidates) {
+    engineCandidates = null;
+    const panel = document.getElementById('engine-candidates-panel');
+    if (panel) panel.classList.add('hidden');
+  }
 }
 
 // Engine indiziert Felder als rank*8 + file mit a1=0, h8=63. Canvas-Y wächst
@@ -88,14 +178,29 @@ function drawSquares() {
       ctx.fillRect(f * CELL, (7 - r) * CELL, CELL, CELL);
     }
   }
-  ctx.fillStyle = '#777';
-  ctx.font = '11px sans-serif';
-  ctx.textAlign = 'center';
-  for (let f = 0; f < 8; f++)
-    ctx.fillText(String.fromCharCode(97 + f), f * CELL + CELL / 2, BOARD_SIZE - 3);
+  ctx.font = '12px sans-serif';
+  ctx.textAlign = 'right';
+  // Koordinaten oben
+  for (let f = 0; f < 8; f++) {
+    ctx.fillStyle = f % 2 === 0 ? BOARD_LIGHT : BOARD_DARK;
+    ctx.fillText(String.fromCharCode(97 + f), f * CELL + CELL - MARGIN_COORDS, MARGIN_COORDS);
+  }
+  // Koordinaten unten
+  for (let f = 0; f < 8; f++) {
+    ctx.fillStyle = f % 2 === 1 ? BOARD_LIGHT : BOARD_DARK;    
+    ctx.fillText(String.fromCharCode(97 + f), f * CELL + CELL- MARGIN_COORDS, BOARD_SIZE - MARGIN_COORDS);
+  }
   ctx.textAlign = 'left';
-  for (let r = 0; r < 8; r++)
-    ctx.fillText(r + 1, 3, (7 - r) * CELL + 13);
+  // Koordinaten links
+  for (let r = 0; r < 8; r++) {
+    ctx.fillStyle = r % 2 === 1 ? BOARD_LIGHT : BOARD_DARK;
+    ctx.fillText(r + 1, MARGIN_COORDS, (7 - r) * CELL + MARGIN_COORDS);
+  }
+  // Koordinaten rechts
+  for (let r = 0; r < 8; r++) {
+    ctx.fillStyle = r % 2 === 0 ? BOARD_LIGHT : BOARD_DARK;
+    ctx.fillText(r + 1, BOARD_SIZE- MARGIN_COORDS*2, (7 - r) * CELL + MARGIN_COORDS);
+  }
 }
 
 function drawHighlights() {
@@ -224,6 +329,7 @@ function updateNetEval() {
 // die Auswahl wieder auf). Während einer Top-Zug-Vorschau frisst der erste
 // Klick nur die Vorschau, ohne ein neues Feld zu selektieren.
 canvas.addEventListener('click', (e) => {
+  if (isBusy) return;
   if (state && state.is_over) return;
   if (previewMv !== null) { clearPreview(); draw(); return; }
   // Skalierung Canvas-Pixel ↔ CSS-Pixel: das Brett kann per CSS verkleinert
@@ -234,19 +340,29 @@ canvas.addEventListener('click', (e) => {
   const sq = xy2sq(x, y);
   if (sq === null) return;
 
+  // Sobald der Spieler aktiv mit dem Brett interagiert, sind die alten
+  // Engine-Pfeile veraltet → wegräumen, bevor irgendwas neu gezeichnet wird.
+  clearEngineCandidates();
+
   // Zug ausführen wenn Zielfeld einer legalen Bewegung entspricht
   if (selected !== null) {
     const mv = legalMoves.find(m => m.to === sq);
     if (mv) {
       const fromSq = mv.from;
       const movingPiece = state.squares[fromSq];
+      recordCaptureFromMove(mv.to);
       if (engine.apply_move(mv.notation)) {
+        clearEngineCandidates();
         appendMoveLog(mv);
         state = engine.get_state();
+        renderCaptures();
         selected = null; legalMoves = [];
-        animateMove(fromSq, mv.to, movingPiece, () => draw());
+        setBusy(true);
+        animateMove(fromSq, mv.to, movingPiece, () => { draw(); setBusy(false); });
         return;
       }
+      // apply_move fehlgeschlagen → letzte recordCapture rückgängig
+      undoLastCapture();
     }
     if (sq === selected) { selected = null; legalMoves = []; draw(); return; }
   }
@@ -262,16 +378,12 @@ canvas.addEventListener('click', (e) => {
   draw();
 });
 
-// H\u00E4ngt einen Halbzug an die Zugliste an. Vier Halbz\u00FCge bilden eine "Runde"
-// (Rot, Blau, Gelb, Gr\u00FCn) und werden in einem einzigen <li> zusammengefasst.
-// F\u00FCr den ersten Zug einer Runde wird ein neues <li> angelegt, danach wird
+// Hängt einen Halbzug an die Zugliste an. Vier Halbzüge bilden eine "Runde"
+// (Rot, Blau, Gelb, Grün) und werden in einem einzigen <li> zusammengefasst.
+// Für den ersten Zug einer Runde wird ein neues <li> angelegt, danach wird
 // der gesamte Zeileninhalt re-gerendert (einfacher als einzelne Zellen zu
 // patchen, kostet kaum etwas bei nur 4 Spalten).
-function appendMoveLog(mv) {
-  const text = mv.notation
-    + (mv.captures ? ' \u00D7' : '')
-    + (mv.promoted ? ' =B' : ''); // chaturaji: Bauer wird beim Promotionsfeld zum Boat (=B)
-  const entry = { text, color: PLY_COLORS[plyCount % 4] };
+function pushLoggedEntry(entry) {
   moveLogEntries.push(entry);
   if (plyCount % 4 === 0) {
     const li = document.createElement('li');
@@ -285,39 +397,135 @@ function appendMoveLog(mv) {
   moveList.scrollTop = moveList.scrollHeight;
 }
 
+function appendMoveLog(mv) {
+  const text = mv.notation
+    + (mv.captures ? ' \u00D7' : '')
+    + (mv.promoted ? ' =B' : ''); // chaturaji: Bauer wird beim Promotionsfeld zum Boat (=B)
+  const entry = { text, color: PLY_COLORS[plyCount % 4], notation: mv.notation };
+  pushLoggedEntry(entry);
+  // Neuer Zug entwertet die Vor-Historie für den Redo-Button.
+  playRedoStack.length = 0;
+  updatePlayReplayButtons();
+}
+
 // ─── Buttons ──────────────────────────────────────────────────────────────────
 document.getElementById('btn-engine-move').addEventListener('click', () => {
+  if (isBusy) return;
   if (state && state.is_over) return;
   clearPreview();
+  clearEngineCandidates();
   const depth = parseInt(depthInput.value);
   engineInfo.textContent = 'Suche bei Tiefe ' + depth + '\u2026';
+  const epoch = ++actionEpoch;
+  setBusy(true);
   // setTimeout(…, 10) gibt dem Browser einen Tick, um den "Suche…"-Text
   // anzuzeigen, bevor die synchrone (und potenziell sekundenlange) WASM-
   // Suche den Main-Thread blockiert.
   setTimeout(() => {
-    const t0  = performance.now();
-    const res = engine.best_move(depth);
-    const ms  = (performance.now() - t0).toFixed(0);
+    if (epoch !== actionEpoch) return; // Reset während Wartezeit -> verworfen
+    const t0   = performance.now();
+    const res  = engine.best_move(depth);
+    // top_moves nutzt die noch warme Transposition-Tabelle, kostet kaum extra.
+    const tops = (Array.from(engine.top_moves(depth, 3)) || [])
+                   .map(t => ({ mv: t.mv, pct: t.pct }));
+    const ms   = (performance.now() - t0).toFixed(0);
+
+    // Buch-Hit: Engine hat ohne Suche geantwortet (depth=0, nodes=0).
+    const isBookMove = res.depth === 0 && (res.nodes || 0) === 0 && res.best_move;
+
+    // Top-3-Pfeile auf das Brett legen, bis der nächste Zug fällt.
+    engineCandidates = tops;
+    renderEngineCandidates(tops);
+
     let fromSq = -1, toSq = -1, movingPiece = null;
     if (res.best_move) {
       fromSq = engineSqIdx(res.best_move.slice(0, 2));
       toSq   = engineSqIdx(res.best_move.slice(2, 4));
       movingPiece = state?.squares[fromSq] ?? null;
-      engine.apply_move(res.best_move);
-      appendMoveLog({ notation: res.best_move, captures: false, promoted: false });
-      state = engine.get_state();
     }
-    const netNote = res.used_network ? ' \uD83E\uDDE0 Netz aktiv' : '';
-    engineInfo.textContent = 'Tiefe ' + res.depth
-      + ' \u00B7 ' + (res.nodes || 0).toLocaleString() + ' Knoten'
-      + ' \u00B7 ' + ms + 'ms' + netNote;
-    selected = null; legalMoves = [];
-    animateMove(fromSq, toSq, movingPiece, () => draw());
+
+    const netNote  = res.used_network ? ' \uD83E\uDDE0 Netz aktiv' : '';
+    const topsLine = tops.length > 0
+      ? '  ' + tops.map((t, i) =>
+          (i + 1) + '. ' + engineMoveToDisplay(t.mv) + ' ' + t.pct + '%'
+        ).join(' \u00B7 ')
+      : '';
+    if (isBookMove) {
+      engineInfo.textContent = '\uD83D\uDCD6 Buchzug \u00B7 ' + ms + 'ms' + netNote + topsLine;
+    } else {
+      engineInfo.textContent = 'Tiefe ' + res.depth
+        + ' \u00B7 ' + (res.nodes || 0).toLocaleString() + ' Knoten'
+        + ' \u00B7 ' + ms + 'ms' + netNote + topsLine;
+    }
+
+    // Erst Pfeile zeichnen, dann mit kleiner Verzögerung den Zug ausführen
+    // \u2014 das Auge bekommt eine Chance, die Alternativen zu sehen.
+    draw();
+    setTimeout(() => {
+      if (epoch !== actionEpoch) return; // Reset während 700ms-Pfeilen -> verworfen
+      let applied = false;
+      if (res.best_move) {
+        recordCaptureFromMove(toSq);
+        if (engine.apply_move(res.best_move)) {
+          appendMoveLog({ notation: res.best_move, captures: false, promoted: false });
+          state = engine.get_state();
+          renderCaptures();
+          applied = true;
+        } else {
+          undoLastCapture();
+        }
+      }
+      selected = null; legalMoves = [];
+      if (applied) {
+        animateMove(fromSq, toSq, movingPiece, () => { draw(); setBusy(false); });
+      } else {
+        draw();
+        setBusy(false);
+      }
+    }, 700);
   }, 10);
 });
 
-document.getElementById('btn-undo').addEventListener('click', () => {
+function renderEngineCandidates(tops) {
+  const panel = document.getElementById('engine-candidates-panel');
+  const list  = document.getElementById('engine-candidates-list');
+  if (!panel || !list) return;
+  if (!tops || tops.length === 0) { panel.classList.add('hidden'); return; }
+  list.innerHTML = '';
+  for (let i = 0; i < tops.length; i++) {
+    const t = tops[i];
+    const style = CANDIDATE_STYLE[i] ?? CANDIDATE_STYLE[2];
+    const row = document.createElement('div');
+    row.className = 'engine-cand-row';
+    row.innerHTML =
+      '<span class="engine-cand-marker" style="background:' + style.stroke + '"></span>'
+      + '<span class="engine-cand-rank">' + (i + 1) + '.</span>'
+      + '<span class="engine-cand-mv">' + engineMoveToDisplay(t.mv) + '</span>'
+      + '<div class="engine-cand-bar-wrap"><div class="engine-cand-bar" '
+      + 'style="width:' + t.pct + '%;background:' + style.stroke + '"></div></div>'
+      + '<span class="engine-cand-pct">' + t.pct + '%</span>';
+    list.appendChild(row);
+  }
+  panel.classList.remove('hidden');
+}
+
+function playUndoStep() {
+  if (isBusy) return false;
   clearPreview();
+  clearEngineCandidates();
+  if (plyCount === 0) return false;
+  const lastEntry = moveLogEntries[moveLogEntries.length - 1];
+
+  // Daten für die Rück-Animation aus letztem Zug holen, BEVOR engine.undo()
+  // den Zustand verändert (state.squares[to] wird sonst zur leeren Vorgänger-
+  // figur).
+  let animFrom = -1, animTo = -1, animPiece = null;
+  if (lastEntry && typeof lastEntry.notation === 'string' && lastEntry.notation.length >= 4) {
+    animFrom = engineSqIdx(lastEntry.notation.slice(0, 2));
+    animTo   = engineSqIdx(lastEntry.notation.slice(2, 4));
+    animPiece = state?.squares[animTo] ?? null;
+  }
+
   if (engine.undo()) {
     plyCount--;
     moveLogEntries.pop();
@@ -328,12 +536,56 @@ document.getElementById('btn-undo').addEventListener('click', () => {
       li.innerHTML = roundHtml(moveLogEntries.slice(Math.floor(plyCount / 4) * 4, plyCount));
     }
     selected = null; legalMoves = [];
-    draw();
+    undoLastCapture();
+    renderCaptures();
+    if (lastEntry && lastEntry.notation) playRedoStack.push(lastEntry);
+    updatePlayReplayButtons();
+    state = engine.get_state();
+    if (animPiece && animFrom !== animTo) {
+      setBusy(true);
+      animateMove(animTo, animFrom, animPiece, () => { draw(); setBusy(false); });
+    } else {
+      draw();
+    }
+    return true;
   }
-});
+  return false;
+}
+
+function playRedoStep() {
+  if (isBusy) return;
+  if (playRedoStack.length === 0) return;
+  clearPreview();
+  clearEngineCandidates();
+  const entry = playRedoStack[playRedoStack.length - 1];
+  const fromSq = engineSqIdx(entry.notation.slice(0, 2));
+  const toSq   = engineSqIdx(entry.notation.slice(2, 4));
+  const movingPiece = state?.squares[fromSq] ?? null;
+  recordCaptureFromMove(toSq);
+  if (engine.apply_move(entry.notation)) {
+    playRedoStack.pop();
+    // Originaltext (inkl. ×, =B) sowie Farbe für aktuelle ply-Position übernehmen.
+    pushLoggedEntry({ text: entry.text, color: PLY_COLORS[plyCount % 4], notation: entry.notation });
+    state = engine.get_state();
+    renderCaptures();
+    selected = null; legalMoves = [];
+    setBusy(true);
+    animateMove(fromSq, toSq, movingPiece, () => { draw(); setBusy(false); });
+  } else {
+    undoLastCapture();
+  }
+}
+
+document.getElementById('btn-undo').addEventListener('click', playUndoStep);
+document.getElementById('btn-play-prev').addEventListener('click', playUndoStep);
+document.getElementById('btn-play-next').addEventListener('click', playRedoStep);
 
 document.getElementById('btn-reset').addEventListener('click', () => {
+  // Reset darf jederzeit greifen — laufende Engine-Suche/Animation entwerten.
+  actionEpoch++;
+  if (animReq !== null) { cancelAnimationFrame(animReq); animReq = null; }
   previewMv = null; previewRow = null;
+  clearEngineCandidates();
   engine.reset();
   moveList.innerHTML = '';
   plyCount = 0; moveLogEntries.length = 0;
@@ -345,6 +597,10 @@ document.getElementById('btn-reset').addEventListener('click', () => {
   prevPlayerClocks.length = 0;
   refreshAllScoreTimes();
   document.getElementById('replay-controls').classList.add('hidden');
+  document.getElementById('play-replay-controls').classList.remove('hidden');
+  playRedoStack.length = 0;
+  updatePlayReplayButtons();
+  clearCaptures(); renderCaptures();
   document.getElementById('top-moves-panel').classList.add('hidden');
   gameChat = []; gameChatUidToColor = {}; gameChatIdx = 0; maxChatFullMoveNr = 0;
   document.getElementById('chat-messages').innerHTML = '<p class="chat-empty">Kein Spiel geladen.</p>';
@@ -356,6 +612,7 @@ document.getElementById('btn-reset').addEventListener('click', () => {
     const el = document.querySelector('.score.' + c + ' .score-name');
     if (el) el.textContent = defaults[i];
   });
+  setBusy(false);
   draw();
 });
 
@@ -391,6 +648,55 @@ unloadBtn.addEventListener('click', () => {
   unloadBtn.disabled = true;
   netBars.classList.add('hidden');
 });
+
+// Beim Start: weights.json vom Server holen und automatisch ins Netz laden.
+// Schlägt fehl/leise, wenn die Datei nicht existiert (kein Training gelaufen) \u2013
+// File-Picker bleibt als manueller Override.
+(async () => {
+  try {
+    const r = await fetch('weights.json');
+    if (!r.ok) return;
+    const text = await r.text();
+    const err  = engine.load_network_json(text);
+    if (err) {
+      netStatus.textContent = 'Auto-Load fehlgeschlagen: ' + err;
+      netStatus.className = 'err';
+      return;
+    }
+    const info = engine.network_info();
+    netStatus.textContent = '\u2705 weights.json (auto)'
+      + ' | Schritte: ' + info.steps.toLocaleString()
+      + ' | ' + info.params.toLocaleString() + ' Parameter';
+    netStatus.className = 'ok';
+    unloadBtn.disabled = false;
+    draw();
+  } catch { /* offline / kein Server \u2013 egal */ }
+})();
+
+// Beim Start: opening_book.json holen und in die Engine laden. Fehlende Datei
+// ist OK (Engine sucht dann ohne Buch).
+(async () => {
+  const bookStatus = document.getElementById('book-status');
+  try {
+    const r = await fetch('opening_book.json');
+    if (!r.ok) return;
+    const text = await r.text();
+    const err  = engine.load_book_json(text);
+    if (err) {
+      if (bookStatus) {
+        bookStatus.textContent = 'Auto-Load fehlgeschlagen: ' + err;
+        bookStatus.className = 'err';
+      }
+      return;
+    }
+    const info = engine.book_info();
+    if (bookStatus) {
+      bookStatus.textContent = '\u2705 opening_book.json (auto)'
+        + ' | ' + info.positions.toLocaleString() + ' Stellungen';
+      bookStatus.className = 'ok';
+    }
+  } catch { /* offline / kein Server \u2013 egal */ }
+})();
 
 // ─── PGN ─────────────────────────────────────────────────────────────────────
 document.getElementById('btn-load-pgn').addEventListener('click', () => {
@@ -446,8 +752,80 @@ function refreshAllScoreTimes() {
 
 // ─── Zugprotokoll-Zustand ─────────────────────────────────────────────────────
 let plyCount = 0;
-const moveLogEntries = []; // {text, color, score?}
+const moveLogEntries = []; // {text, color, notation?, score?}
 const PLY_COLORS = ['red', 'blue', 'yellow', 'green'];
+
+// Erbeutete Figuren je Spieler (Index = PLY_COLORS-Idx). Pro Eintrag
+// {color, kind} der geschlagenen Figur. captureHistory hält für jeden
+// gespielten Halbzug das Schlag-Resultat, damit Undo/Redo es rückgängig
+// machen kann.
+const capturedByPlayer = [[], [], [], []];
+const captureHistory   = []; // jeder Eintrag: {mover, color, kind} | null
+
+function colorIdx(name) { return PLY_COLORS.indexOf(name.toLowerCase()); }
+
+// Vor jedem engine.apply_move aufrufen: schaut sich das Zielfeld im
+// AKTUELLEN state an und merkt sich, was geschlagen wird. Liefert den
+// Datensatz oder null zurück (für Logging-Zwecke).
+function recordCaptureFromMove(toSq) {
+  if (!state) { captureHistory.push(null); return null; }
+  const piece    = state.squares[toSq];
+  const moverIdx = colorIdx(state.to_move);
+  if (piece && moverIdx >= 0 && piece.color !== state.to_move) {
+    const rec = { mover: moverIdx, color: piece.color, kind: piece.kind };
+    capturedByPlayer[moverIdx].push({ color: rec.color, kind: rec.kind });
+    captureHistory.push(rec);
+    return rec;
+  }
+  captureHistory.push(null);
+  return null;
+}
+
+// Nach engine.undo aufrufen: nimmt den letzten Schlag aus dem History und
+// entfernt das zugehörige Icon vom Trophäenstapel.
+function undoLastCapture() {
+  const rec = captureHistory.pop();
+  if (rec) capturedByPlayer[rec.mover].pop();
+}
+
+function clearCaptures() {
+  for (let i = 0; i < 4; i++) capturedByPlayer[i].length = 0;
+  captureHistory.length = 0;
+}
+
+// Render-Helper. Sortiert nach Figurenwert absteigend, gleiche Art bleibt
+// gruppiert; nicht-Bauern-Figuren bekommen weniger Überlapp via Klasse.
+const KIND_ORDER = { King: 0, Boat: 1, Bishop: 2, Knight: 3, Pawn: 4 };
+function renderCaptures() {
+  for (let i = 0; i < 4; i++) {
+    const el = document.getElementById('captures-' + PLY_COLORS[i]);
+    if (!el) continue;
+    const items = capturedByPlayer[i].slice();
+    items.sort((a, b) => (KIND_ORDER[a.kind] ?? 9) - (KIND_ORDER[b.kind] ?? 9));
+    let html = '';
+    let prevKind = null;
+    for (const p of items) {
+      const sameKind = (p.kind === prevKind);
+      html += '<img class="' + (sameKind ? 'stack' : '')
+            + '" src="pieces/' + p.color.toLowerCase() + '-' + p.kind.toLowerCase()
+            + '.svg" alt="' + p.color + ' ' + p.kind + '">';
+      prevKind = p.kind;
+    }
+    el.innerHTML = html;
+  }
+}
+
+// Stack rückgängig gemachter Züge im normalen Spielmodus.
+// Wird gefüllt durch playUndoStep(), geleert durch jeden neuen Zug.
+const playRedoStack = []; // {text, color, notation}
+
+function updatePlayReplayButtons() {
+  const prev = document.getElementById('btn-play-prev');
+  const next = document.getElementById('btn-play-next');
+  if (!prev || !next) return;
+  prev.disabled = plyCount === 0;
+  next.disabled = playRedoStack.length === 0;
+}
 
 function roundHtml(entries) {
   const cells = Array.from({ length: 4 }, (_, i) => entries[i] ?? null);
@@ -561,6 +939,7 @@ function clearPreview() {
 }
 
 function applyPreview(t, row) {
+  if (isBusy) return;
   const wasActive = previewMv === t.mv;
   clearPreview();
   if (wasActive) { draw(); return; }
@@ -576,7 +955,8 @@ function applyPreview(t, row) {
     previewRow = row;
     row.classList.add('active');
     state = engine.get_state();
-    animateMove(fromSq, toSq, movingPiece, () => draw());
+    setBusy(true);
+    animateMove(fromSq, toSq, movingPiece, () => { draw(); setBusy(false); });
   }
 }
 
@@ -658,14 +1038,22 @@ function renderChatUpTo(upToTime) {
 // Aus Chat-Nachrichten Forfeits/Resignations extrahieren — Eliminierungen, die
 // nicht durch Königsschlag passieren und die die Engine sonst nicht erkennt.
 // Königsschlag-Mate ("X checkmated!") ignorieren wir, das macht die Engine selbst.
-function extractForfeits(chat) {
+function extractForfeits(chat, nameToColor) {
   const out = [];
+  const cap = (c) => c[0].toUpperCase() + c.slice(1).toLowerCase();
   for (const m of chat) {
     if (typeof m?.message !== 'string' || m.fullMoveNr == null) continue;
-    const match = m.message.match(/^(Red|Blue|Yellow|Green)\s+(forfeits|resigned)/i);
+    // Variante 1: "<Color> resigned/forfeits"
+    let match = m.message.match(/^(Red|Blue|Yellow|Green)\s+(forfeits|resigned)/i);
     if (match) {
-      const c = match[1].toLowerCase();
-      out.push({ fmn: m.fullMoveNr, color: c[0].toUpperCase() + c.slice(1) });
+      out.push({ fmn: m.fullMoveNr, color: cap(match[1]) });
+      continue;
+    }
+    // Variante 2: "<PlayerName> resigned/forfeits" — Name → Farbe lookup
+    match = m.message.match(/^([\w.\-]+)\s+(forfeits|resigned)/i);
+    if (match && nameToColor) {
+      const c = nameToColor[match[1]] || nameToColor[match[1].toLowerCase()];
+      if (c) out.push({ fmn: m.fullMoveNr, color: cap(c) });
     }
   }
   out.sort((a, b) => a.fmn - b.fmn);
@@ -692,13 +1080,18 @@ function loadGame(gameData) {
   const chat  = gameData.chat  || [];
   const colors = ['Red','Blue','Yellow','Green'];
 
-  const uidToColor = {};
-  const players    = [];
+  const uidToColor  = {};
+  const nameToColor = {};
+  const players     = [];
   for (let i = 1; i <= 4; i++) {
     const uid      = gameData['uid'      + i];
     const username = gameData['username' + i];
     if (uid)      uidToColor[uid] = colors[i - 1];
-    if (username) players.push({ color: colors[i - 1].toLowerCase(), username });
+    if (username) {
+      nameToColor[username]               = colors[i - 1];
+      nameToColor[username.toLowerCase()] = colors[i - 1];
+      players.push({ color: colors[i - 1].toLowerCase(), username });
+    }
   }
 
   const gameNrEl = document.getElementById('gameNr');
@@ -726,7 +1119,7 @@ function loadGame(gameData) {
 
   replayMoves = parsePgn4Moves(pgn4);
   replayIdx   = 0;
-  allForfeits = extractForfeits(chat);
+  allForfeits = extractForfeits(chat, nameToColor);
   appliedForfeitStack.length = 0;
   forfeitsAppliedAtIdx.length = 0;
   playerClocks = [null, null, null, null];
@@ -740,6 +1133,10 @@ function loadGame(gameData) {
   selected = null; legalMoves = [];
 
   document.getElementById('replay-controls').classList.remove('hidden');
+  document.getElementById('play-replay-controls').classList.add('hidden');
+  playRedoStack.length = 0;
+  updatePlayReplayButtons();
+  clearCaptures(); renderCaptures();
   updateReplayPos();
   draw();
 }
@@ -757,17 +1154,16 @@ document.getElementById('game-json-input').addEventListener('change', (e) => {
         replayEvals = data.evals;
         renderTopMoves();
       } else {
-        // … sonst zusätzlich vom Server holen (z.B. wenn nur game_data/ geladen wurde)
         try {
-          const r = await fetch('/game_analysis/' + file.name);
+          const r = await fetch('game_analysis/' + file.name);
           if (r.ok) {
             const ana = await r.json();
             replayEvals = ana.evals || [];
             renderTopMoves();
           }
-        } catch { /* kein Server oder keine Analyse – kein Problem */ }
+        } catch  (err) { alert('Fehler 1 beim Laden der Datei: ' + file.name); }
       }
-    } catch (err) { alert('Fehler beim Laden: ' + err.message); }
+    } catch  (err) { alert('Fehler 2 beim Laden der Datei: ' + file.name); }
   };
   reader.readAsText(file);
   e.target.value = '';
@@ -782,7 +1178,7 @@ document.getElementById('analysis-json-input').addEventListener('change', (e) =>
       const data = JSON.parse(ev.target.result);
       replayEvals = data.evals || [];
       renderTopMoves();
-    } catch (err) { alert('Fehler beim Laden der Analyse: ' + err.message); }
+    } catch (err) { alert('Fehler 3 beim Laden der Analyse: ' + err.message); }
   };
   reader.readAsText(file);
   e.target.value = '';
@@ -793,6 +1189,7 @@ function replayApplyNext() {
   // Laufende Animation sofort beenden
   if (animReq !== null) { cancelAnimationFrame(animReq); animReq = null; draw(); }
   clearPreview();
+  clearEngineCandidates();
 
   if (replayIdx >= replayMoves.length) return;
   const mv = replayMoves[replayIdx];
@@ -839,9 +1236,13 @@ function replayApplyNext() {
     fromSq = engineSqIdx(mv.engine.slice(0, 2));
     toSq   = engineSqIdx(mv.engine.slice(2, 4));
     movingPiece = state?.squares[fromSq] ?? null;
+    recordCaptureFromMove(toSq);
     // Promotionsfallback (siehe applyPreview): chess.com-PGN4 markiert
     // Bauernumwandlungen nicht explizit, daher ggf. mit 'p' nachreichen.
-    engine.apply_move(mv.engine) || engine.apply_move(mv.engine + 'p');
+    if (!(engine.apply_move(mv.engine) || engine.apply_move(mv.engine + 'p'))) {
+      undoLastCapture();
+    }
+    renderCaptures();
   }
 
   // Bedenkzeit-Anzeige des ziehenden Spielers aktualisieren (nur wenn der
@@ -885,10 +1286,21 @@ function replayApplyNext() {
 
 function replayUndoPrev() {
   clearPreview();
+  clearEngineCandidates();
   if (replayIdx <= 0) return;
   replayIdx--;
-  if (replayMoves[replayIdx].engine !== '--') {
+  // Anim-Daten für die Rückbewegung BEVOR engine.undo() den Zustand kippt.
+  let animFrom = -1, animTo = -1, animPiece = null;
+  const undoMv = replayMoves[replayIdx];
+  if (undoMv.engine !== '--' && typeof undoMv.engine === 'string' && undoMv.engine.length >= 4) {
+    animFrom = engineSqIdx(undoMv.engine.slice(0, 2));
+    animTo   = engineSqIdx(undoMv.engine.slice(2, 4));
+    animPiece = state?.squares[animTo] ?? null;
+  }
+  if (undoMv.engine !== '--') {
     engine.undo();
+    undoLastCapture();
+    renderCaptures();
   }
   // Forfeits zurücknehmen, die unmittelbar vor diesem Zug angewandt wurden.
   // Reihenfolge im Engine-History-Stack: …, forfeit_n, …, forfeit_1, move →
@@ -941,12 +1353,18 @@ function replayUndoPrev() {
 
   updateReplayPos();
   selected = null; legalMoves = [];
-  draw();
+  state = engine.get_state();
+  if (animPiece && animFrom !== animTo) {
+    animateMove(animTo, animFrom, animPiece, () => draw());
+  } else {
+    draw();
+  }
   renderTopMoves();
 }
 
 document.getElementById('btn-replay-start').addEventListener('click', () => {
   previewMv = null; previewRow = null;
+  clearEngineCandidates();
   engine.reset();
   moveList.innerHTML = '';
   plyCount = 0; moveLogEntries.length = 0;
@@ -1051,7 +1469,7 @@ function renderGameFilterResults() {
 
 async function loadGameFromIndex(filename) {
   try {
-    const r = await fetch('/game_analysis/' + filename);
+    const r = await fetch('game_analysis/' + filename);
     if (!r.ok) { alert('Datei nicht erreichbar: ' + filename); return; }
     const data = await r.json();
     loadGame(data);
@@ -1060,7 +1478,7 @@ async function loadGameFromIndex(filename) {
       renderTopMoves();
     }
   } catch (err) {
-    alert('Fehler beim Laden: ' + err.message);
+	alert('Die Datei ' + filename + ' konnte nicht geladen werden')
   }
 }
 

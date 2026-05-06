@@ -18,16 +18,16 @@
         <!-- Brett mit Punktestand drum herum -->
         <div id="board-area">
           <div id="score-top">
-            <div class="score blue"><span id="score-blue" class="score-pts">0</span><span class="score-name">Blau</span><span class="score-time" data-color="blue"></span></div>
-            <div class="score yellow"><span class="score-name">Gelb</span><span class="score-time" data-color="yellow"></span><span id="score-yellow" class="score-pts">0</span></div>
+            <div class="score blue"><div class="captures" id="captures-blue"></div><span id="score-blue" class="score-pts">0</span><span class="score-name">Blau</span><span class="score-time" data-color="blue"></span></div>
+            <div class="score yellow"><span class="score-name">Gelb</span><span class="score-time" data-color="yellow"></span><span id="score-yellow" class="score-pts">0</span><div class="captures" id="captures-yellow"></div></div>
           </div>
           <div id="board-container">
             <canvas id="board" width="660" height="660"></canvas>
             <div id="overlay-msg" class="hidden"></div>
           </div>
           <div id="score-bottom">
-            <div class="score red"><span id="score-red" class="score-pts">0</span><span class="score-name">Rot</span><span class="score-time" data-color="red"></span></div>
-            <div class="score green"><span class="score-name">Gr&uuml;n</span><span class="score-time" data-color="green"></span><span id="score-green" class="score-pts">0</span></div>
+            <div class="score red"><div class="captures" id="captures-red"></div><span id="score-red" class="score-pts">0</span><span class="score-name">Rot</span><span class="score-time" data-color="red"></span></div>
+            <div class="score green"><span class="score-name">Gr&uuml;n</span><span class="score-time" data-color="green"></span><span id="score-green" class="score-pts">0</span><div class="captures" id="captures-green"></div></div>
           </div>
         </div>
 
@@ -66,12 +66,6 @@
           </div>
         </details>
 
-        <!-- Status -->
-        <div id="status">
-          <span id="turn-indicator">Zug: <strong>Rot</strong></span>
-          <span id="engine-info"></span>
-        </div>
-
         <!-- Neuronales Netz -->
         <details id="net-section">
           <summary>&#129504; Neuronales Netz</summary>
@@ -108,6 +102,12 @@
           </div>
         </details>
 
+        <!-- Eröffnungsbuch -->
+        <details id="book-section">
+          <summary>&#128214; Er&ouml;ffnungsbuch</summary>
+          <div id="book-status">Kein Buch geladen</div>
+        </details>
+
         <!-- PGN -->
         <details id="pgn-section">
           <summary>PGN laden / exportieren</summary>
@@ -125,6 +125,18 @@
       <div class="main-right">
 
         <div class="main-right-col">
+          <!-- Top-Z&uuml;ge der letzten Engine-Suche -->
+          <div id="engine-candidates-panel" class="hidden">
+            <div class="engine-cand-header">Engine-Auswahl (Top 3)</div>
+            <div id="engine-candidates-list"></div>
+          </div>
+
+          <!-- Status -->
+          <div id="status">
+            <span id="turn-indicator">Zug: <strong>Rot</strong></span>
+            <span id="engine-info"></span>
+          </div>
+
           <!-- Replay-Steuerung -->
           <div id="replay-controls" class="hidden">
             <button id="btn-replay-start" title="Anfang">&#9198;</button>
@@ -150,10 +162,14 @@
         <div class="main-right-col">
           <!-- Steuerung (Engine, Suchtiefe, Undo, Reset) -->
           <div id="controls">
+            <div id="play-replay-controls">
+              <button id="btn-play-prev" title="Zur&uuml;ck (&#8592;)" disabled>&#9664;</button>
+              <button id="btn-play-next" title="Vor (&#8594;)" disabled>&#9654;</button>
+            </div>
             <div class="control-group">
               <label>Suchtiefe</label>
-              <input id="depth" type="range" min="1" max="6" value="3" />
-              <span id="depth-val">3</span>
+              <input id="depth" type="range" min="1" max="6" value="4" />
+              <span id="depth-val">4</span>
             </div>
             <button id="btn-engine-move" title="Engine zieht">&#129302;</button>
             <button id="btn-undo" title="Rückgängig">&#8617;</button>
@@ -173,6 +189,6 @@
     </main>
   </div>
 
-  <script type="module" src="index.js"></script>
+  <script type="module" src="index.js?v=2605062104"></script>
 </body>
 </html>

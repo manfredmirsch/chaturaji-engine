@@ -9,6 +9,7 @@ use chaturaji_core::board::Board;
 use chaturaji_core::notation::{move_to_str, parse_move, GameRecord};
 use chaturaji_core::piece::Color;
 use chaturaji_core::rules::Rules;
+use chaturaji_engine::book::OpeningBook;
 use chaturaji_engine::search::{Engine as SearchEngine, RankedMove};
 use network::{extract, Network};
 
@@ -62,6 +63,12 @@ pub struct NetworkInfo {
     pub steps:  u64,
     pub lr:     f32,
     pub params: usize,
+}
+
+#[derive(Serialize)]
+pub struct BookInfo {
+    pub loaded:    bool,
+    pub positions: usize,
 }
 
 // ─── Engine handle ────────────────────────────────────────────────────────────
@@ -246,6 +253,28 @@ impl WasmEngine {
     }
 
     pub fn unload_network(&mut self) { self.network = None; }
+
+    // ── Eröffnungsbuch ────────────────────────────────────────────────────────
+
+    /// Lädt ein vom Trainer geschriebenes Buch (JSON) in die Engine. Solange
+    /// das Buch geladen ist und die aktuelle Stellung darin steht, gibt
+    /// `best_move` einen Buchzug zurück (depth=0, nodes=0).
+    pub fn load_book_json(&mut self, json: &str) -> Option<String> {
+        match serde_json::from_str::<OpeningBook>(json) {
+            Ok(book) => { self.engine.set_book(book); None }
+            Err(e)   => Some(format!("Fehler: {e}")),
+        }
+    }
+
+    pub fn unload_book(&mut self) { self.engine.clear_book(); }
+
+    pub fn book_info(&self) -> JsValue {
+        let info = BookInfo {
+            loaded:    self.engine.has_book(),
+            positions: self.engine.book_len().unwrap_or(0),
+        };
+        serde_wasm_bindgen::to_value(&info).unwrap()
+    }
 
     // ── PGN ───────────────────────────────────────────────────────────────────
 

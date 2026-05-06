@@ -115,10 +115,13 @@ const W_PST:       i32 = 1;
 const W_MOBILITY:  i32 = 5;
 /// King-safety weights. King loss = elimination (-10 000 cp), so safety must
 /// scale much higher than chess. `KS_DIRECT_IMMINENT` is the penalty for an
-/// opponent who attacks the king square AND moves before the defender.
-const KS_DIRECT_IMMINENT: i32 = 300;
-const KS_DIRECT_LATER:    i32 =  40;
-const KS_ZONE_PRESSURE:   i32 =   8;
+/// opponent who attacks the king square AND moves before the defender — i.e.
+/// near-certain elimination unless the defender's *previous* move already
+/// dealt with it. Sized close to the elimination cost so the static eval can
+/// see mate threats at depth 1.
+const KS_DIRECT_IMMINENT: i32 = 5000;
+const KS_DIRECT_LATER:    i32 =   40;
+const KS_ZONE_PRESSURE:   i32 =    8;
 /// Threat scale: expected centipawn loss × this. 100 = full material credit.
 /// Lower because we already discount with imminence and SEE-light, and
 /// material itself updates after a real capture.
