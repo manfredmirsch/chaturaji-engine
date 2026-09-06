@@ -9,7 +9,12 @@ use chaturaji_core::board::{Board, Move};
 use chaturaji_core::piece::PieceKind;
 
 /// Assign an ordering score to a move.  Higher = searched first.
-pub fn score_move(board: &Board, mv: &Move, tt_best: Option<Move>) -> i32 {
+pub fn score_move(
+    board:   &Board,
+    mv:      &Move,
+    tt_best: Option<Move>,
+    killers: &[Option<Move>; 2],
+) -> i32 {
     // 1. TT best move
     if let Some(best) = tt_best {
         if mv.from == best.from && mv.to == best.to { return 100_000; }
@@ -28,16 +33,25 @@ pub fn score_move(board: &Board, mv: &Move, tt_best: Option<Move>) -> i32 {
         return 10_000 + victim_val * 10 - attacker_val;
     }
 
-    // 3. Quiet moves – prefer promotions
+    // 3. Killer moves (quiet refutations from the same depth in prior iterations)
+    if killers[0] == Some(*mv) { return 9_500; }
+    if killers[1] == Some(*mv) { return 9_000; }
+
+    // 4. Quiet moves – prefer promotions
     if mv.promoted { return 5_000; }
 
     0
 }
 
 /// Sort moves in-place, best first.
-pub fn order_moves(board: &Board, moves: &mut Vec<Move>, tt_best: Option<Move>) {
+pub fn order_moves(
+    board:   &Board,
+    moves:   &mut Vec<Move>,
+    tt_best: Option<Move>,
+    killers: &[Option<Move>; 2],
+) {
     moves.sort_unstable_by(|a, b| {
-        score_move(board, b, tt_best)
-            .cmp(&score_move(board, a, tt_best))
+        score_move(board, b, tt_best, killers)
+            .cmp(&score_move(board, a, tt_best, killers))
     });
 }

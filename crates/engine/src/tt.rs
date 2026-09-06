@@ -25,6 +25,7 @@ pub struct TtEntry {
     pub kind:   NodeKind,
     pub scores: [i32; 4],
     pub best:   Option<Move>,
+    pub age:    u8,
 }
 
 impl Default for TtEntry {
@@ -35,14 +36,23 @@ impl Default for TtEntry {
             kind:   NodeKind::Exact,
             scores: [0; 4],
             best:   None,
+            age:    0,
         }
     }
 }
 
-/// Fixed-size transposition table (power-of-two buckets, always-replace).
+/// Fixed-size transposition table with depth-preferred + age-based replacement.
+///
+/// Replacement policy: a new entry at `depth` replaces the existing one when:
+///   • `existing.age != current_age` — entry is from a previous search (stale), OR
+///   • `new_depth >= existing.depth` — new search is at least as deep.
+///
+/// This prevents shallow entries from the current search from overwriting deep
+/// entries, while still replacing stale entries from earlier positions freely.
 pub struct TranspositionTable {
-    entries: Vec<TtEntry>,
-    mask:    usize,
+    entries:     Vec<TtEntry>,
+    mask:        usize,
+    current_age: u8,
 }
 
 impl TranspositionTable {
@@ -56,9 +66,17 @@ impl TranspositionTable {
         if capacity == 0 { capacity = 1; }
 
         Self {
-            entries: vec![TtEntry::default(); capacity],
-            mask:    capacity - 1,
+            entries:     vec![TtEntry::default(); capacity],
+            mask:        capacity - 1,
+            current_age: 0,
         }
+    }
+
+    /// Advance the search age counter. Call once at the start of every
+    /// `Engine::search()` so entries from previous positions are considered
+    /// stale and replaced freely.
+    pub fn new_search(&mut self) {
+        self.current_age = self.current_age.wrapping_add(1);
     }
 
     #[inline]
@@ -66,10 +84,14 @@ impl TranspositionTable {
         (hash as usize) & self.mask
     }
 
-    /// Store an entry (always-replace policy).
+    /// Store an entry using depth-preferred + age-based replacement.
     pub fn store(&mut self, hash: u64, depth: u8, kind: NodeKind, scores: [i32; 4], best: Option<Move>) {
-        let idx = self.index(hash);
-        self.entries[idx] = TtEntry { hash, depth, kind, scores, best };
+        let idx      = self.index(hash);
+        let existing = &self.entries[idx];
+        let stale    = existing.age != self.current_age;
+        if stale || depth >= existing.depth {
+            self.entries[idx] = TtEntry { hash, depth, kind, scores, best, age: self.current_age };
+        }
     }
 
     /// Probe the table.  Returns `None` on miss or hash collision.
@@ -82,8 +104,9 @@ impl TranspositionTable {
         }
     }
 
-    /// Clear all entries.
+    /// Clear all entries and reset age.
     pub fn clear(&mut self) {
         self.entries.iter_mut().for_each(|e| *e = TtEntry::default());
+        self.current_age = 0;
     }
 }

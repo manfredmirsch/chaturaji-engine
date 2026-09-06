@@ -71,36 +71,33 @@ impl OpeningBook {
 
     /// Liefert alle Buchzüge für `board` als (from, to, count)-Tupel.
     /// Nur Züge mit `count >= min_count`. Für gewichtetes Sampling im Trainer.
+    /// Liefert alle Buchzüge für `board`, nach Häufigkeit absteigend sortiert
+    /// (meistgespielt zuerst). Konsistent mit `probe()`.
     pub fn entries(&self, board: &Board, keys: &ZobristKeys, min_count: u32)
         -> Option<Vec<(u8, u8, u32)>>
     {
         let hash  = hash_board(board, keys);
         let stats = self.positions.get(&hash)?;
-        let mut out = Vec::with_capacity(stats.len());
-        for (key, s) in stats {
-            if s.count < min_count { continue; }
-            let mut parts = key.splitn(2, '-');
-            let from: u8 = parts.next()?.parse().ok()?;
-            let to:   u8 = parts.next()?.parse().ok()?;
-            out.push((from, to, s.count));
-        }
-        if out.is_empty() { None } else { Some(out) }
+        let mut out: Vec<(u8, u8, u32)> = stats.iter()
+            .filter(|(_, s)| s.count >= min_count)
+            .filter_map(|(key, s)| {
+                let mut parts = key.splitn(2, '-');
+                let from: u8 = parts.next()?.parse().ok()?;
+                let to:   u8 = parts.next()?.parse().ok()?;
+                Some((from, to, s.count))
+            })
+            .collect();
+        if out.is_empty() { return None; }
+        out.sort_by(|a, b| b.2.cmp(&a.2));
+        Some(out)
     }
 }
 
 fn pick_best<'a>(stats: &'a HashMap<String, MoveStats>, min_count: u32) -> Option<&'a str> {
     stats.iter()
         .filter(|(_, s)| s.count >= min_count)
-        .max_by(|a, b| {
-            score(a.1).partial_cmp(&score(b.1)).unwrap_or(std::cmp::Ordering::Equal)
-        })
+        .max_by_key(|(_, s)| s.count)
         .map(|(k, _)| k.as_str())
-}
-
-/// Score-Funktion: niedriger Ø-Platz besser (negativ rein), Ø-Punkte als
-/// Tiebreaker mit kleinem Gewicht.
-fn score(s: &MoveStats) -> f64 {
-    -s.avg_rank() + s.avg_points() * 0.01
 }
 
 /// Wandelt den "from-to"-String in einen tatsächlichen `Move` aus den legal
