@@ -63,6 +63,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "chaturaji-nnue"
+version = "0.1.0"
+dependencies = [
+ "chaturaji-core",
+ "chaturaji-engine",
+ "rand",
+ "rand_distr",
+ "rusqlite",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "chaturaji-trainer"
 version = "0.1.0"
 dependencies = [
