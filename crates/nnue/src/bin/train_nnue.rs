@@ -25,6 +25,7 @@ fn main() {
     let mut lr           = 0.001f32;
     let mut depth        = 1u8;
     let mut beam_width   = 0usize;
+    let mut max_moves    = SelfPlayConfig::default().max_moves;
     let mut save_every   = 200u32;
     let mut log_every    = 50u32;
     let mut mode         = Mode::Train;
@@ -45,6 +46,7 @@ fn main() {
             "--lr"         => { i += 1; if i < args.len() { lr = args[i].parse().unwrap_or(lr); } }
             "--depth"       => { i += 1; if i < args.len() { depth = args[i].parse().unwrap_or(depth); } }
             "--beam-width"  => { i += 1; if i < args.len() { beam_width = args[i].parse().unwrap_or(beam_width); } }
+            "--max-moves"   => { i += 1; if i < args.len() { max_moves = args[i].parse().unwrap_or(max_moves); } }
             "--save-every" => { i += 1; if i < args.len() { save_every = args[i].parse().unwrap_or(save_every); } }
             "--log-every"  => { i += 1; if i < args.len() { log_every = args[i].parse().unwrap_or(log_every); } }
             "--pgn-dir"    => {
@@ -127,6 +129,7 @@ fn main() {
                     beam_width,
                     book_max_plies: book_plies,
                     book_min_count: book_min,
+                    max_moves,
                     ..SelfPlayConfig::default()
                 },
                 lr_decay: 0.99,
@@ -152,6 +155,8 @@ fn print_help() {
     println!("  --depth <n>          NNUE-Suchtiefe (1=greedy, 4=stark)     [Standard: 1]");
     println!("  --beam-width <n>     Beam-Breite interne Knoten (0=alle)    [Standard: 0]");
     println!("                       Empfehlung: depth 4 → --beam-width 6");
+    println!("  --max-moves <n>      Halbzüge je Selbstspiel-Partie         [Standard: 150]");
+    println!("                       Echte Partien: Median 94, 90 % unter 152");
     println!("  --save-every <n>     Checkpoint-Intervall        [Standard: 200]");
     println!("  --log-every <n>      Log-Intervall               [Standard: 50]");
     println!("  --stats              Trainingsstatistiken anzeigen");

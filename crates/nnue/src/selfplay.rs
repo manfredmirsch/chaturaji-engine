@@ -28,6 +28,22 @@ pub struct SelfPlayConfig {
     pub epsilon_start:   f32,
     pub epsilon_end:     f32,
     pub epsilon_decay:   f32,
+    /// Halbzüge, nach denen eine Partie abgebrochen wird.
+    ///
+    /// Der Wert ist keine Notbremse, sondern bestimmt mit, *welches Spiel* das
+    /// Netz lernt. `Rules::is_game_over` ist allein „höchstens ein Spieler
+    /// aktiv"; unter dieser Bedingung enden Selbstspiel-Partien praktisch nie
+    /// von selbst — sie laufen bis zum Limit. Menschen dagegen geben auf oder
+    /// spielen eine entschiedene Stellung nicht aus.
+    ///
+    /// Ausgezählt über 4000 echte Partien aus `game_data/`: Median 94
+    /// Halbzüge, 90 % unter 152, nur gut 1 % erreichen 200. Ein Limit von 300
+    /// füllte das Training daher zu einem großen Teil mit Stellungen, die in
+    /// echten Partien nicht vorkommen.
+    ///
+    /// Der Abbruch verfälscht das Ziel nicht: `outcome::place_values` liest den
+    /// Punktestand zum Abbruchzeitpunkt, und der ist auch bei unbeendeter
+    /// Partie eine gültige Rangfolge.
     pub max_moves:       usize,
     pub engine_depth:    u8,
     /// Beam width at internal nodes (0 = unbegrenzt).
@@ -45,7 +61,8 @@ impl Default for SelfPlayConfig {
             epsilon_start:  0.3,
             epsilon_end:    0.05,
             epsilon_decay:  0.995,
-            max_moves:      300,
+            // 150 ≈ 90 %-Quantil echter Partien (152).
+            max_moves:      150,
             engine_depth:   1,
             beam_width:     0,
             book_max_plies: 16,
