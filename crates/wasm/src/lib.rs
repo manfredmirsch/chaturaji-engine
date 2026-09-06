@@ -10,8 +10,8 @@ use chaturaji_core::notation::{move_to_str, parse_move, GameRecord};
 use chaturaji_core::piece::Color;
 use chaturaji_core::rules::Rules;
 use chaturaji_engine::book::OpeningBook;
-use chaturaji_engine::search::{Engine as SearchEngine, RankedMove};
-use network::{extract, Network};
+use chaturaji_engine::search::Engine as SearchEngine;
+use network::Network;
 
 // ─── JS-facing types ──────────────────────────────────────────────────────────
 
@@ -71,7 +71,23 @@ pub struct BookInfo {
     pub positions: usize,
 }
 
+#[derive(Serialize)]
+pub struct BookMove {
+    pub mv:    String,  // engine notation, e.g. "d2d3"
+    pub count: u32,
+    pub pct:   u8,      // 0-100 relativ zum häufigsten Zug
+}
+
 // ─── Engine handle ────────────────────────────────────────────────────────────
+
+/// Which search algorithm the engine entry points use.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Algorithm {
+    /// Best-Reply Search — only the most dangerous opponent replies.
+    Brs,
+    /// All three opponents minimise the root player's score.
+    Paranoid,
+}
 
 #[wasm_bindgen]
 pub struct WasmEngine {
@@ -79,6 +95,7 @@ pub struct WasmEngine {
     engine:  SearchEngine,
     history: Vec<Board>,
     network: Option<Network>,
+    algo:    Algorithm,
 }
 
 #[wasm_bindgen]
@@ -90,6 +107,29 @@ impl WasmEngine {
             engine:  SearchEngine::new(16),
             history: Vec::new(),
             network: None,
+            algo:    Algorithm::Brs,
+        }
+    }
+
+    /// Pick the search algorithm: `"brs"` (default) or `"paranoid"`.
+    /// Unknown values are ignored and reported as `false`.
+    ///
+    /// Note that `depth` means different things to the two: paranoid spends
+    /// four plies per game round, BRS two. BRS at depth 4 therefore looks two
+    /// full rounds ahead where paranoid at depth 4 looks one — and does it in
+    /// a fraction of the nodes (see `examples/brs_bench.rs`).
+    pub fn set_algorithm(&mut self, name: &str) -> bool {
+        match name {
+            "brs"      => { self.algo = Algorithm::Brs;      true }
+            "paranoid" => { self.algo = Algorithm::Paranoid; true }
+            _          => false,
+        }
+    }
+
+    pub fn algorithm(&self) -> String {
+        match self.algo {
+            Algorithm::Brs      => "brs".to_string(),
+            Algorithm::Paranoid => "paranoid".to_string(),
         }
     }
 
@@ -177,9 +217,22 @@ impl WasmEngine {
 
     pub fn best_move(&mut self, depth: u8) -> JsValue {
         let net_values = self.network.as_ref().map(|net| {
-            net.forward(&extract(&self.board))
+            net.forward(&self.board)
         });
-        let result = self.engine.search(&self.board, depth);
+        // Split field borrows so the network closure and engine mutation can coexist.
+        let algo    = self.algo;
+        let engine  = &mut self.engine;
+        let network = &self.network;
+        let board   = &self.board;
+        let f;
+        let net_eval: Option<&dyn Fn(&Board) -> [f32; 4]> = match network.as_ref() {
+            Some(net) => { f = |b: &Board| net.forward(b); Some(&f) }
+            None      => None,
+        };
+        let result = match algo {
+            Algorithm::Brs      => engine.search_brs(board, depth, net_eval),
+            Algorithm::Paranoid => engine.search_paranoid(board, depth, net_eval),
+        };
         let er = EngineResult {
             best_move:    result.best_move.map(|mv| move_to_str(&mv)),
             scores:       result.scores,
@@ -194,7 +247,19 @@ impl WasmEngine {
     /// Returns the top-`n` moves at the current position as a JS array of
     /// `{mv, score, pct}` objects.  `pct` is 0–100 with 100 = best move.
     pub fn top_moves(&mut self, depth: u8, n: u8) -> JsValue {
-        let ranked = self.engine.top_n(&self.board, depth, n as usize);
+        let algo    = self.algo;
+        let engine  = &mut self.engine;
+        let network = &self.network;
+        let board   = &self.board;
+        let f;
+        let net_eval: Option<&dyn Fn(&Board) -> [f32; 4]> = match network.as_ref() {
+            Some(net) => { f = |b: &Board| net.forward(b); Some(&f) }
+            None      => None,
+        };
+        let ranked = match algo {
+            Algorithm::Brs      => engine.top_n_brs(board, depth, n as usize, net_eval),
+            Algorithm::Paranoid => engine.top_n_paranoid(board, depth, n as usize, net_eval),
+        };
         let mover_idx = self.board.to_move.idx();
 
         let best_score = ranked.first()
@@ -218,7 +283,19 @@ impl WasmEngine {
     }
 
     pub fn engine_move(&mut self, depth: u8) -> bool {
-        let result = self.engine.search(&self.board, depth);
+        let algo    = self.algo;
+        let engine  = &mut self.engine;
+        let network = &self.network;
+        let board   = &self.board;
+        let f;
+        let net_eval: Option<&dyn Fn(&Board) -> [f32; 4]> = match network.as_ref() {
+            Some(net) => { f = |b: &Board| net.forward(b); Some(&f) }
+            None      => None,
+        };
+        let result = match algo {
+            Algorithm::Brs      => engine.search_brs(board, depth, net_eval),
+            Algorithm::Paranoid => engine.search_paranoid(board, depth, net_eval),
+        };
         if let Some(mv) = result.best_move {
             self.history.push(self.board.clone());
             self.board = Rules::apply_with_effects(&self.board, mv);
@@ -229,7 +306,7 @@ impl WasmEngine {
     pub fn evaluate_position(&self) -> JsValue {
         match &self.network {
             Some(net) => serde_wasm_bindgen::to_value(
-                &net.forward(&extract(&self.board))
+                &net.forward(&self.board)
             ).unwrap(),
             None => JsValue::NULL,
         }
@@ -239,7 +316,13 @@ impl WasmEngine {
 
     pub fn load_network_json(&mut self, json: &str) -> Option<String> {
         match serde_json::from_str::<Network>(json) {
-            Ok(net) => { self.network = Some(net); None }
+            Ok(net) => {
+                if let Err(e) = net.validate() {
+                    return Some(format!("Netzwerk-Architektur passt nicht: {e}"));
+                }
+                self.network = Some(net);
+                None
+            }
             Err(e)  => Some(format!("Fehler: {e}")),
         }
     }
@@ -276,6 +359,20 @@ impl WasmEngine {
         serde_wasm_bindgen::to_value(&info).unwrap()
     }
 
+    /// Top-N Buchzüge für die aktuelle Stellung, nach demselben Score sortiert
+    /// wie die Engine-Buchauswahl (bester Zug = Index 0 = roter Pfeil).
+    pub fn book_top_moves(&self, n: usize) -> JsValue {
+        let mut entries = self.engine.book_entries(&self.board, self.engine.book_min_count());
+        entries.truncate(n);
+        let max_count = entries.iter().map(|e| e.2).max().unwrap_or(1);
+        let moves: Vec<BookMove> = entries.iter().map(|(from, to, count)| {
+            let mv  = format!("{}{}", sq_to_eng(*from), sq_to_eng(*to));
+            let pct = ((*count as f64 / max_count as f64) * 100.0).round() as u8;
+            BookMove { mv, count: *count, pct }
+        }).collect();
+        serde_wasm_bindgen::to_value(&moves).unwrap()
+    }
+
     // ── PGN ───────────────────────────────────────────────────────────────────
 
     pub fn load_pgn(&mut self, pgn: &str) -> Option<String> {
@@ -299,4 +396,10 @@ impl WasmEngine {
         self.board = Board::default();
         self.engine.new_game();
     }
+}
+
+fn sq_to_eng(sq: u8) -> String {
+    let file = (b'a' + (sq & 7)) as char;
+    let rank = (sq >> 3) + 1;
+    format!("{}{}", file, rank)
 }

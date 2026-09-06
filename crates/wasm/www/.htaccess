@@ -1,0 +1,6 @@
+RewriteEngine On
+
+# /123456789 → index.html (Spielnummer als Pfad)
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^\d+$ index.html [L]

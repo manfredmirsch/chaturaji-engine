@@ -2,10 +2,14 @@
 // Die gesamte Spiel-Logik (Zuggenerierung, Suche, Bewertung) liegt in Rust und
 // wird per wasm-bindgen exportiert. `engine` hält den einzigen globalen Spiel-
 // zustand; alles UI-seitige (Highlights, Animation, Chat) lebt in dieser Datei.
-import init, { WasmEngine } from './pkg/chaturaji_wasm.js?v=2605062104';
+import init, { WasmEngine } from './pkg/chaturaji_wasm.js?v=2605111501';
+import { initI18n, setLang, t, getLang, onLanguageChange, applyTranslations, SUPPORTED_LANGS } from './i18n.js';
 
-await init('./pkg/chaturaji_wasm_bg.wasm?v=2605062104');
+await init({ module_or_path: './pkg/chaturaji_wasm_bg.wasm?v=2605111501' });
 const engine = new WasmEngine();
+
+// Sprache (Default: en) frühestmöglich anwenden — vor dem ersten draw().
+await initI18n('en');
 
 // ─── Konstanten ───────────────────────────────────────────────────────────────
 const BOARD_SIZE = 660;
@@ -58,6 +62,20 @@ let selected   = null;
 let legalMoves = [];
 let state      = null;
 let animReq    = null; // laufender requestAnimationFrame-Handle
+
+// ─── Aufzeichnen (Recording) ──────────────────────────────────────────────────
+// `recording` = läuft gerade eine Aufnahme? `recordedMoves` = die neu gespielten
+// Halbzüge (Klick oder Engine) als {engine, time}. `recordPrefix` = bei Modus 2
+// die übernommenen Züge des geladenen Spiels bis zum gewählten Zug. `lastLoadedGame`
+// = zuletzt via loadGame() geöffnete Rohdaten (für Metadaten-Vorbelegung).
+// `lastLoadedFile` = Dateiname des zuletzt aus dem Index geladenen Spiels; dient
+// als Basis für den Dateinamen einer Aufzeichnung (alter Name + fortlaufende Nr.).
+// Früh deklariert, weil updateRecordControls() bereits beim Modul-Load läuft.
+let recording      = false;
+let recordedMoves  = [];
+let recordPrefix   = [];
+let lastLoadedGame = null;
+let lastLoadedFile = null;
 
 // Sperrt während laufender Engine-Suche/Animation alle weiteren Aktionen,
 // damit Notation und Engine-Zustand nicht durcheinanderkommen.
@@ -159,47 +177,91 @@ function clearEngineCandidates() {
 }
 
 // Engine indiziert Felder als rank*8 + file mit a1=0, h8=63. Canvas-Y wächst
-// nach unten, daher der Flip (7 - rank): rank 0 (Reihe 1) liegt am unteren
-// Rand. Die UI rendert immer aus Sicht von Rot unten — keine Brettdrehung.
+// nach unten. Per Doppelklick auf einen Score-Namen kann der Spieler nach
+// "unten links" gedreht werden — `viewRot` hält 0..3 viertel Drehungen im
+// Uhrzeigersinn (0 = Rot unten, Default).
+let viewRot = (() => {
+  const v = parseInt(localStorage.getItem('viewRot') || '0', 10);
+  return (v >= 0 && v <= 3) ? v : 0;
+})();
+
+// engine (file, rank) -> canvas (cf, cr) je nach Rotation
+function frToCanvas(f, r) {
+  switch (viewRot) {
+    case 0: return [f,     7 - r];
+    case 1: return [7 - r, 7 - f];
+    case 2: return [7 - f, r];
+    case 3: return [r,     f];
+  }
+}
+
+function canvasToFR(cf, cr) {
+  switch (viewRot) {
+    case 0: return [cf,     7 - cr];
+    case 1: return [7 - cr, 7 - cf];
+    case 2: return [7 - cf, cr];
+    case 3: return [cr,     cf];
+  }
+}
+
 function sq2xy(sq) {
-  return [sq % 8 * CELL, (7 - Math.floor(sq / 8)) * CELL];
+  const [cf, cr] = frToCanvas(sq % 8, Math.floor(sq / 8));
+  return [cf * CELL, cr * CELL];
 }
 
 function xy2sq(x, y) {
-  const f = Math.floor(x / CELL);
-  const r = 7 - Math.floor(y / CELL);
-  return (f >= 0 && f < 8 && r >= 0 && r < 8) ? r * 8 + f : null;
+  const cf = Math.floor(x / CELL);
+  const cr = Math.floor(y / CELL);
+  if (cf < 0 || cf >= 8 || cr < 0 || cr >= 8) return null;
+  const [f, r] = canvasToFR(cf, cr);
+  return r * 8 + f;
 }
 
 function drawSquares() {
-  for (let r = 0; r < 8; r++) {
-    for (let f = 0; f < 8; f++) {
+  // Felder
+  for (let cr = 0; cr < 8; cr++) {
+    for (let cf = 0; cf < 8; cf++) {
+      const [f, r] = canvasToFR(cf, cr);
       ctx.fillStyle = (f + r) % 2 === 0 ? BOARD_LIGHT : BOARD_DARK;
-      ctx.fillRect(f * CELL, (7 - r) * CELL, CELL, CELL);
+      ctx.fillRect(cf * CELL, cr * CELL, CELL, CELL);
     }
   }
   ctx.font = '12px sans-serif';
+
+  const horizLabel = (cf, cr) => {
+    const [f, r] = canvasToFR(cf, cr);
+    return (viewRot === 0 || viewRot === 2) ? String.fromCharCode(97 + f) : String(r + 1);
+  };
+  const vertLabel = (cf, cr) => {
+    const [f, r] = canvasToFR(cf, cr);
+    return (viewRot === 0 || viewRot === 2) ? String(r + 1) : String.fromCharCode(97 + f);
+  };
+  const labelColor = (cf, cr) => {
+    const [f, r] = canvasToFR(cf, cr);
+    return (f + r) % 2 === 0 ? BOARD_DARK : BOARD_LIGHT;
+  };
+
   ctx.textAlign = 'right';
   // Koordinaten oben
-  for (let f = 0; f < 8; f++) {
-    ctx.fillStyle = f % 2 === 0 ? BOARD_LIGHT : BOARD_DARK;
-    ctx.fillText(String.fromCharCode(97 + f), f * CELL + CELL - MARGIN_COORDS, MARGIN_COORDS);
+  for (let cf = 0; cf < 8; cf++) {
+    ctx.fillStyle = labelColor(cf, 0);
+    ctx.fillText(horizLabel(cf, 0), cf * CELL + CELL - MARGIN_COORDS, MARGIN_COORDS);
   }
   // Koordinaten unten
-  for (let f = 0; f < 8; f++) {
-    ctx.fillStyle = f % 2 === 1 ? BOARD_LIGHT : BOARD_DARK;    
-    ctx.fillText(String.fromCharCode(97 + f), f * CELL + CELL- MARGIN_COORDS, BOARD_SIZE - MARGIN_COORDS);
+  for (let cf = 0; cf < 8; cf++) {
+    ctx.fillStyle = labelColor(cf, 7);
+    ctx.fillText(horizLabel(cf, 7), cf * CELL + CELL - MARGIN_COORDS, BOARD_SIZE - MARGIN_COORDS);
   }
   ctx.textAlign = 'left';
   // Koordinaten links
-  for (let r = 0; r < 8; r++) {
-    ctx.fillStyle = r % 2 === 1 ? BOARD_LIGHT : BOARD_DARK;
-    ctx.fillText(r + 1, MARGIN_COORDS, (7 - r) * CELL + MARGIN_COORDS);
+  for (let cr = 0; cr < 8; cr++) {
+    ctx.fillStyle = labelColor(0, cr);
+    ctx.fillText(vertLabel(0, cr), MARGIN_COORDS, cr * CELL + MARGIN_COORDS);
   }
   // Koordinaten rechts
-  for (let r = 0; r < 8; r++) {
-    ctx.fillStyle = r % 2 === 0 ? BOARD_LIGHT : BOARD_DARK;
-    ctx.fillText(r + 1, BOARD_SIZE- MARGIN_COORDS*2, (7 - r) * CELL + MARGIN_COORDS);
+  for (let cr = 0; cr < 8; cr++) {
+    ctx.fillStyle = labelColor(7, cr);
+    ctx.fillText(vertLabel(7, cr), BOARD_SIZE - MARGIN_COORDS * 2, cr * CELL + MARGIN_COORDS);
   }
 }
 
@@ -292,20 +354,25 @@ function animateMove(fromSq, toSq, movingPiece, onDone) {
 // ─── Score & Status ───────────────────────────────────────────────────────────
 function updateScores() {
   ['red','blue','yellow','green'].forEach((c, i) => {
-    document.getElementById('score-' + c).textContent = state.scores[i];
+    document.getElementById('score-' + c).textContent = state.scores[i] + (forfeitBonus[i] || 0);
   });
 }
 
 function updateStatus() {
   if (state.is_over) {
-    const w = state.winner || 'Niemand';
+    const w = state.winner ? t('color.' + state.winner) : t('status.nobody');
     overlay.classList.add('hidden');
-    turnEl.innerHTML = 'Spiel beendet &ndash; Sieger: <strong>' + w + '</strong>';
+    turnEl.innerHTML = t('status.gameOver', { winner: w });
   } else {
     overlay.classList.add('hidden');
-    const active = ['Red','Blue','Yellow','Green'].filter((_, i) => state.active[i]);
-    turnEl.innerHTML = 'Zug: <strong style="color:' + COLOR_HEX[state.to_move] + '">'
-      + state.to_move + '</strong> &nbsp;|&nbsp; Aktiv: ' + active.join(', ');
+    const active = ['Red','Blue','Yellow','Green']
+      .filter((_, i) => state.active[i])
+      .map(c => t('color.' + c));
+    turnEl.innerHTML = t('status.turn', {
+      color:  COLOR_HEX[state.to_move],
+      name:   t('color.' + state.to_move),
+      active: active.join(', '),
+    });
   }
 }
 
@@ -354,8 +421,10 @@ canvas.addEventListener('click', (e) => {
       if (engine.apply_move(mv.notation)) {
         clearEngineCandidates();
         appendMoveLog(mv);
+        commitToReplay(mv.notation);
         state = engine.get_state();
         renderCaptures();
+        renderTopMoves();
         selected = null; legalMoves = [];
         setBusy(true);
         animateMove(fromSq, mv.to, movingPiece, () => { draw(); setBusy(false); });
@@ -403,6 +472,9 @@ function appendMoveLog(mv) {
     + (mv.promoted ? ' =B' : ''); // chaturaji: Bauer wird beim Promotionsfeld zum Boat (=B)
   const entry = { text, color: PLY_COLORS[plyCount % 4], notation: mv.notation };
   pushLoggedEntry(entry);
+  // Läuft eine Aufnahme, wird jeder gespielte Halbzug (Klick oder Engine)
+  // mitgeschnitten. mv.notation ist die Engine-Notation (z.B. "c2c3").
+  if (recording) { recordedMoves.push({ engine: mv.notation, time: Date.now() }); updateRecordControls(); }
   // Neuer Zug entwertet die Vor-Historie für den Redo-Button.
   playRedoStack.length = 0;
   updatePlayReplayButtons();
@@ -415,7 +487,7 @@ document.getElementById('btn-engine-move').addEventListener('click', () => {
   clearPreview();
   clearEngineCandidates();
   const depth = parseInt(depthInput.value);
-  engineInfo.textContent = 'Suche bei Tiefe ' + depth + '\u2026';
+  engineInfo.textContent = t('engine.searching', { depth });
   const epoch = ++actionEpoch;
   setBusy(true);
   // setTimeout(…, 10) gibt dem Browser einen Tick, um den "Suche…"-Text
@@ -423,15 +495,23 @@ document.getElementById('btn-engine-move').addEventListener('click', () => {
   // Suche den Main-Thread blockiert.
   setTimeout(() => {
     if (epoch !== actionEpoch) return; // Reset während Wartezeit -> verworfen
-    const t0   = performance.now();
-    const res  = engine.best_move(depth);
-    // top_moves nutzt die noch warme Transposition-Tabelle, kostet kaum extra.
-    const tops = (Array.from(engine.top_moves(depth, 3)) || [])
-                   .map(t => ({ mv: t.mv, pct: t.pct }));
-    const ms   = (performance.now() - t0).toFixed(0);
+    const useBook = document.getElementById('use-opening-book')?.checked ?? false;
+    const t0  = performance.now();
+    const res = engine.best_move(depth);
+    const ms  = (performance.now() - t0).toFixed(0);
 
     // Buch-Hit: Engine hat ohne Suche geantwortet (depth=0, nodes=0).
     const isBookMove = res.depth === 0 && (res.nodes || 0) === 0 && res.best_move;
+
+    // Kandidatenpfeile: bei Buch-Treffer + aktivierter Checkbox die Buchzüge
+    // verwenden, damit roter Pfeil = gesetzter Zug; sonst Engine-Top-N aus TT.
+    let tops;
+    if (useBook && isBookMove) {
+      tops = Array.from(engine.book_top_moves(3)).map(b => ({ mv: b.mv, pct: b.pct }));
+    } else {
+      // top_moves nutzt die noch warme Transposition-Tabelle, kostet kaum extra.
+      tops = Array.from(engine.top_moves(depth, 3)).map(t => ({ mv: t.mv, pct: t.pct }));
+    }
 
     // Top-3-Pfeile auf das Brett legen, bis der nächste Zug fällt.
     engineCandidates = tops;
@@ -444,18 +524,22 @@ document.getElementById('btn-engine-move').addEventListener('click', () => {
       movingPiece = state?.squares[fromSq] ?? null;
     }
 
-    const netNote  = res.used_network ? ' \uD83E\uDDE0 Netz aktiv' : '';
+    const netNote  = res.used_network ? t('net.active') : '';
     const topsLine = tops.length > 0
-      ? '  ' + tops.map((t, i) =>
-          (i + 1) + '. ' + engineMoveToDisplay(t.mv) + ' ' + t.pct + '%'
+      ? '  ' + tops.map((tm, i) =>
+          (i + 1) + '. ' + engineMoveToDisplay(tm.mv) + ' ' + tm.pct + '%'
         ).join(' \u00B7 ')
       : '';
     if (isBookMove) {
-      engineInfo.textContent = '\uD83D\uDCD6 Buchzug \u00B7 ' + ms + 'ms' + netNote + topsLine;
+      engineInfo.textContent = t('engine.bookMove', { ms, net: netNote, tops: topsLine });
     } else {
-      engineInfo.textContent = 'Tiefe ' + res.depth
-        + ' \u00B7 ' + (res.nodes || 0).toLocaleString() + ' Knoten'
-        + ' \u00B7 ' + ms + 'ms' + netNote + topsLine;
+      engineInfo.textContent = t('engine.depthInfo', {
+        depth: res.depth,
+        nodes: (res.nodes || 0).toLocaleString(),
+        ms,
+        net: netNote,
+        tops: topsLine,
+      });
     }
 
     // Erst Pfeile zeichnen, dann mit kleiner Verzögerung den Zug ausführen
@@ -468,8 +552,10 @@ document.getElementById('btn-engine-move').addEventListener('click', () => {
         recordCaptureFromMove(toSq);
         if (engine.apply_move(res.best_move)) {
           appendMoveLog({ notation: res.best_move, captures: false, promoted: false });
+          commitToReplay(res.best_move);
           state = engine.get_state();
           renderCaptures();
+          renderTopMoves();
           applied = true;
         } else {
           undoLastCapture();
@@ -509,9 +595,21 @@ function renderEngineCandidates(tops) {
   panel.classList.remove('hidden');
 }
 
+function commitToReplay(engineNotation) {
+  if (replayMoves.length === 0 || replayIdx >= replayMoves.length) return;
+  replayMoves[replayIdx] = {
+    ...replayMoves[replayIdx],
+    engine:  engineNotation,
+    display: engineMoveToDisplay(engineNotation),
+  };
+  forfeitsAppliedAtIdx[replayIdx] = 0;
+  replayIdx++;
+  updateReplayPos();
+}
+
 function playUndoStep() {
   if (isBusy) return false;
-  clearPreview();
+  if (previewMv !== null) { clearPreview(); draw(); return true; }
   clearEngineCandidates();
   if (plyCount === 0) return false;
   const lastEntry = moveLogEntries[moveLogEntries.length - 1];
@@ -529,6 +627,9 @@ function playUndoStep() {
   if (engine.undo()) {
     plyCount--;
     moveLogEntries.pop();
+    // Aufnahme: den zuletzt aufgezeichneten Halbzug ebenfalls verwerfen (nur
+    // eigene Aufnahme-Züge, nicht den fixen Modus-2-Prefix).
+    if (recording && recordedMoves.length > 0) { recordedMoves.pop(); updateRecordControls(); }
     if (plyCount % 4 === 0) {
       if (moveList.lastChild) moveList.removeChild(moveList.lastChild);
     } else {
@@ -591,8 +692,10 @@ document.getElementById('btn-reset').addEventListener('click', () => {
   plyCount = 0; moveLogEntries.length = 0;
   selected = null; legalMoves = [];
   engineInfo.textContent = '';
-  replayMoves = []; replayIdx = 0; replayEvals = [];
+  replayMoves = []; replayMovesOriginal = []; replayIdx = 0; replayEvals = []; replayAnnotations = [];
   allForfeits = []; appliedForfeitStack.length = 0; forfeitsAppliedAtIdx.length = 0;
+  forfeitBonus = [0, 0, 0, 0]; lateForfeitCount = 0;
+  resignedKingBonusAtIdx.length = 0;
   playerClocks = [null, null, null, null];
   prevPlayerClocks.length = 0;
   refreshAllScoreTimes();
@@ -603,18 +706,179 @@ document.getElementById('btn-reset').addEventListener('click', () => {
   clearCaptures(); renderCaptures();
   document.getElementById('top-moves-panel').classList.add('hidden');
   gameChat = []; gameChatUidToColor = {}; gameChatIdx = 0; maxChatFullMoveNr = 0;
-  document.getElementById('chat-messages').innerHTML = '<p class="chat-empty">Kein Spiel geladen.</p>';
+  document.getElementById('chat-messages').innerHTML =
+    '<p class="chat-empty" data-i18n="chat.empty">' + t('chat.empty') + '</p>';
   document.getElementById('game-info').innerHTML = '';
   const gameNrEl = document.getElementById('gameNr');
   if (gameNrEl) gameNrEl.textContent = '';
-  const defaults = ['Rot','Blau','Gelb','Grün'];
-  ['red','blue','yellow','green'].forEach((c, i) => {
+  // Score-Namen wieder auf Default-Farbtitel zurücksetzen und i18n-Marker
+  // restaurieren, damit ein Sprachwechsel danach wieder greift.
+  const colorKeys = { red: 'color.Red', blue: 'color.Blue', yellow: 'color.Yellow', green: 'color.Green' };
+  for (const c of Object.keys(colorKeys)) {
     const el = document.querySelector('.score.' + c + ' .score-name');
-    if (el) el.textContent = defaults[i];
-  });
+    if (el) {
+      el.setAttribute('data-i18n', colorKeys[c]);
+      el.textContent = t(colorKeys[c]);
+    }
+  }
+  // Kein Spiel mehr geladen → Buch-Checkbox aktivieren und Top-Züge neu rendern
+  const bookCb = document.getElementById('use-opening-book');
+  if (bookCb && engine.book_info().loaded) { bookCb.checked = true; renderTopMoves(); }
+  // Laufende Aufnahme abbrechen und Aufnahme-State zurücksetzen.
+  recording = false; recordedMoves = []; recordPrefix = []; lastLoadedGame = null; lastLoadedFile = null;
+  updateRecordControls();
   setBusy(false);
   draw();
 });
+
+// ─── Aufzeichnen (Recording) ──────────────────────────────────────────────────
+// Modus 1: frische Partie ab Zug 1 aufzeichnen. Nutzt den Reset-Handler (leert
+// Brett + schaltet auf Play-Modus) und startet dann die Aufnahme.
+function startRecordingFresh() {
+  document.getElementById('btn-reset').click(); // leert alles + recording=false
+  recording = true; recordedMoves = []; recordPrefix = [];
+  updateRecordControls();
+}
+
+// Modus 2: geladenes Spiel bis zum aktuellen Replay-Zug übernehmen und ab hier
+// weiter aufzeichnen (eigene Klick- oder Engine-Züge). Das Brett steht bereits
+// auf der Stellung nach `replayIdx` Zügen.
+function startRecordingBranch() {
+  if (replayMoves.length === 0) return;
+  recordPrefix = replayMoves.slice(0, replayIdx).map(m => ({ engine: m.engine, time: m.time }));
+  // replayMoves auf den gewählten Zug kürzen → commitToReplay wird zum No-Op,
+  // Folgezüge landen nur noch in recordedMoves.
+  replayMoves = replayMoves.slice(0, replayIdx);
+  replayIdx = replayMoves.length;
+  updateReplayPos();
+  // Auf Play-Modus umschalten (Replay-Navigation aus, Play-Navigation an).
+  document.getElementById('replay-controls').classList.add('hidden');
+  document.getElementById('play-replay-controls').classList.remove('hidden');
+  recording = true; recordedMoves = [];
+  updatePlayReplayButtons();
+  updateRecordControls();
+}
+
+function stopRecording() {
+  recording = false;
+  updateRecordControls();
+}
+
+// Enable/Disable + Anzeige der Aufnahme-Buttons je nach Zustand.
+function updateRecordControls() {
+  const $ = id => document.getElementById(id);
+  const btnNew = $('btn-record-new');
+  const btnBranch = $('btn-record-branch');
+  const btnStop = $('btn-record-stop');
+  const btnSave = $('btn-record-save');
+  const ind = $('record-indicator');
+  if (btnNew) btnNew.disabled = false;
+  if (btnBranch) btnBranch.disabled = recording || replayMoves.length === 0;
+  if (btnStop) btnStop.disabled = !recording;
+  if (btnSave) btnSave.disabled = recordedMoves.length === 0;
+  if (ind) {
+    const total = recordPrefix.length + recordedMoves.length;
+    ind.textContent = recording ? t('record.running', { n: total }) : '';
+    ind.classList.toggle('hidden', !recording);
+  }
+}
+
+// Ermittelt den nächsten freien Dateinamen für die Aufzeichnung eines bestehenden
+// Spiels: alter Name (ohne evtl. vorhandene "-<Nr>"-Endung) plus fortlaufende Nummer.
+// `index` wird durchsucht, um bereits gespeicherte Varianten zu überspringen.
+function nextVariantFilename(baseFile, index) {
+  const root = baseFile.replace(/\.json$/i, '').replace(/-\d+$/, '');
+  const esc  = root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re   = new RegExp('^' + esc + '-(\\d+)\\.json$', 'i');
+  let max = 0;
+  for (const e of (index || [])) {
+    const m = e && typeof e.file === 'string' ? e.file.match(re) : null;
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return root + '-' + (max + 1) + '.json';
+}
+
+// Öffnet den Speichern-Dialog mit vorbelegten Feldern. Modus 2 übernimmt die
+// Metadaten des geladenen Spiels, Modus 1 startet leer.
+function openSaveDialog() {
+  if (recordedMoves.length === 0) return;
+  const $ = id => document.getElementById(id);
+  const g = lastLoadedGame || {};
+  // Aufzeichnung eines bestehenden Spiels → alter Name + fortlaufende Nummer,
+  // sonst eine frische Partie mit Zeitstempel-Namen.
+  $('rec-dlg-filename').value = lastLoadedFile
+    ? nextVariantFilename(lastLoadedFile, gamesIndex)
+    : 'recording-' + Date.now() + '.json';
+  for (let i = 1; i <= 4; i++) {
+    $('rec-dlg-name-' + i).value = g['username' + i] || '';
+  }
+  $('rec-dlg-gamenr').value = g.gameNr || '';
+  $('record-save-dialog').classList.remove('hidden');
+  $('rec-dlg-filename').focus();
+}
+
+function closeSaveDialog() {
+  document.getElementById('record-save-dialog').classList.add('hidden');
+}
+
+// Baut das Spiel-JSON (gleiches Format wie gespeicherte Spiele) und schreibt es
+// serverseitig über save-game.php (lokal: Node-Pendant in server.js). Danach App-Liste neu laden.
+async function saveRecording() {
+  const $ = id => document.getElementById(id);
+  const g = lastLoadedGame || {};
+  let filename = ($('rec-dlg-filename').value || '').trim();
+  if (!filename) filename = 'recording-' + Date.now() + '.json';
+  if (!filename.endsWith('.json')) filename += '.json';
+  if (!/^[\w.-]+$/.test(filename)) { alert(t('record.badFilename')); return; }
+
+  const engMoves = [...recordPrefix.map(m => m.engine), ...recordedMoves.map(m => m.engine)];
+  const times    = [...recordPrefix.map(m => m.time),   ...recordedMoves.map(m => m.time)];
+  const pgn4 = buildPgn4(engMoves, times);
+
+  const gameNrRaw = ($('rec-dlg-gamenr').value || '').trim();
+  const game = {
+    gameNr: gameNrRaw ? (Number(gameNrRaw) || gameNrRaw) : Date.now(),
+    pgn4,
+    result: g.result || '',
+    chat: [],
+  };
+  for (let i = 1; i <= 4; i++) {
+    game['username' + i] = ($('rec-dlg-name-' + i).value || '').trim();
+    game['uid' + i]      = g['uid' + i] || '';
+    game['rating' + i]   = g['rating' + i] ?? null;
+  }
+
+  try {
+    // Aufzeichnung eines bestehenden Spiels: der Server vergibt anhand von
+    // baseFile den nächsten freien Namen "alterName-<Nr>.json" (autoritativ, auch
+    // bei zwischenzeitlich veraltetem Client-Index).
+    const r = await fetch('save-game.php', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename, game, baseFile: lastLoadedFile || undefined }),
+    });
+    if (!r.ok) { alert(t('record.saveFailed', { err: r.status + ' ' + await r.text() })); return; }
+    let savedFile = filename;
+    try { const j = await r.json(); if (j && j.file) savedFile = j.file; } catch { /* Antwort optional */ }
+    closeSaveDialog();
+    stopRecording();
+    // Index neu holen (cache-bust), damit das Spiel sofort in der Liste steht.
+    try {
+      const ir = await fetch('games_index.json?t=' + Date.now());
+      if (ir.ok) { gamesIndex = await ir.json(); renderGameFilterResults(); }
+    } catch { /* Liste optional */ }
+    alert(t('record.saved', { file: savedFile }));
+  } catch (err) {
+    alert(t('record.saveFailed', { err: err.message }));
+  }
+}
+
+document.getElementById('btn-record-new').addEventListener('click', startRecordingFresh);
+document.getElementById('btn-record-branch').addEventListener('click', startRecordingBranch);
+document.getElementById('btn-record-stop').addEventListener('click', stopRecording);
+document.getElementById('btn-record-save').addEventListener('click', openSaveDialog);
+document.getElementById('rec-dlg-ok').addEventListener('click', saveRecording);
+document.getElementById('rec-dlg-cancel').addEventListener('click', closeSaveDialog);
 
 // ─── Netz laden / entladen ────────────────────────────────────────────────────
 document.getElementById('net-file-input').addEventListener('change', (e) => {
@@ -624,13 +888,14 @@ document.getElementById('net-file-input').addEventListener('change', (e) => {
   reader.onload = (ev) => {
     const err = engine.load_network_json(ev.target.result);
     if (err) {
-      netStatus.textContent = 'Fehler: ' + err;
+      netStatus.textContent = t('net.autoLoadFailed', { err });
       netStatus.className = 'err';
     } else {
       const info = engine.network_info();
-      netStatus.textContent = '\u2705 ' + file.name
-        + ' | Schritte: ' + info.steps.toLocaleString()
-        + ' | ' + info.params.toLocaleString() + ' Parameter';
+      netStatus.textContent = t('net.autoLoaded', {
+        steps:  info.steps.toLocaleString(),
+        params: info.params.toLocaleString(),
+      }).replace('weights.json', file.name);
       netStatus.className = 'ok';
       unloadBtn.disabled = false;
       draw();
@@ -643,7 +908,7 @@ document.getElementById('net-file-input').addEventListener('change', (e) => {
 
 unloadBtn.addEventListener('click', () => {
   engine.unload_network();
-  netStatus.textContent = 'Kein Netz geladen \u2013 Engine nutzt Alpha-Beta';
+  netStatus.textContent = t('net.empty');
   netStatus.className = '';
   unloadBtn.disabled = true;
   netBars.classList.add('hidden');
@@ -659,14 +924,15 @@ unloadBtn.addEventListener('click', () => {
     const text = await r.text();
     const err  = engine.load_network_json(text);
     if (err) {
-      netStatus.textContent = 'Auto-Load fehlgeschlagen: ' + err;
+      netStatus.textContent = t('net.autoLoadFailed', { err });
       netStatus.className = 'err';
       return;
     }
     const info = engine.network_info();
-    netStatus.textContent = '\u2705 weights.json (auto)'
-      + ' | Schritte: ' + info.steps.toLocaleString()
-      + ' | ' + info.params.toLocaleString() + ' Parameter';
+    netStatus.textContent = t('net.autoLoaded', {
+      steps:  info.steps.toLocaleString(),
+      params: info.params.toLocaleString(),
+    });
     netStatus.className = 'ok';
     unloadBtn.disabled = false;
     draw();
@@ -684,19 +950,28 @@ unloadBtn.addEventListener('click', () => {
     const err  = engine.load_book_json(text);
     if (err) {
       if (bookStatus) {
-        bookStatus.textContent = 'Auto-Load fehlgeschlagen: ' + err;
+        bookStatus.textContent = t('book.autoLoadFailed', { err });
         bookStatus.className = 'err';
       }
       return;
     }
     const info = engine.book_info();
     if (bookStatus) {
-      bookStatus.textContent = '\u2705 opening_book.json (auto)'
-        + ' | ' + info.positions.toLocaleString() + ' Stellungen';
+      bookStatus.textContent = t('book.autoLoaded', {
+        positions: info.positions.toLocaleString(),
+      });
       bookStatus.className = 'ok';
     }
+    // Buch geladen \u2192 Checkbox standardm\u00e4\u00dfig aktiv (kein Replay-Spiel geladen)
+    const bookCb = document.getElementById('use-opening-book');
+    if (bookCb) { bookCb.checked = true; renderTopMoves(); }
   } catch { /* offline / kein Server \u2013 egal */ }
 })();
+
+// Checkbox: Er\u00f6ffnungsbuch verwenden
+document.getElementById('use-opening-book')?.addEventListener('change', () => {
+  renderTopMoves();
+});
 
 // ─── PGN ─────────────────────────────────────────────────────────────────────
 document.getElementById('btn-load-pgn').addEventListener('click', () => {
@@ -704,7 +979,7 @@ document.getElementById('btn-load-pgn').addEventListener('click', () => {
   if (!pgn) return;
   previewMv = null; previewRow = null;
   const err = engine.load_pgn(pgn);
-  if (err) { alert('PGN-Fehler: ' + err); return; }
+  if (err) { alert(t('pgn.error', { err })); return; }
   moveList.innerHTML = '';
   plyCount = 0; moveLogEntries.length = 0;
   selected = null; legalMoves = [];
@@ -716,9 +991,11 @@ document.getElementById('btn-export-pgn').addEventListener('click', () => {
 });
 
 // ─── Replay-Zustand ───────────────────────────────────────────────────────────
-let replayMoves = [];
-let replayIdx   = 0;
-let replayEvals = [];   // vorberechnete Analysedaten (game_analysis/*.json)
+let replayMoves         = [];
+let replayMovesOriginal = [];   // unveränderliche Kopie der geladenen Partie
+let replayIdx           = 0;
+let replayEvals       = [];   // vorberechnete Analysedaten (game_analysis/*.json)
+let replayAnnotations = [];   // Analyse-Annotationen (annotations-Feld aus game_analysis/*.json)
 
 // Forfeits/Resignations aus dem Chat (Engine erkennt nur Königsschläge).
 // `appliedForfeitStack` = bereits angewandte Forfeits in chronologischer Reihen-
@@ -727,6 +1004,18 @@ let replayEvals = [];   // vorberechnete Analysedaten (game_analysis/*.json)
 let allForfeits          = [];
 let appliedForfeitStack  = [];
 let forfeitsAppliedAtIdx = [];
+// Bonuspunkte pro Farbe, die durch Forfeit-Notizen ("(Green +3)") angefallen
+// sind — die Engine kennt sie nicht, also addieren wir sie in updateScores().
+let forfeitBonus = [0, 0, 0, 0];
+// Forfeits, die NACH dem letzten echten Zug angewandt wurden (z.B. Time-Forfeit
+// am Spielende ohne weiteren Zug). Werden beim Zurückblättern vom Ende aus
+// rückgängig gemacht — getrennt vom regulären forfeitsAppliedAtIdx[], weil sie
+// keinem konkreten Zug-Index vorgeschaltet sind.
+let lateForfeitCount = 0;
+// Bonuspunkte für Königsschläge an bereits ausgestiegenen (aber noch nicht
+// eliminierten) Spielern — die Engine vergibt 0, chess.com aber +3. Pro
+// replayIdx max. ein Eintrag {mover, points} für sauberes Undo.
+let resignedKingBonusAtIdx = [];
 
 // Verbleibende Bedenkzeit pro Spieler in ms (null = noch kein Zug gespielt).
 // `prevPlayerClocks[idx]` speichert den vorherigen Wert für sauberes Undo:
@@ -793,23 +1082,28 @@ function clearCaptures() {
   captureHistory.length = 0;
 }
 
-// Render-Helper. Sortiert nach Figurenwert absteigend, gleiche Art bleibt
-// gruppiert; nicht-Bauern-Figuren bekommen weniger Überlapp via Klasse.
+// Render-Helper. Eine Zeile pro Figurenart (Königswert oben, Bauern unten).
 const KIND_ORDER = { King: 0, Boat: 1, Bishop: 2, Knight: 3, Pawn: 4 };
 function renderCaptures() {
   for (let i = 0; i < 4; i++) {
     const el = document.getElementById('captures-' + PLY_COLORS[i]);
     if (!el) continue;
-    const items = capturedByPlayer[i].slice();
-    items.sort((a, b) => (KIND_ORDER[a.kind] ?? 9) - (KIND_ORDER[b.kind] ?? 9));
+    // Nach Figurentyp gruppieren, Reihenfolge per KIND_ORDER
+    const groups = new Map();
+    for (const p of capturedByPlayer[i]) {
+      if (!groups.has(p.kind)) groups.set(p.kind, []);
+      groups.get(p.kind).push(p);
+    }
+    const sorted = [...groups.entries()]
+      .sort((a, b) => (KIND_ORDER[a[0]] ?? 9) - (KIND_ORDER[b[0]] ?? 9));
     let html = '';
-    let prevKind = null;
-    for (const p of items) {
-      const sameKind = (p.kind === prevKind);
-      html += '<img class="' + (sameKind ? 'stack' : '')
-            + '" src="pieces/' + p.color.toLowerCase() + '-' + p.kind.toLowerCase()
-            + '.svg" alt="' + p.color + ' ' + p.kind + '">';
-      prevKind = p.kind;
+    for (const [, pieces] of sorted) {
+      html += '<div class="capture-row">';
+      for (const p of pieces) {
+        html += '<img src="pieces/' + p.color.toLowerCase() + '-' + p.kind.toLowerCase()
+              + '.svg" alt="' + p.color + ' ' + p.kind + '">';
+      }
+      html += '</div>';
     }
     el.innerHTML = html;
   }
@@ -853,6 +1147,14 @@ function ccSqToEngine(sq) {
   const er = rank - 3;
   if (ef < 0 || ef > 7 || er < 1 || er > 8) return null;
   return String.fromCharCode(97 + ef) + er;
+}
+
+// Umkehrung von ccSqToEngine: Engine-Feld ("d4", a–h × 1–8) → cc-Feld des
+// 14×14-Bretts ("g7"), indem Datei und Reihe je um 3 verschoben werden.
+function engSqToCc(sq) {
+  const file = sq.charCodeAt(0) - 97;        // a=0 … h=7
+  const rank = parseInt(sq.slice(1), 10);    // 1-8
+  return String.fromCharCode(97 + file + 3) + (rank + 3);
 }
 
 function ccMoveToEngine(cc) {
@@ -917,6 +1219,45 @@ function updateReplayPos() {
   document.getElementById('replay-pos').textContent = replayIdx + ' / ' + replayMoves.length;
 }
 
+// Umkehrung von parsePgn4Moves: baut aus einer Liste von Engine-Notationen
+// (z.B. ["c2c3", "e2e3", …]) einen chess.com-kompatiblen pgn4-String, den
+// loadGame()/parsePgn4Moves wieder einlesen kann.
+//   - Rundenzähler `1.` `2.` … alle 4 Halbzüge.
+//   - Feld-Tokens im 14×14-Raster (engSqToCc), Trenner `x` bei Schlag sonst `-`,
+//     optionaler Figurbuchstabe (K/B/N/R, Bauer = keiner) — beides rein
+//     kosmetisch, da ccMoveToEngine es beim Reload wieder verwirft.
+//   - optionaler `{date=…}`-Kommentar aus den Aufnahme-Zeitstempeln.
+// Eine Scratch-Engine bestimmt Schlag/Figur, ohne das UI-Brett zu verändern.
+function buildPgn4(engineMoves, times) {
+  const PIECE_LETTER = { King: 'K', Bishop: 'B', Knight: 'N', Boat: 'R', Pawn: '' };
+  const scratch = new WasmEngine();
+  let scratchOk = true;
+  const tokens = [];
+  for (let i = 0; i < engineMoves.length; i++) {
+    if (i % 4 === 0) tokens.push(`${i / 4 + 1}.`);
+    const mv = engineMoves[i];
+    if (!mv || mv === '--') { tokens.push('--'); continue; }
+    const from = mv.slice(0, 2), to = mv.slice(2, 4);
+    let letter = '', sep = '-';
+    if (scratchOk) {
+      const st = scratch.get_state();
+      const fromSq = engineSqIdx(from), toSq = engineSqIdx(to);
+      const p = st.squares[fromSq];
+      if (p) letter = PIECE_LETTER[p.kind] ?? '';
+      if (st.squares[toSq]) sep = 'x';
+    }
+    const ccFrom = engSqToCc(from), ccTo = engSqToCc(to);
+    let token = letter + ccFrom + sep + ccTo;
+    const ts = times && times[i];
+    if (ts) token += ` {date=${new Date(ts).toISOString()}}`;
+    tokens.push(token);
+    // Scratch-Engine nachziehen (mit Promotions-Fallback wie im Replay); bei
+    // Desync (z.B. Chat-Time-Forfeit im Prefix) nur noch schmucklose Tokens.
+    if (!(scratch.apply_move(mv) || scratch.apply_move(mv + 'p'))) scratchOk = false;
+  }
+  return '[Event "Chaturaji"]\n[Result "*"]\n\n' + tokens.join(' ') + '\n';
+}
+
 // ─── Top-Züge ─────────────────────────────────────────────────────────────────
 function engineMoveToDisplay(eng) {
   if (!eng || eng.length < 4) return eng;
@@ -936,6 +1277,7 @@ function clearPreview() {
   selected = null; legalMoves = [];
   if (previewRow) previewRow.classList.remove('active');
   previewMv = null; previewRow = null;
+  renderTopMoves();
 }
 
 function applyPreview(t, row) {
@@ -946,47 +1288,101 @@ function applyPreview(t, row) {
 
   const fromSq = engineSqIdx(t.mv.slice(0, 2));
   const toSq   = engineSqIdx(t.mv.slice(2, 4));
-  const movingPiece = state?.squares[fromSq] ?? null;
+  const movingPiece  = state?.squares[fromSq] ?? null;
+  const capturePiece = state?.squares[toSq]   ?? null;
+  const inReplay = replayMoves.length > 0 && replayIdx < replayMoves.length;
+
   // Vorberechnete Top-Züge enthalten keinen Promotionssuffix; falls der reine
   // Zug abgelehnt wird, ist es vermutlich eine Bauernumwandlung — Retry mit
   // 'p' (Promotion zu Boat, einzige Promotion in Chaturaji).
-  if (engine.apply_move(t.mv) || engine.apply_move(t.mv + 'p')) {
+  if (inReplay) recordCaptureFromMove(toSq);
+  let notation = null;
+  if      (engine.apply_move(t.mv))       notation = t.mv;
+  else if (engine.apply_move(t.mv + 'p')) notation = t.mv + 'p';
+  if (!notation) { if (inReplay) undoLastCapture(); return; }
+
+  if (inReplay) {
+    // Replay-Modus: Zug permanent einbuchen, nicht als Vorschau
+    appendMoveLog({ notation, captures: capturePiece !== null, promoted: notation.length > 4 });
+    state = engine.get_state();
+    renderCaptures();
+    commitToReplay(notation);
+    renderTopMoves();
+    setBusy(true);
+    animateMove(fromSq, toSq, movingPiece, () => { draw(); setBusy(false); });
+  } else {
     previewMv  = t.mv;
     previewRow = row;
     row.classList.add('active');
     state = engine.get_state();
+    renderTopMoves();
     setBusy(true);
     animateMove(fromSq, toSq, movingPiece, () => { draw(); setBusy(false); });
   }
 }
 
 function renderTopMoves() {
-  const panel = document.getElementById('top-moves-panel');
-  const list  = document.getElementById('top-moves-list');
+  const panel      = document.getElementById('top-moves-panel');
+  const list       = document.getElementById('top-moves-list');
+  const sourceEl   = document.getElementById('top-moves-source');
+  const bookCb     = document.getElementById('use-opening-book');
   if (!panel || !list) return;
 
-  // Vorberechnete Daten für die aktuelle Position (replayIdx zeigt auf nächsten Zug)
-  const evalEntry = replayEvals[replayIdx] ?? null;
-  const tops = evalEntry?.top ?? null;
+  const useBook = bookCb?.checked ?? false;
+  let tops      = null;
+  let fromBook  = false;
+
+  if (useBook) {
+    // Buchzüge für die aktuelle Stellung holen (Top 3, count >= 1)
+    const bookMoves = engine.book_top_moves(3);
+    if (bookMoves && bookMoves.length > 0) {
+      tops     = bookMoves;
+      fromBook = true;
+    }
+  }
+
+  if (!tops) {
+    if (previewMv !== null) { panel.classList.add('hidden'); return; }
+    // Fallback: vorberechnete Analysedaten
+    const evalEntry = replayEvals[replayIdx] ?? null;
+    tops = evalEntry?.top ?? null;
+    fromBook = false;
+  }
+
   if (!tops || tops.length === 0) { panel.classList.add('hidden'); return; }
 
-  const st = engine.get_state();
+  const st         = engine.get_state();
   const COLOR_CLASS = ['red', 'blue', 'yellow', 'green'];
-  const playerIdx   = ['Red', 'Blue', 'Yellow', 'Green'].indexOf(st.to_move);
-  const colorClass  = COLOR_CLASS[playerIdx] ?? '';
-  const barColor    = COLOR_HEX[st.to_move] ?? '#f0c040';
+  const playerIdx  = ['Red', 'Blue', 'Yellow', 'Green'].indexOf(st.to_move);
+  const colorClass = COLOR_CLASS[playerIdx] ?? '';
+  const barColor   = COLOR_HEX[st.to_move] ?? '#f0c040';
+
+  if (sourceEl) {
+    if (fromBook) {
+      sourceEl.textContent = t('topMoves.sourceBook');
+      sourceEl.classList.remove('hidden');
+    } else if (replayEvals.length > 0) {
+      sourceEl.textContent = t('topMoves.sourceAnalysis');
+      sourceEl.classList.remove('hidden');
+    } else {
+      sourceEl.classList.add('hidden');
+    }
+  }
 
   list.innerHTML = '';
   previewMv = null; previewRow = null;
-  for (const t of tops) {
+  for (const mv of tops) {
     const row = document.createElement('button');
     row.type = 'button';
     row.className = 'top-move-row';
+    const pctLabel = fromBook
+      ? mv.count.toLocaleString() + '×'
+      : mv.pct + '%';
     row.innerHTML =
-      `<span class="top-move-notation ${colorClass}">${engineMoveToDisplay(t.mv)}</span>` +
-      `<div class="top-move-bar-wrap"><div class="top-move-bar" style="width:${t.pct}%;background:${barColor}"></div></div>` +
-      `<span class="top-move-pct">${t.pct}%</span>`;
-    row.addEventListener('click', () => applyPreview(t, row));
+      `<span class="top-move-notation ${colorClass}">${engineMoveToDisplay(mv.mv)}</span>` +
+      `<div class="top-move-bar-wrap"><div class="top-move-bar" style="width:${mv.pct}%;background:${barColor}"></div></div>` +
+      `<span class="top-move-pct">${pctLabel}</span>`;
+    row.addEventListener('click', () => applyPreview(mv, row));
     list.appendChild(row);
   }
   panel.classList.remove('hidden');
@@ -1038,23 +1434,37 @@ function renderChatUpTo(upToTime) {
 // Aus Chat-Nachrichten Forfeits/Resignations extrahieren — Eliminierungen, die
 // nicht durch Königsschlag passieren und die die Engine sonst nicht erkennt.
 // Königsschlag-Mate ("X checkmated!") ignorieren wir, das macht die Engine selbst.
+// Für Forfeits steht oft direkt im Anschluss eine "(<Color> +N)"-Notiz, mit der
+// chess.com einem Mitspieler Bonuspunkte gutschreibt — die übernehmen wir, weil
+// die Engine selbst keine Forfeit-Boni vergibt.
 function extractForfeits(chat, nameToColor) {
   const out = [];
   const cap = (c) => c[0].toUpperCase() + c.slice(1).toLowerCase();
-  for (const m of chat) {
+  for (let i = 0; i < chat.length; i++) {
+    const m = chat[i];
     if (typeof m?.message !== 'string' || m.fullMoveNr == null) continue;
+    let color = null;
     // Variante 1: "<Color> resigned/forfeits"
     let match = m.message.match(/^(Red|Blue|Yellow|Green)\s+(forfeits|resigned)/i);
-    if (match) {
-      out.push({ fmn: m.fullMoveNr, color: cap(match[1]) });
-      continue;
+    if (match) color = cap(match[1]);
+    else {
+      // Variante 2: "<PlayerName> resigned/forfeits" — Name → Farbe lookup
+      match = m.message.match(/^([\w.\-]+)\s+(forfeits|resigned)/i);
+      if (match && nameToColor) {
+        const c = nameToColor[match[1]] || nameToColor[match[1].toLowerCase()];
+        if (c) color = cap(c);
+      }
     }
-    // Variante 2: "<PlayerName> resigned/forfeits" — Name → Farbe lookup
-    match = m.message.match(/^([\w.\-]+)\s+(forfeits|resigned)/i);
-    if (match && nameToColor) {
-      const c = nameToColor[match[1]] || nameToColor[match[1].toLowerCase()];
-      if (c) out.push({ fmn: m.fullMoveNr, color: cap(c) });
+    if (!color) continue;
+    // Auf eine direkt folgende "(<Color> +N)"-Notiz schauen
+    let bonusColor = null, bonusPoints = 0;
+    for (let j = i + 1; j < chat.length && j <= i + 3; j++) {
+      const next = chat[j];
+      if (next?.fullMoveNr !== m.fullMoveNr) break;
+      const bm = (next?.message || '').match(/^\((Red|Blue|Yellow|Green)\s*\+(\d+)\)/i);
+      if (bm) { bonusColor = cap(bm[1]); bonusPoints = parseInt(bm[2], 10); break; }
     }
+    out.push({ fmn: m.fullMoveNr, color, bonusColor, bonusPoints });
   }
   out.sort((a, b) => a.fmn - b.fmn);
   return out;
@@ -1076,6 +1486,8 @@ function resetChatToTime(upToTime) {
 
 // ─── Spiel-JSON laden ─────────────────────────────────────────────────────────
 function loadGame(gameData) {
+  lastLoadedGame = gameData;   // Metadaten-Quelle für "Ab hier aufzeichnen" (Modus 2)
+  lastLoadedFile = null;       // wird von loadGameFromIndex() mit dem Dateinamen belegt
   const pgn4  = gameData.pgn4  || '';
   const chat  = gameData.chat  || [];
   const colors = ['Red','Blue','Yellow','Green'];
@@ -1093,6 +1505,10 @@ function loadGame(gameData) {
       players.push({ color: colors[i - 1].toLowerCase(), username });
     }
   }
+
+  const gameLink = document.getElementById('gameLink');
+
+  if (gameLink) gameLink.setAttribute('href', 'https://www.chess.com/variants/chaturaji/game/' + gameData.gameNr);
 
   const gameNrEl = document.getElementById('gameNr');
   if (gameNrEl) gameNrEl.textContent = gameData.gameNr ? '#' + gameData.gameNr : '';
@@ -1114,14 +1530,19 @@ function loadGame(gameData) {
     const el = document.querySelector('.score.' + scoreColors[i-1] + ' .score-name');
     if (el && username) {
       el.textContent = rating ? `${username} (${rating})` : username;
+      // Spielername hat Vorrang vor Sprachwechsel — i18n-Marker entfernen.
+      el.removeAttribute('data-i18n');
     }
   }
 
-  replayMoves = parsePgn4Moves(pgn4);
-  replayIdx   = 0;
+  replayMoves         = parsePgn4Moves(pgn4);
+  replayMovesOriginal = replayMoves.map(m => ({ ...m }));
+  replayIdx           = 0;
   allForfeits = extractForfeits(chat, nameToColor);
   appliedForfeitStack.length = 0;
   forfeitsAppliedAtIdx.length = 0;
+  forfeitBonus = [0, 0, 0, 0]; lateForfeitCount = 0;
+  resignedKingBonusAtIdx.length = 0;
   playerClocks = [null, null, null, null];
   prevPlayerClocks.length = 0;
   refreshAllScoreTimes();
@@ -1139,6 +1560,15 @@ function loadGame(gameData) {
   clearCaptures(); renderCaptures();
   updateReplayPos();
   draw();
+
+  // Spiel geladen → Eröffnungsbuch-Checkbox deaktivieren (Analyse-Daten bevorzugt)
+  const bookCb = document.getElementById('use-opening-book');
+  if (bookCb) bookCb.checked = false;
+
+  // Frisch geladenes Spiel → evtl. laufende Aufnahme beenden, "Ab hier
+  // aufzeichnen" ist jetzt verfügbar.
+  recording = false; recordedMoves = []; recordPrefix = [];
+  updateRecordControls();
 }
 
 document.getElementById('game-json-input').addEventListener('change', (e) => {
@@ -1151,19 +1581,23 @@ document.getElementById('game-json-input').addEventListener('change', (e) => {
       loadGame(data);
       // Analyse direkt aus der Datei (game_analysis/) übernehmen, falls vorhanden …
       if (Array.isArray(data.evals)) {
-        replayEvals = data.evals;
+        replayEvals       = data.evals;
+        replayAnnotations = Array.isArray(data.annotations) ? data.annotations : [];
         renderTopMoves();
+        renderAnnotationPanel();
       } else {
         try {
           const r = await fetch('game_analysis/' + file.name);
           if (r.ok) {
             const ana = await r.json();
-            replayEvals = ana.evals || [];
+            replayEvals       = ana.evals        || [];
+            replayAnnotations = Array.isArray(ana.annotations) ? ana.annotations : [];
             renderTopMoves();
+            renderAnnotationPanel();
           }
-        } catch  (err) { alert('Fehler 1 beim Laden der Datei: ' + file.name); }
+        } catch  (err) { alert(t('error.loadGame', { file: file.name })); }
       }
-    } catch  (err) { alert('Fehler 2 beim Laden der Datei: ' + file.name); }
+    } catch  (err) { alert(t('error.loadGame', { file: file.name })); }
   };
   reader.readAsText(file);
   e.target.value = '';
@@ -1176,13 +1610,68 @@ document.getElementById('analysis-json-input').addEventListener('change', (e) =>
   reader.onload = (ev) => {
     try {
       const data = JSON.parse(ev.target.result);
-      replayEvals = data.evals || [];
+      replayEvals       = data.evals        || [];
+      replayAnnotations = Array.isArray(data.annotations) ? data.annotations : [];
       renderTopMoves();
-    } catch (err) { alert('Fehler 3 beim Laden der Analyse: ' + err.message); }
+      renderAnnotationPanel();
+    } catch (err) { alert(t('error.loadAnalysis', { err: err.message })); }
   };
   reader.readAsText(file);
   e.target.value = '';
 });
+
+// ─── Analyse-Annotationen ────────────────────────────────────────────────────
+const COLOR_CLASS_ANN = ['red', 'blue', 'yellow', 'green'];
+
+function renderAnnotationPanel() {
+  const panel = document.getElementById('annotation-panel');
+  const list  = document.getElementById('annotation-list');
+  if (!panel || !list) return;
+  if (!replayAnnotations || replayAnnotations.length === 0) {
+    panel.classList.add('hidden');
+    return;
+  }
+  list.innerHTML = '';
+  for (const ann of replayAnnotations) {
+    const li = document.createElement('li');
+    const colorClass = COLOR_CLASS_ANN[ann.player] ?? '';
+    li.className = 'annotation-entry ' + colorClass;
+    li.innerHTML =
+      '<span class="ann-dot">●</span>' +
+      '<span class="ann-msg">' + (ann.message || '') + '</span>';
+    li.addEventListener('click', () => replayJumpTo(ann.moveIdx ?? 0));
+    list.appendChild(li);
+  }
+  panel.classList.remove('hidden');
+}
+
+function replayJumpTo(targetIdx) {
+  if (animReq !== null) { cancelAnimationFrame(animReq); animReq = null; }
+  previewMv = null; previewRow = null;
+  clearEngineCandidates();
+  engine.reset();
+  moveList.innerHTML = '';
+  plyCount = 0; moveLogEntries.length = 0;
+  replayIdx = 0;
+  appliedForfeitStack.length = 0;
+  forfeitsAppliedAtIdx.length = 0;
+  forfeitBonus = [0, 0, 0, 0]; lateForfeitCount = 0;
+  resignedKingBonusAtIdx.length = 0;
+  playerClocks = [null, null, null, null];
+  prevPlayerClocks.length = 0;
+  refreshAllScoreTimes();
+  selected = null; legalMoves = [];
+  gameChatIdx = 0;
+  document.getElementById('chat-messages').innerHTML = '';
+
+  const target = Math.min(targetIdx, replayMoves.length);
+  while (replayIdx < target) replayApplyNext();
+
+  state = engine.get_state();
+  updateReplayPos();
+  renderTopMoves();
+  draw();
+}
 
 // ─── Replay-Navigation ────────────────────────────────────────────────────────
 function replayApplyNext() {
@@ -1203,6 +1692,7 @@ function replayApplyNext() {
       if (engine.forfeit_color(f.color)) {
         appliedForfeitStack.push(f);
         forfeitsAppliedHere++;
+        applyForfeitBonus(f);
       }
     }
   }
@@ -1241,6 +1731,21 @@ function replayApplyNext() {
     // Bauernumwandlungen nicht explizit, daher ggf. mit 'p' nachreichen.
     if (!(engine.apply_move(mv.engine) || engine.apply_move(mv.engine + 'p'))) {
       undoLastCapture();
+    } else {
+      // Königsschlag eines ausgestiegenen (active=false), aber noch nicht
+      // eliminierten (König stand noch) Spielers: die Engine vergibt 0 Punkte
+      // (Capture-Score-Check liest active[]), chess.com aber +3. Bonus
+      // nachpflegen. `stBefore` ist garantiert nach Forfeit-Anwendung,
+      // aber vor dem Zug abgegriffen — auch im seltenen Fall, dass Forfeit
+      // und Königsschlag im selben fullMoveNr passieren.
+      const cap = captureHistory[captureHistory.length - 1];
+      if (cap && cap.kind === 'King' && stBefore) {
+        const ci = ['Red','Blue','Yellow','Green'].indexOf(cap.color);
+        if (ci >= 0 && !stBefore.active[ci]) {
+          forfeitBonus[cap.mover] += 3;
+          resignedKingBonusAtIdx[replayIdx] = { mover: cap.mover, points: 3 };
+        }
+      }
     }
     renderCaptures();
   }
@@ -1272,10 +1777,30 @@ function replayApplyNext() {
   replayIdx++;
   updateReplayPos();
   selected = null; legalMoves = [];
+
+  // Nach dem letzten Zug noch ausstehende Forfeits anwenden (z.B. Time-Forfeit
+  // OHNE Folgezug — fmn liegt dann hinter dem letzten echten Zug). Das schaltet
+  // die Bonuspunkte aus "(Color +N)"-Notizen frei, die sonst nicht zur Anzeige
+  // kommen würden.
+  const isLastMove = replayIdx === replayMoves.length;
+  if (isLastMove) {
+    for (const f of allForfeits) {
+      if (appliedForfeitStack.includes(f)) continue;
+      if (engine.forfeit_color(f.color)) {
+        appliedForfeitStack.push(f);
+        lateForfeitCount++;
+        applyForfeitBonus(f);
+      }
+    }
+  }
+
   // Sobald die letzte Runde mit Chat erreicht ist, alle restlichen Nachrichten
   // freigeben — sonst würden Post-Game-Kommentare (deren `time` nach dem
   // letzten Zug liegt) bis zum Spielende stumm bleiben.
-  const chatUpTo = (maxChatFullMoveNr > 0 && mv.fullMoveNr >= maxChatFullMoveNr) ? Infinity : mv.time;
+  const chatUpTo =
+    isLastMove ? Infinity
+    : (maxChatFullMoveNr > 0 && mv.fullMoveNr >= maxChatFullMoveNr) ? Infinity
+    : mv.time;
   if (chatUpTo != null) renderChatUpTo(chatUpTo);
 
   // Zustand nach dem Zug holen und Figur animiert bewegen
@@ -1284,10 +1809,35 @@ function replayApplyNext() {
   renderTopMoves();
 }
 
+// Forfeit-Boni aus "(Color +N)"-Chat-Notizen zur Anzeige addieren/entfernen.
+function applyForfeitBonus(f) {
+  if (!f?.bonusColor || !f.bonusPoints) return;
+  const idx = ['Red','Blue','Yellow','Green'].indexOf(f.bonusColor);
+  if (idx >= 0) forfeitBonus[idx] += f.bonusPoints;
+}
+function undoForfeitBonus(f) {
+  if (!f?.bonusColor || !f.bonusPoints) return;
+  const idx = ['Red','Blue','Yellow','Green'].indexOf(f.bonusColor);
+  if (idx >= 0) forfeitBonus[idx] -= f.bonusPoints;
+}
+
 function replayUndoPrev() {
-  clearPreview();
+  if (previewMv !== null) { clearPreview(); draw(); return; }
   clearEngineCandidates();
   if (replayIdx <= 0) return;
+
+  // Wenn wir gerade vom Ende zurückblättern: zuerst etwaige Late-Forfeits
+  // (die NACH dem letzten Zug angewandt wurden) rückgängig machen, dann den
+  // letzten Zug. Stack-Reihenfolge: …, move, late_1, …, late_K → top zuerst.
+  if (replayIdx === replayMoves.length && lateForfeitCount > 0) {
+    for (let i = 0; i < lateForfeitCount; i++) {
+      engine.undo();
+      const popped = appliedForfeitStack.pop();
+      undoForfeitBonus(popped);
+    }
+    lateForfeitCount = 0;
+  }
+
   replayIdx--;
   // Anim-Daten für die Rückbewegung BEVOR engine.undo() den Zustand kippt.
   let animFrom = -1, animTo = -1, animPiece = null;
@@ -1301,6 +1851,12 @@ function replayUndoPrev() {
     engine.undo();
     undoLastCapture();
     renderCaptures();
+    // Bonus für Königsschlag an einem ausgestiegenen Spieler zurücknehmen
+    const rkb = resignedKingBonusAtIdx[replayIdx];
+    if (rkb) {
+      forfeitBonus[rkb.mover] -= rkb.points;
+      delete resignedKingBonusAtIdx[replayIdx];
+    }
   }
   // Forfeits zurücknehmen, die unmittelbar vor diesem Zug angewandt wurden.
   // Reihenfolge im Engine-History-Stack: …, forfeit_n, …, forfeit_1, move →
@@ -1308,7 +1864,8 @@ function replayUndoPrev() {
   const fc = forfeitsAppliedAtIdx[replayIdx] || 0;
   for (let i = 0; i < fc; i++) {
     engine.undo();
-    appliedForfeitStack.pop();
+    const popped = appliedForfeitStack.pop();
+    undoForfeitBonus(popped);
   }
   forfeitsAppliedAtIdx[replayIdx] = 0;
 
@@ -1368,9 +1925,12 @@ document.getElementById('btn-replay-start').addEventListener('click', () => {
   engine.reset();
   moveList.innerHTML = '';
   plyCount = 0; moveLogEntries.length = 0;
+  replayMoves = replayMovesOriginal.map(m => ({ ...m }));
   replayIdx = 0;
   appliedForfeitStack.length = 0;
   forfeitsAppliedAtIdx.length = 0;
+  forfeitBonus = [0, 0, 0, 0]; lateForfeitCount = 0;
+  resignedKingBonusAtIdx.length = 0;
   playerClocks = [null, null, null, null];
   prevPlayerClocks.length = 0;
   refreshAllScoreTimes();
@@ -1470,15 +2030,18 @@ function renderGameFilterResults() {
 async function loadGameFromIndex(filename) {
   try {
     const r = await fetch('game_analysis/' + filename);
-    if (!r.ok) { alert('Datei nicht erreichbar: ' + filename); return; }
+    if (!r.ok) { alert(t('error.fileNotReachable', { file: filename })); return; }
     const data = await r.json();
     loadGame(data);
+    lastLoadedFile = filename;   // Basis für Aufzeichnungs-Dateiname (alter Name + Nr.)
     if (Array.isArray(data.evals)) {
-      replayEvals = data.evals;
+      replayEvals       = data.evals;
+      replayAnnotations = Array.isArray(data.annotations) ? data.annotations : [];
       renderTopMoves();
+      renderAnnotationPanel();
     }
   } catch (err) {
-	alert('Die Datei ' + filename + ' konnte nicht geladen werden')
+    alert(t('error.cannotLoad', { file: filename, err: err.message }));
   }
 }
 
@@ -1497,14 +2060,157 @@ async function loadGameFromIndex(filename) {
   } catch { /* still ohne Server lauffähig */ }
 })();
 
-// URL-Parameter ?game=<stem> → entsprechendes Analyse-File auto-laden.
-// Akzeptiert mit oder ohne ".json"-Suffix.
+// URL-Parameter ?game=<nr> oder Pfad /<nr> → entsprechendes Analyse-File auto-laden.
+// Akzeptiert mit oder ohne ".json"-Suffix. Zusätzliches ?m=<nr> spult nach dem
+// Laden bis zum Halbzug <nr> vor (0 = Startstellung, wird auf die Zuglänge begrenzt).
 (async () => {
-  const param = new URLSearchParams(window.location.search).get('game');
+  const search  = new URLSearchParams(window.location.search);
+  const qParam  = search.get('game');
+  const pathSeg = window.location.pathname.replace(/^\//, '').replace(/\/$/, '');
+  const param   = qParam || (/^\d+$/.test(pathSeg) ? pathSeg : null);
   if (!param) return;
   const filename = param.endsWith('.json') ? param : param + '.json';
   await loadGameFromIndex(filename);
+
+  const mRaw = search.get('m');
+  if (mRaw !== null && replayMoves.length > 0) {
+    const m = Number(mRaw);
+    if (Number.isFinite(m) && m > 0) replayJumpTo(Math.floor(m));
+  }
 })();
 
+// ─── Brettorientierung ────────────────────────────────────────────────────────
+// viewRot = 0 → Rot unten, 1 → Blau unten, 2 → Gelb unten, 3 → Grün unten.
+// Tabelle: Welche Farbe sitzt für jede Rotation in welchem Eckslot?
+//   layouts[viewRot] = [TL, TR, BL, BR]
+const SCORE_LAYOUTS = [
+  ['blue',   'yellow', 'red',    'green'],   // viewRot=0  (Rot unten)
+  ['yellow', 'green',  'blue',   'red'],     // viewRot=1  (Blau unten)
+  ['green',  'red',    'yellow', 'blue'],    // viewRot=2  (Gelb unten)
+  ['red',    'blue',   'green',  'yellow'],  // viewRot=3  (Grün unten)
+];
+
+function applyOrientation() {
+  const top    = document.getElementById('score-top');
+  const bottom = document.getElementById('score-bottom');
+  const [tl, tr, bl, br] = SCORE_LAYOUTS[viewRot];
+  const box = c => document.querySelector('.score.' + c);
+  const cap = c => document.getElementById('captures-' + c);
+
+  // Slot-Klassen aktualisieren (links = border-left, rechts = border-right + row-reverse)
+  for (const c of ['red', 'blue', 'yellow', 'green']) {
+    const el = box(c);
+    if (!el) continue;
+    el.classList.remove('left-slot', 'right-slot');
+    el.classList.add((c === tl || c === bl) ? 'left-slot' : 'right-slot');
+  }
+  // Score-Boxen in die richtigen Container hängen (Reihenfolge: links-zuerst)
+  top.append(box(tl), box(tr));
+  bottom.append(box(bl), box(br));
+
+  // Captures-Boxen folgen ihrer Score-Box in den passenden Eck-Slot.
+  const slots = {
+    TL: document.getElementById('cap-slot-TL'),
+    TR: document.getElementById('cap-slot-TR'),
+    BL: document.getElementById('cap-slot-BL'),
+    BR: document.getElementById('cap-slot-BR'),
+  };
+  if (slots.TL && cap(tl)) slots.TL.appendChild(cap(tl));
+  if (slots.TR && cap(tr)) slots.TR.appendChild(cap(tr));
+  if (slots.BL && cap(bl)) slots.BL.appendChild(cap(bl));
+  if (slots.BR && cap(br)) slots.BR.appendChild(cap(br));
+}
+
+function setBottomLeftColor(color) {
+  const next = SCORE_LAYOUTS.findIndex(l => l[2] === color);
+  if (next < 0 || next === viewRot) return;
+  viewRot = next;
+  try { localStorage.setItem('viewRot', String(viewRot)); } catch (_) {}
+  applyOrientation();
+  draw();
+}
+
+// Doppelklick auf einen Score-Namen → den Spieler nach unten links drehen.
+document.querySelectorAll('.score .score-name').forEach(el => {
+  el.addEventListener('dblclick', () => {
+    const scoreBox = el.closest('.score');
+    if (!scoreBox) return;
+    const color = ['red', 'blue', 'yellow', 'green']
+      .find(c => scoreBox.classList.contains(c));
+    if (color) setBottomLeftColor(color);
+  });
+});
+
+// ─── Sprachumschalter ─────────────────────────────────────────────────────────
+(function setupLangSwitcher() {
+  const sel = document.getElementById('lang-select');
+  if (!sel) return;
+  sel.innerHTML = '';
+  for (const { code, label, flag } of SUPPORTED_LANGS) {
+    const o = document.createElement('option');
+    o.value = code;
+    o.textContent = (flag ? flag + ' ' : '') + label;
+    if (code === getLang()) o.selected = true;
+    sel.appendChild(o);
+  }
+  sel.addEventListener('change', () => { setLang(sel.value); });
+})();
+
+// Bei Sprachwechsel UI-Bereiche neu rendern, deren Inhalt dynamisch generiert
+// wird (also nicht über data-i18n zurückgesetzt werden kann).
+onLanguageChange(() => {
+  if (state) updateStatus();
+  // Net-Status: nur "leer"-Default re-übersetzen, sonst bleibt aktueller Inhalt.
+  if (netStatus && !netStatus.className) netStatus.textContent = t('net.empty');
+  const bookStatus = document.getElementById('book-status');
+  if (bookStatus && !bookStatus.className) bookStatus.textContent = t('book.empty');
+});
+
+function scaleBoardFrame() {
+  const frame = document.getElementById('board-frame');
+  const parent = frame.parentElement;
+  const available = parent.clientWidth;
+  const natural = 660 + 2 * (110 + 8); // board + 2×(captures-col + gap)
+  const scale = Math.min(1, available / natural);
+  frame.style.transform = `scale(${scale})`;
+  // Verhindert Leerraum unter dem skalierten Frame
+  const scaledH = (660 + 80) * scale; // Brett + Score-Boxen
+  frame.style.marginBottom =
+    `calc(${scaledH}px - ${660 + 80}px + var(--rem-100))`;
+}
+window.addEventListener('resize', scaleBoardFrame);
+document.addEventListener('DOMContentLoaded', scaleBoardFrame);
+
+
+// ─── Replay-Controls auf Mobile über das Brett verschieben ───────────────────
+
+const replayControls = document.getElementById('replay-controls');
+const boardFrame     = document.getElementById('board-frame');
+const mainLeft       = document.querySelector('.main-left');
+// Originaler Eltern-Container und Nachfolger merken (für Rückkehr)
+const replayOrigParent = replayControls.parentElement;
+const replayOrigNextSibling = replayControls.nextSibling;
+
+let replayMoved = false;
+
+function repositionReplayControls() {
+  const isMobile = window.innerWidth <= 880;
+
+  if (isMobile && !replayMoved) {
+    // Vor #board-frame in .main-left einfügen
+    mainLeft.insertBefore(replayControls, boardFrame);
+    replayMoved = true;
+  } else if (!isMobile && replayMoved) {
+    // Zurück an Originalposition
+    replayOrigParent.insertBefore(replayControls, replayOrigNextSibling);
+    replayMoved = false;
+  }
+}
+
+window.addEventListener('resize', repositionReplayControls);
+repositionReplayControls(); // Einmalig beim Load
+
 // ─── Start ────────────────────────────────────────────────────────────────────
+applyOrientation();
+updateRecordControls(); // Aufnahme-Buttons initial setzen (nach allen let-Deklarationen)
 draw();

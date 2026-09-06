@@ -1,64 +1,78 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en" data-i18n-title-tag="page.title">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Chaturaji Analyse</title>
+  <title>Chaturaji Analysis</title>
   <link rel="icon" type="image/x-icon" href="favicon.ico" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div id="app">
     <header>
-      <h1>Freds Chaturaji Analyse <span id="gameNr"></span></h1>
+      <h1><span data-i18n-html="header.h1">Fred's Chaturaji Analysis</span> <a id="gameLink" target="_blank" href=""><span id="gameNr"></span></a></h1>
+      <div id="lang-switcher">
+        <label for="lang-select" data-i18n="lang.switcher.label">Language</label>
+        <select id="lang-select"></select>
+      </div>
     </header>
     <main>
       <div class="main-left">
 
-        <!-- Brett mit Punktestand drum herum -->
-        <div id="board-area">
-          <div id="score-top">
-            <div class="score blue"><div class="captures" id="captures-blue"></div><span id="score-blue" class="score-pts">0</span><span class="score-name">Blau</span><span class="score-time" data-color="blue"></span></div>
-            <div class="score yellow"><span class="score-name">Gelb</span><span class="score-time" data-color="yellow"></span><span id="score-yellow" class="score-pts">0</span><div class="captures" id="captures-yellow"></div></div>
+        <!-- Brett mit Punktestand drum herum, Captures in Spalten links/rechts -->
+        <div id="board-frame">
+          <div class="captures-col captures-col-left">
+            <div class="cap-slot" id="cap-slot-TL"><div class="captures blue" id="captures-blue"></div></div>
+            <div class="cap-slot" id="cap-slot-BL"><div class="captures red"  id="captures-red"></div></div>
           </div>
-          <div id="board-container">
-            <canvas id="board" width="660" height="660"></canvas>
-            <div id="overlay-msg" class="hidden"></div>
+          <div id="board-area">
+            <div id="score-top">
+              <div class="score blue left-slot"><span id="score-blue" class="score-pts">0</span><span class="score-name" data-i18n="color.Blue" data-i18n-title="score.tooltip">Blue</span><span class="score-time" data-color="blue"></span></div>
+              <div class="score yellow right-slot"><span id="score-yellow" class="score-pts">0</span><span class="score-name" data-i18n="color.Yellow" data-i18n-title="score.tooltip">Yellow</span><span class="score-time" data-color="yellow"></span></div>
+            </div>
+            <div id="board-container">
+              <canvas id="board" width="660" height="660"></canvas>
+              <div id="overlay-msg" class="hidden"></div>
+            </div>
+            <div id="score-bottom">
+              <div class="score red left-slot"><span id="score-red" class="score-pts">0</span><span class="score-name" data-i18n="color.Red" data-i18n-title="score.tooltip">Red</span><span class="score-time" data-color="red"></span></div>
+              <div class="score green right-slot"><span id="score-green" class="score-pts">0</span><span class="score-name" data-i18n="color.Green" data-i18n-title="score.tooltip">Green</span><span class="score-time" data-color="green"></span></div>
+            </div>
           </div>
-          <div id="score-bottom">
-            <div class="score red"><div class="captures" id="captures-red"></div><span id="score-red" class="score-pts">0</span><span class="score-name">Rot</span><span class="score-time" data-color="red"></span></div>
-            <div class="score green"><span class="score-name">Gr&uuml;n</span><span class="score-time" data-color="green"></span><span id="score-green" class="score-pts">0</span><div class="captures" id="captures-green"></div></div>
+          <div class="captures-col captures-col-right">
+            <div class="cap-slot" id="cap-slot-TR"><div class="captures yellow" id="captures-yellow"></div></div>
+            <div class="cap-slot" id="cap-slot-BR"><div class="captures green"  id="captures-green"></div></div>
           </div>
         </div>
 
         <!-- Spiel laden -->
         <details id="game-loader-section">
-          <summary>&#128194; Spiel laden (game_data JSON)</summary>
+          <summary data-i18n="loader.summary">📂 Load game (game_data JSON)</summary>
           <div class="game-loader-inner">
             <label class="file-btn">
-              &#128196; Spiel &ouml;ffnen
+              <span data-i18n="loader.openGame">📄 Open game</span>
               <input type="file" id="game-json-input" accept=".json">
             </label>
             <label class="file-btn">
-              &#128200; Analyse laden
+              <span data-i18n="loader.loadAnalysis">📈 Load analysis</span>
               <input type="file" id="analysis-json-input" accept=".json">
             </label>
             <div id="game-info"></div>
             <div id="game-filter-box">
-              <input type="text" id="game-filter" placeholder="Filter: Spielernamen (Leerzeichen = UND) &hellip;" />
-              <select id="game-filter-color" title="Farbe des ersten genannten Spielers">
-                <option value="">Farbe: alle</option>
-                <option value="0">Rot</option>
-                <option value="1">Blau</option>
-                <option value="2">Gelb</option>
-                <option value="3">Gr&uuml;n</option>
+              <input type="text" id="game-filter" data-i18n-placeholder="filter.placeholder" placeholder="Filter: player names (space = AND) …" />
+              <select id="game-filter-color" data-i18n-title="filter.color.title" title="Color of first named player">
+                <option value=""  data-i18n="filter.color.all">Color: all</option>
+                <option value="0" data-i18n="color.Red">Red</option>
+                <option value="1" data-i18n="color.Blue">Blue</option>
+                <option value="2" data-i18n="color.Yellow">Yellow</option>
+                <option value="3" data-i18n="color.Green">Green</option>
               </select>
-              <select id="game-filter-placement" title="Platzierung des ersten genannten Spielers">
-                <option value="">Platz: alle</option>
-                <option value="1">1. Platz</option>
-                <option value="2">2. Platz</option>
-                <option value="3">3. Platz</option>
-                <option value="4">4. Platz</option>
+              <select id="game-filter-placement" data-i18n-title="filter.placement.title" title="Placement of first named player">
+                <option value=""  data-i18n="filter.placement.all">Place: all</option>
+                <option value="1" data-i18n="filter.placement.1">1st place</option>
+                <option value="2" data-i18n="filter.placement.2">2nd place</option>
+                <option value="3" data-i18n="filter.placement.3">3rd place</option>
+                <option value="4" data-i18n="filter.placement.4">4th place</option>
               </select>
               <span id="game-filter-count"></span>
             </div>
@@ -68,34 +82,34 @@
 
         <!-- Neuronales Netz -->
         <details id="net-section">
-          <summary>&#129504; Neuronales Netz</summary>
-          <div id="net-status">Kein Netz geladen &ndash; Engine nutzt Alpha-Beta</div>
+          <summary data-i18n="net.summary">🧠 Neural Net</summary>
+          <div id="net-status" data-i18n="net.empty">No net loaded — engine uses alpha-beta</div>
           <div class="net-buttons">
             <label class="file-btn" id="net-file-label">
-              &#128196; Gewichte laden (.json)
+              <span data-i18n="net.loadWeights">📄 Load weights (.json)</span>
               <input type="file" id="net-file-input" accept=".json">
             </label>
-            <button id="btn-unload-net" disabled>Netz entladen</button>
+            <button id="btn-unload-net" data-i18n="net.unload" disabled>Unload net</button>
           </div>
           <div id="net-eval-bars" class="hidden">
-            <div class="eval-label">Netz-Bewertung der aktuellen Stellung (tanh, &minus;1 bis +1):</div>
+            <div class="eval-label" data-i18n="net.evalLabel">Net evaluation of current position (tanh, −1 to +1):</div>
             <div class="eval-bar-wrap">
-              <span class="eval-color red">Rot</span>
+              <span class="eval-color red" data-i18n="color.Red">Red</span>
               <div class="eval-track"><div id="bar-red"    class="bar-fill red-fill"   ></div></div>
               <span id="val-red"    class="eval-val">0.000</span>
             </div>
             <div class="eval-bar-wrap">
-              <span class="eval-color blue">Blau</span>
+              <span class="eval-color blue" data-i18n="color.Blue">Blue</span>
               <div class="eval-track"><div id="bar-blue"   class="bar-fill blue-fill"  ></div></div>
               <span id="val-blue"   class="eval-val">0.000</span>
             </div>
             <div class="eval-bar-wrap">
-              <span class="eval-color yellow">Gelb</span>
+              <span class="eval-color yellow" data-i18n="color.Yellow">Yellow</span>
               <div class="eval-track"><div id="bar-yellow" class="bar-fill yellow-fill"></div></div>
               <span id="val-yellow" class="eval-val">0.000</span>
             </div>
             <div class="eval-bar-wrap">
-              <span class="eval-color green">Gr&uuml;n</span>
+              <span class="eval-color green" data-i18n="color.Green">Green</span>
               <div class="eval-track"><div id="bar-green"  class="bar-fill green-fill" ></div></div>
               <span id="val-green"  class="eval-val">0.000</span>
             </div>
@@ -104,17 +118,17 @@
 
         <!-- Eröffnungsbuch -->
         <details id="book-section">
-          <summary>&#128214; Er&ouml;ffnungsbuch</summary>
-          <div id="book-status">Kein Buch geladen</div>
+          <summary data-i18n="book.summary">📖 Opening book</summary>
+          <div id="book-status" data-i18n="book.empty">No book loaded</div>
         </details>
 
         <!-- PGN -->
         <details id="pgn-section">
-          <summary>PGN laden / exportieren</summary>
-          <textarea id="pgn-input" rows="5" placeholder="PGN hier einf&uuml;gen..."></textarea>
+          <summary data-i18n="pgn.summary">Load / export PGN</summary>
+          <textarea id="pgn-input" rows="5" data-i18n-placeholder="pgn.placeholder" placeholder="Paste PGN here…"></textarea>
           <div class="pgn-buttons">
-            <button id="btn-load-pgn">Laden</button>
-            <button id="btn-export-pgn">Exportieren</button>
+            <button id="btn-load-pgn" data-i18n="pgn.load">Load</button>
+            <button id="btn-export-pgn" data-i18n="pgn.export">Export</button>
           </div>
           <pre id="pgn-output"></pre>
         </details>
@@ -127,34 +141,42 @@
         <div class="main-right-col">
           <!-- Top-Z&uuml;ge der letzten Engine-Suche -->
           <div id="engine-candidates-panel" class="hidden">
-            <div class="engine-cand-header">Engine-Auswahl (Top 3)</div>
+            <div class="engine-cand-header" data-i18n="engineCand.header">Engine selection (Top 3)</div>
             <div id="engine-candidates-list"></div>
           </div>
 
           <!-- Status -->
           <div id="status">
-            <span id="turn-indicator">Zug: <strong>Rot</strong></span>
+            <span id="turn-indicator"></span>
             <span id="engine-info"></span>
           </div>
 
           <!-- Replay-Steuerung -->
           <div id="replay-controls" class="hidden">
-            <button id="btn-replay-start" title="Anfang">&#9198;</button>
-            <button id="btn-replay-prev"  title="Zur&uuml;ck (&#8592;)">&#9664;</button>
+            <button id="btn-replay-start" data-i18n-title="controls.replayStart" title="Start">&#9198;</button>
+            <button id="btn-replay-prev"  data-i18n-title="controls.replayPrev"  title="Previous (←)">&#9664;</button>
             <span id="replay-pos">0 / 0</span>
-            <button id="btn-replay-next"  title="Vor (&#8594;)">&#9654;</button>
-            <button id="btn-replay-end"   title="Ende">&#9197;</button>
+            <button id="btn-replay-next"  data-i18n-title="controls.replayNext"  title="Next (→)">&#9654;</button>
+            <button id="btn-replay-end"   data-i18n-title="controls.replayEnd"   title="End">&#9197;</button>
           </div>
 
           <!-- Zugprotokoll -->
           <div id="movelog">
-            <h3>Zugprotokoll</h3>
+            <h3 data-i18n="movelog.title">Move log</h3>
             <ol id="movelist"></ol>
           </div>
 
           <!-- Top-Züge Panel -->
           <div id="top-moves-panel" class="hidden">
-            <h3>Top-Z&uuml;ge</h3>
+            <div class="top-moves-header">
+              <h3 data-i18n="topMoves.title">Top moves</h3>
+              <label class="book-toggle" id="book-toggle-label">
+                <input type="checkbox" id="use-opening-book" />
+                <span class="book-toggle-icon">📖</span>
+                <span data-i18n="topMoves.useBook">Eröffnungsbuch</span>
+              </label>
+            </div>
+            <div id="top-moves-source" class="top-moves-source hidden"></div>
             <div id="top-moves-list"></div>
           </div>
         </div>
@@ -163,24 +185,38 @@
           <!-- Steuerung (Engine, Suchtiefe, Undo, Reset) -->
           <div id="controls">
             <div id="play-replay-controls">
-              <button id="btn-play-prev" title="Zur&uuml;ck (&#8592;)" disabled>&#9664;</button>
-              <button id="btn-play-next" title="Vor (&#8594;)" disabled>&#9654;</button>
+              <button id="btn-play-prev" data-i18n-title="controls.playPrev" title="Previous (←)" disabled>&#9664;</button>
+              <button id="btn-play-next" data-i18n-title="controls.playNext" title="Next (→)" disabled>&#9654;</button>
             </div>
             <div class="control-group">
-              <label>Suchtiefe</label>
+              <label data-i18n="controls.depth">Search depth</label>
               <input id="depth" type="range" min="1" max="6" value="4" />
               <span id="depth-val">4</span>
             </div>
-            <button id="btn-engine-move" title="Engine zieht">&#129302;</button>
-            <button id="btn-undo" title="Rückgängig">&#8617;</button>
-            <button id="btn-reset" title="Neu starten">&#128260;</button>
+            <button id="btn-engine-move" data-i18n-title="controls.engineMove" title="Engine moves">&#129302;</button>
+            <button id="btn-undo"        data-i18n-title="controls.undo"       title="Undo">&#8617;</button>
+            <button id="btn-reset"       data-i18n-title="controls.reset"      title="New game">&#128260;</button>
+          </div>
+
+          <!-- Aufzeichnen -->
+          <div id="record-controls">
+            <button id="btn-record-new"    data-i18n="record.new"    data-i18n-title="record.newTitle">🔴 Neue Aufzeichnung</button>
+            <button id="btn-record-branch" data-i18n="record.branch" data-i18n-title="record.branchTitle">⏺ Ab hier aufzeichnen</button>
+            <button id="btn-record-stop"   data-i18n="record.stop"   data-i18n-title="record.stopTitle">⏹ Stopp</button>
+            <button id="btn-record-save"   data-i18n="record.save"   data-i18n-title="record.saveTitle">💾 Speichern</button>
+            <span id="record-indicator" class="hidden"></span>
           </div>
 
           <div id="chat-panel">
-            <h3>&#128172; Chat</h3>
+            <h3 data-i18n="chat.title">💬 Chat</h3>
             <div id="chat-messages">
-              <p class="chat-empty">Kein Spiel geladen.</p>
+              <p class="chat-empty" data-i18n="chat.empty">No game loaded.</p>
             </div>
+          </div>
+
+          <div id="annotation-panel" class="hidden">
+            <h3>🔍 <span data-i18n="analysis.annotations">Analyse</span></h3>
+            <ul id="annotation-list"></ul>
           </div>
         </div>
 
@@ -189,6 +225,28 @@
     </main>
   </div>
 
-  <script type="module" src="index.js?v=2605062104"></script>
+  <!-- Aufzeichnung speichern -->
+  <div id="record-save-dialog" class="hidden">
+    <div class="rec-dlg-box">
+      <h3 data-i18n="record.dlg.title">Aufzeichnung speichern</h3>
+      <label data-i18n="record.dlg.filename">Dateiname</label>
+      <input type="text" id="rec-dlg-filename" />
+      <label data-i18n="record.dlg.players">Spielernamen (Rot / Blau / Gelb / Grün)</label>
+      <div class="rec-dlg-names">
+        <input type="text" id="rec-dlg-name-1" class="rec-name red"    data-i18n-placeholder="color.Red"    placeholder="Red" />
+        <input type="text" id="rec-dlg-name-2" class="rec-name blue"   data-i18n-placeholder="color.Blue"   placeholder="Blue" />
+        <input type="text" id="rec-dlg-name-3" class="rec-name yellow" data-i18n-placeholder="color.Yellow" placeholder="Yellow" />
+        <input type="text" id="rec-dlg-name-4" class="rec-name green"  data-i18n-placeholder="color.Green"  placeholder="Green" />
+      </div>
+      <label data-i18n="record.dlg.gamenr">Spielnummer (optional)</label>
+      <input type="text" id="rec-dlg-gamenr" inputmode="numeric" />
+      <div class="rec-dlg-buttons">
+        <button id="rec-dlg-cancel" data-i18n="record.dlg.cancel">Abbrechen</button>
+        <button id="rec-dlg-ok" data-i18n="record.dlg.save">Speichern</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="index.js?v=2607082000"></script>
 </body>
 </html>
