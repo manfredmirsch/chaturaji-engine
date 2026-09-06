@@ -43,6 +43,21 @@ pub struct RankedMove {
 
 // ─── Engine ───────────────────────────────────────────────────────────────────
 
+/// Welches Verfahren [`Engine::search_deepening`] vertieft.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SearchAlgo { Maxn, Paranoid, Brs }
+
+impl SearchAlgo {
+    /// Halbzüge, die eine volle Spielrunde Vorausschau kostet. BRS fasst die
+    /// drei Gegner zu einem Zug zusammen, die anderen zählen jeden einzeln.
+    pub fn step(self) -> u8 {
+        match self {
+            SearchAlgo::Brs                       => 2,
+            SearchAlgo::Paranoid | SearchAlgo::Maxn => 4,
+        }
+    }
+}
+
 pub struct Engine {
     tt:             TranspositionTable,
     params:         EvalParams,
@@ -51,6 +66,10 @@ pub struct Engine {
     book:           Option<OpeningBook>,
     book_min_count: u32,
     killers:        [[Option<Move>; 2]; 64],
+    /// Vom Aufrufer gestellte Abbruchbedingung, siehe [`Engine::set_stop_check`].
+    stop:           Option<Box<dyn Fn() -> bool>>,
+    /// Wurde die laufende Suche abgebrochen? Ihr Ergebnis ist dann unbrauchbar.
+    aborted:        bool,
 }
 
 impl Engine {
@@ -64,7 +83,45 @@ impl Engine {
             book:           None,
             book_min_count: 5,
             killers:        [[None; 2]; 64],
+            stop:           None,
+            aborted:        false,
         }
+    }
+
+    /// Hinterlegt eine Abbruchbedingung, die während der Suche regelmäßig
+    /// abgefragt wird.
+    ///
+    /// Die Engine bringt bewusst keine eigene Uhr mit: `std::time::Instant`
+    /// paniziert unter `wasm32-unknown-unknown`, und genau dort — im Browser —
+    /// wird ein Zeitlimit am dringendsten gebraucht. Wer die Zeit messen kann,
+    /// ist der Aufrufer; er reicht das Ergebnis hier als Prädikat herein.
+    ///
+    /// ```ignore
+    /// let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    /// engine.set_stop_check(move || std::time::Instant::now() >= deadline);
+    /// ```
+    pub fn set_stop_check<F: Fn() -> bool + 'static>(&mut self, f: F) {
+        self.stop = Some(Box::new(f));
+    }
+
+    /// Nimmt eine zuvor gesetzte Abbruchbedingung zurück.
+    pub fn clear_stop_check(&mut self) { self.stop = None; }
+
+    /// Wurde die zuletzt gelaufene Suche abgebrochen?
+    pub fn was_aborted(&self) -> bool { self.aborted }
+
+    /// Prüft die Abbruchbedingung — nicht bei jedem Knoten, sondern alle 2048,
+    /// damit das Prädikat (im Browser ein Sprung nach JavaScript) die Suche
+    /// nicht spürbar ausbremst.
+    #[inline]
+    fn check_abort(&mut self) -> bool {
+        if self.aborted { return true; }
+        if self.nodes & 0x7FF == 0 {
+            if let Some(ref stop) = self.stop {
+                if stop() { self.aborted = true; }
+            }
+        }
+        self.aborted
     }
 
     /// Evaluation parameters this engine plays with. Two engines with
@@ -138,7 +195,8 @@ impl Engine {
     /// der historisch beste Zug **ohne Suche** zurückgegeben. `depth = 0` und
     /// `nodes = 0` signalisieren das (Engine hat nichts gerechnet).
     pub fn search(&mut self, board: &Board, max_depth: u8) -> SearchResult {
-        self.nodes = 0;
+        self.nodes   = 0;
+        self.aborted = false;
         self.tt.new_search();
 
         if let Some(ref book) = self.book {
@@ -237,6 +295,10 @@ impl Engine {
     fn maxn(&mut self, board: &Board, depth: u8, _lower: i32) -> [i32; 4] {
         self.nodes += 1;
 
+        // Abbruch: der zurückgegebene Wert ist bedeutungslos, die ganze
+        // Iteration wird oben verworfen.
+        if self.check_abort() { return self.ev(board); }
+
         // Terminal or leaf
         if Rules::is_game_over(board) { return self.ev(board); }
         if depth == 0 { return self.quiescence(board, 1); }
@@ -307,6 +369,8 @@ impl Engine {
         self.nodes += 1;
         let stand_pat = self.ev(board);
 
+        if self.check_abort() { return stand_pat; }
+
         if Rules::is_game_over(board) || qdepth == 0 {
             return stand_pat;
         }
@@ -367,6 +431,8 @@ impl Engine {
         net_eval: Option<&dyn Fn(&Board) -> [f32; 4]>,
     ) -> i32 {
         self.nodes += 1;
+
+        if self.check_abort() { return self.ev(board)[root_player]; }
 
         if Rules::is_game_over(board) {
             return self.ev(board)[root_player];
@@ -430,7 +496,8 @@ impl Engine {
         max_depth: u8,
         net_eval: Option<&dyn Fn(&Board) -> [f32; 4]>,
     ) -> SearchResult {
-        self.nodes = 0;
+        self.nodes   = 0;
+        self.aborted = false;
         self.tt.new_search();
 
         if let Some(ref book) = self.book {
@@ -514,6 +581,8 @@ impl Engine {
     ) -> i32 {
         self.nodes += 1;
 
+        if self.check_abort() { return self.ev(board)[root_player]; }
+
         // A root player who has been knocked out has a frozen score; nothing
         // below this node can change it.
         if Rules::is_game_over(board) || !board.active[root_player] {
@@ -594,6 +663,54 @@ impl Engine {
         }
     }
 
+    /// Vertieft rundenweise, bis `max_depth` erreicht ist oder die mit
+    /// [`Engine::set_stop_check`] gesetzte Bedingung greift.
+    ///
+    /// Zurückgegeben wird die letzte **vollständig** gerechnete Iteration.
+    /// Eine abgebrochene Iteration wird verworfen, denn ihre Werte stammen
+    /// teils aus fertig durchsuchten und teils aus abgeschnittenen Teilbäumen
+    /// und sind untereinander nicht vergleichbar. Ohne Abbruchbedingung
+    /// verhält sich die Methode wie eine gewöhnliche Suche bis `max_depth`,
+    /// nur mit dem Zwischenergebnis jeder Runde.
+    ///
+    /// `max_depth` bleibt nötig: ohne Uhr und ohne Obergrenze liefe die
+    /// Vertiefung sonst endlos.
+    pub fn search_deepening(
+        &mut self,
+        board:     &Board,
+        algo:      SearchAlgo,
+        max_depth: u8,
+        net_eval:  Option<&dyn Fn(&Board) -> [f32; 4]>,
+    ) -> SearchResult {
+        let step = algo.step();
+        let mut depth = step;
+
+        let mut best = match algo {
+            SearchAlgo::Brs      => self.search_brs(board, depth, net_eval),
+            SearchAlgo::Paranoid => self.search_paranoid(board, depth, net_eval),
+            SearchAlgo::Maxn     => self.search(board, depth),
+        };
+        // Die erste Iteration wird auch dann behalten, wenn sie abgebrochen
+        // wurde — irgendein Zug muss zurückkommen. Der Wurzel-Sicherheitsfilter
+        // läuft vor der Rekursion, der Zug ist also nicht beliebig.
+        let mut total_nodes = best.nodes;
+
+        while !self.aborted && depth <= max_depth.saturating_sub(step) {
+            depth += step;
+            let next = match algo {
+                SearchAlgo::Brs      => self.search_brs(board, depth, net_eval),
+                SearchAlgo::Paranoid => self.search_paranoid(board, depth, net_eval),
+                SearchAlgo::Maxn     => self.search(board, depth),
+            };
+            total_nodes += next.nodes;
+            if self.aborted { break; }
+            if next.best_move.is_some() { best = next; }
+        }
+
+        best.nodes = total_nodes;
+        best
+    }
+
     /// Search using Best-Reply Search. Same root safety filter and same
     /// signature as [`Engine::search_paranoid`], so the two are drop-in
     /// interchangeable.
@@ -603,7 +720,8 @@ impl Engine {
         max_depth: u8,
         net_eval: Option<&dyn Fn(&Board) -> [f32; 4]>,
     ) -> SearchResult {
-        self.nodes = 0;
+        self.nodes   = 0;
+        self.aborted = false;
         self.tt.new_search();
 
         if let Some(ref book) = self.book {
@@ -1176,5 +1294,82 @@ mod tests {
         let top = engine.top_n_paranoid(&board, 2, 3, None);
         assert!(!top.is_empty(), "top_n_paranoid should return at least one move");
         assert!(top.len() <= 3);
+    }
+
+    // ─── Abbruch und iterative Vertiefung ─────────────────────────────────────
+
+    /// Ohne Abbruchbedingung muss die Vertiefung dasselbe liefern wie eine
+    /// direkte Suche auf die Zieltiefe — sonst wäre sie kein Ersatz für sie.
+    #[test]
+    fn deepening_without_stop_reaches_full_depth() {
+        let board = Board::default();
+        let mut e1 = Engine::new(8);
+        let mut e2 = Engine::new(8);
+
+        let deep   = e1.search_deepening(&board, SearchAlgo::Brs, 4, None);
+        let direct = e2.search_brs(&board, 4, None);
+
+        assert!(!e1.was_aborted(), "ohne Bedingung darf nichts abbrechen");
+        assert_eq!(deep.depth, direct.depth, "Zieltiefe muss erreicht werden");
+        assert_eq!(deep.best_move, direct.best_move);
+    }
+
+    /// Eine sofort greifende Bedingung darf die Suche zwar abwürgen, muss aber
+    /// trotzdem einen spielbaren Zug hinterlassen: die erste Iteration wird
+    /// behalten. Ein Rückgabewert ohne Zug wäre im Frontend ein hängengebliebenes
+    /// Spiel.
+    #[test]
+    fn deepening_aborts_but_still_returns_a_move() {
+        let board = Board::default();
+        let mut engine = Engine::new(8);
+        engine.set_stop_check(|| true);
+
+        let r = engine.search_deepening(&board, SearchAlgo::Brs, 12, None);
+
+        assert!(engine.was_aborted(), "Bedingung war stets erfüllt");
+        assert!(r.best_move.is_some(), "auch abgebrochen muss ein Zug kommen");
+        assert!(Rules::legal_moves(&board).contains(&r.best_move.unwrap()),
+                "der Zug muss legal sein");
+    }
+
+    /// Ein Abbruch nach einer festen Knotenzahl muss die Suche früher beenden
+    /// als der ungebremste Lauf — sonst greift die Prüfung in der Rekursion
+    /// nicht.
+    #[test]
+    fn stop_check_actually_shortens_the_search() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let board = Board::default();
+
+        let mut unbounded = Engine::new(8);
+        let full = unbounded.search_brs(&board, 6, None);
+
+        let counter = Rc::new(Cell::new(0u64));
+        let c       = Rc::clone(&counter);
+        let mut limited = Engine::new(8);
+        // Das Prädikat wird alle 2048 Knoten gefragt; nach 20 Fragen ist Schluss.
+        limited.set_stop_check(move || { c.set(c.get() + 1); c.get() > 20 });
+        let cut = limited.search_brs(&board, 6, None);
+
+        assert!(limited.was_aborted(), "die Bedingung musste greifen");
+        assert!(cut.nodes < full.nodes,
+                "abgebrochen {} Knoten, ungebremst {} — der Abbruch wirkt nicht",
+                cut.nodes, full.nodes);
+    }
+
+    /// `clear_stop_check` muss die Bedingung wirklich lösen.
+    #[test]
+    fn clearing_the_stop_check_restores_full_search() {
+        let board = Board::default();
+        let mut engine = Engine::new(8);
+        engine.set_stop_check(|| true);
+        engine.search_brs(&board, 4, None);
+        assert!(engine.was_aborted());
+
+        engine.clear_stop_check();
+        let r = engine.search_brs(&board, 4, None);
+        assert!(!engine.was_aborted(), "nach clear darf nichts mehr abbrechen");
+        assert!(r.best_move.is_some());
     }
 }

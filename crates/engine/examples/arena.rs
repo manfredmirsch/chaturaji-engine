@@ -50,17 +50,19 @@
 //! ```
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chaturaji_core::board::Board;
 use chaturaji_core::rules::Rules;
 use chaturaji_engine::eval::EvalParams;
+use chaturaji_engine::search::SearchAlgo;
 use chaturaji_engine::{Engine, SearchResult};
 
 // ─── Konfigurationen ──────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Algo { Brs, Paranoid, Maxn }
+/// Das Verfahren kommt aus der Engine, damit Arena und Frontend dieselbe
+/// Aufzählung und dieselbe Rundenschrittweite benutzen.
+use SearchAlgo as Algo;
 
 #[derive(Clone)]
 struct Config {
@@ -70,14 +72,8 @@ struct Config {
 }
 
 impl Config {
-    /// Halbzüge, die eine Spielrunde Vorausschau kostet. BRS fasst die drei
-    /// Gegner zu einem Zug zusammen, Paranoid und Max^n zählen jeden einzeln.
-    fn step(&self) -> u8 {
-        match self.algo {
-            Algo::Brs                   => 2,
-            Algo::Paranoid | Algo::Maxn => 4,
-        }
-    }
+    /// Halbzüge, die eine Spielrunde Vorausschau kostet.
+    fn step(&self) -> u8 { self.algo.step() }
 
     /// Suchtiefe in Halbzügen für `rounds` Spielrunden.
     fn depth(&self, rounds: u8) -> u8 { self.step() * rounds }
@@ -122,14 +118,13 @@ fn preset(name: &str) -> Option<Config> {
         "gain120"      => cfg(Algo::Brs, EvalParams { threat_gain: 120, ..d }),
         "flattempo"    => cfg(Algo::Brs, EvalParams { graded_tempo: false, ..d }),
         "ks5000"       => cfg(Algo::Brs, EvalParams { ks_direct_imminent: 5_000, ..d }),
-        "coalition"    => cfg(Algo::Brs, EvalParams { coalition: true, ..d }),
         _ => return None,
     })
 }
 
 const PRESETS: &[&str] = &[
     "new", "legacy", "legacyeval", "paranoid", "maxn", "notransform", "elim10k",
-    "mat100", "mat20", "nogain", "gain120", "flattempo", "ks5000", "coalition",
+    "mat100", "mat20", "nogain", "gain120", "flattempo", "ks5000",
 ];
 
 // ─── Zufall ───────────────────────────────────────────────────────────────────
@@ -184,56 +179,28 @@ fn search_fixed(engine: &mut Engine, algo: Algo, board: &Board, depth: u8) -> Se
     }
 }
 
-/// Sucht unter einem Zeitbudget, indem rundenweise vertieft wird.
+/// Sucht unter einem Zeitbudget.
 ///
-/// Die Engine kennt selbst kein Zeitlimit und kann eine laufende Suche nicht
-/// abbrechen. Abgebrochen werden kann also nur *zwischen* zwei Iterationen,
-/// und die nächste Iteration darf nur beginnen, wenn sie voraussichtlich noch
-/// ins Budget passt. Der Wachstumsfaktor wird dafür aus den beiden letzten
-/// Iterationen gemessen statt geraten — er unterscheidet sich zwischen den
-/// Verfahren erheblich, weil eine Runde bei BRS zwei und bei Paranoid vier
-/// Halbzüge kostet.
+/// Die eigentliche Arbeit macht die Engine: sie vertieft rundenweise und
+/// bricht ab, sobald die hier gesetzte Bedingung greift. Anders als eine
+/// Steuerung von außen kann sie das *mitten* in einer Iteration, das Budget
+/// wird also nicht nur eingehalten, sondern auch ausgeschöpft.
 ///
-/// Das Budget wird dadurch eingehalten, aber nicht ausgeschöpft: nach der
-/// letzten begonnenen Iteration bleibt Rest übrig. Beide Konfigurationen
-/// unterliegen derselben Regel, der Vergleich bleibt also fair.
+/// Tiefe 40 ist kein erreichbares Ziel, sondern der Deckel, den
+/// `search_deepening` braucht, um ohne Uhr terminieren zu können.
 fn search_timed(
     engine:    &mut Engine,
     algo:      Algo,
     board:     &Board,
-    step:      u8,
     budget_ms: u64,
 ) -> (SearchResult, u8) {
-    let start = Instant::now();
-    // Erste Iteration wird immer gespielt, sonst gäbe es bei knappem Budget
-    // keinen Zug. Ohne Schätzwert ist der Startfaktor bewusst pessimistisch.
-    let mut growth  = 10.0f64;
-    let mut depth   = step;
-    let mut best    = search_fixed(engine, algo, board, depth);
-    let mut reached = depth;
-    let mut prev_iter_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let deadline = Instant::now() + Duration::from_millis(budget_ms);
+    engine.set_stop_check(move || Instant::now() >= deadline);
+    let result = engine.search_deepening(board, algo, 40, None);
+    engine.clear_stop_check();
 
-    // Tiefe 40 ist keine erreichbare Grenze, sondern nur ein Riegel gegen
-    // Endlosschleifen, falls eine Iteration einmal messbar 0 ms dauert.
-    while depth < 40 {
-        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-        if elapsed + prev_iter_ms * growth > budget_ms as f64 { break; }
-
-        depth += step;
-        let it_start = Instant::now();
-        let result   = search_fixed(engine, algo, board, depth);
-        let it_ms    = it_start.elapsed().as_secs_f64() * 1000.0;
-
-        if result.best_move.is_some() { best = result; reached = depth; }
-        if prev_iter_ms > 0.0 && it_ms > 0.0 {
-            // Untergrenze 1.5: ein zufällig schnelles Ply darf nicht dazu
-            // führen, dass die nächste Iteration als billig eingeschätzt wird.
-            growth = (it_ms / prev_iter_ms).max(1.5);
-        }
-        prev_iter_ms = it_ms;
-    }
-
-    (best, reached)
+    let reached = result.depth;
+    (result, reached)
 }
 
 /// Spielt eine Partie aus `opening`. `seats[i]` ist der Konfigurationsindex
@@ -269,8 +236,7 @@ fn play_game(
                 let d = cfg.depth(r);
                 (search_fixed(engine, cfg.algo, &board, d), d)
             }
-            Budget::TimeMs(ms) =>
-                search_timed(engine, cfg.algo, &board, cfg.step(), ms),
+            Budget::TimeMs(ms) => search_timed(engine, cfg.algo, &board, ms),
         };
         depth_sum[seat] += reached as u64;
         depth_n[seat]   += 1;

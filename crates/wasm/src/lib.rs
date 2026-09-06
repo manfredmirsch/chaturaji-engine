@@ -10,7 +10,7 @@ use chaturaji_core::notation::{move_to_str, parse_move, GameRecord};
 use chaturaji_core::piece::Color;
 use chaturaji_core::rules::Rules;
 use chaturaji_engine::book::OpeningBook;
-use chaturaji_engine::search::Engine as SearchEngine;
+use chaturaji_engine::search::{Engine as SearchEngine, SearchAlgo};
 use network::Network;
 
 // ─── JS-facing types ──────────────────────────────────────────────────────────
@@ -233,6 +233,52 @@ impl WasmEngine {
             Algorithm::Brs      => engine.search_brs(board, depth, net_eval),
             Algorithm::Paranoid => engine.search_paranoid(board, depth, net_eval),
         };
+        let er = EngineResult {
+            best_move:    result.best_move.map(|mv| move_to_str(&mv)),
+            scores:       result.scores,
+            net_values,
+            depth:        result.depth,
+            nodes:        result.nodes,
+            used_network: self.network.is_some(),
+        };
+        serde_wasm_bindgen::to_value(&er).unwrap()
+    }
+
+    /// Sucht mit Zeitbudget statt mit fester Tiefe.
+    ///
+    /// Eine feste Tiefe sagt nichts darüber, wie lange der Zug dauern wird:
+    /// gemessen kostete eine Runde mehr Vorausschau je nach Stellung das
+    /// Hundertfache an Rechenzeit. Wer den Tiefenregler höherstellt, wartet
+    /// deshalb unkalkulierbar lang. Mit einem Budget wird die Wartezeit zur
+    /// Vorgabe und die Tiefe zum Ergebnis — `depth` im Rückgabewert sagt, wie
+    /// weit es gereicht hat.
+    ///
+    /// `max_depth` bleibt als Deckel bestehen, damit die Engine in einer
+    /// ausgedünnten Endstellung nicht sinnlos weitervertieft.
+    pub fn best_move_timed(&mut self, budget_ms: f64, max_depth: u8) -> JsValue {
+        let net_values = self.network.as_ref().map(|net| net.forward(&self.board));
+
+        // js_sys::Date::now() statt std::time::Instant: letzteres paniziert
+        // unter wasm32-unknown-unknown.
+        let deadline = js_sys::Date::now() + budget_ms;
+        self.engine.set_stop_check(move || js_sys::Date::now() >= deadline);
+
+        let algo    = self.algo;
+        let engine  = &mut self.engine;
+        let network = &self.network;
+        let board   = &self.board;
+        let f;
+        let net_eval: Option<&dyn Fn(&Board) -> [f32; 4]> = match network.as_ref() {
+            Some(net) => { f = |b: &Board| net.forward(b); Some(&f) }
+            None      => None,
+        };
+        let search_algo = match algo {
+            Algorithm::Brs      => SearchAlgo::Brs,
+            Algorithm::Paranoid => SearchAlgo::Paranoid,
+        };
+        let result = engine.search_deepening(board, search_algo, max_depth, net_eval);
+        self.engine.clear_stop_check();
+
         let er = EngineResult {
             best_move:    result.best_move.map(|mv| move_to_str(&mv)),
             scores:       result.scores,
