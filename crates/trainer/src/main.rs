@@ -11,7 +11,7 @@
 
 use chaturaji_trainer::selfplay::SelfPlayConfig;
 use chaturaji_trainer::td::{export_weights, run, show_stats, TrainConfig};
-use chaturaji_trainer::pgn_import::load_games_from_dir;
+use chaturaji_trainer::pgn_import::{load_games_from_dir, load_games_from_json_dir};
 use chaturaji_trainer::supervised::run_supervised;
 use chaturaji_trainer::db;
 use chaturaji_trainer::network::Network;
@@ -30,6 +30,7 @@ fn main() {
     let mut mode        = Mode::Train;
     let mut export_path = "weights.json".to_string();
     let mut pgn_dir     = String::new();
+    let mut json_dir    = String::new();
     let mut book_path   = "/home/manfred/chaturaji/opening_book.json".to_string();
     let mut use_book    = true;
     let mut book_plies  = 16usize;
@@ -49,6 +50,11 @@ fn main() {
                 mode = Mode::Supervised;
                 i += 1;
                 if i < args.len() { pgn_dir = args[i].clone(); }
+            }
+            "--json-dir"   => {
+                mode = Mode::Supervised;
+                i += 1;
+                if i < args.len() { json_dir = args[i].clone(); }
             }
             "--export"     => {
                 mode = Mode::Export;
@@ -72,13 +78,15 @@ fn main() {
         Mode::Stats  => show_stats(&db_path, 20),
         Mode::Export => export_weights(&db_path, &export_path),
         Mode::Supervised => {
-            if pgn_dir.is_empty() {
-                eprintln!("Fehler: --pgn-dir <verzeichnis> erforderlich.");
+            if pgn_dir.is_empty() && json_dir.is_empty() {
+                eprintln!("Fehler: --pgn-dir oder --json-dir erforderlich.");
                 return;
             }
-            let games = load_games_from_dir(&pgn_dir);
+            let mut games = Vec::new();
+            if !pgn_dir.is_empty()  { games.extend(load_games_from_dir(&pgn_dir)); }
+            if !json_dir.is_empty() { games.extend(load_games_from_json_dir(&json_dir)); }
             if games.is_empty() {
-                eprintln!("Keine Partien gefunden in '{}'.", pgn_dir);
+                eprintln!("Keine Partien gefunden.");
                 return;
             }
             let conn = db::open(&db_path).expect("Datenbank konnte nicht geöffnet werden");
@@ -146,6 +154,7 @@ fn print_help() {
     println!("  --save-every <n>     Checkpoint-Intervall        [Standard: 200]");
     println!("  --log-every <n>      Log-Intervall               [Standard: 50]");
     println!("  --pgn-dir <pfad>     Supervised Training aus PGN-Verzeichnis");
+    println!("  --json-dir <pfad>    Supervised Training aus JSON-Verzeichnis (standings-basiert)");
     println!("  --stats              Trainingsstatistiken anzeigen");
     println!("  --export [pfad]      Gewichte als JSON exportieren [Standard: weights.json]");
     println!("  --book <pfad>        Eröffnungsbuch [Standard: /home/manfred/chaturaji/opening_book.json]");
@@ -156,6 +165,7 @@ fn print_help() {
     println!("WORKFLOW (empfohlen):");
     println!("  1. Supervised Pre-Training mit chess.com Exporten:");
     println!("     cargo run --release --bin train -- --pgn-dir ./pgn_spiele");
+    println!("     cargo run --release --bin train -- --json-dir ./game_data");
     println!("  2. TD Self-Play als Fine-Tuning:");
     println!("     cargo run --release --bin train -- --games 10000 --depth 3");
 }

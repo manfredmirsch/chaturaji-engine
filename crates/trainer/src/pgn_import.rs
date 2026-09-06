@@ -54,6 +54,67 @@ pub fn load_games_from_dir(dir: &str) -> Vec<ParsedGame> {
     games
 }
 
+/// Lädt alle `.json`-Dateien aus `dir`.  Verwendet `standings` als Trainings-Label:
+///   Rang 1 → +1.0,  Rang 2 → +1/3,  Rang 3 → −1/3,  Rang 4 → −1.0
+pub fn load_games_from_json_dir(dir: &str) -> Vec<ParsedGame> {
+    let mut games   = Vec::new();
+    let mut ok      = 0usize;
+    let mut skipped = 0usize;
+
+    let entries = match std::fs::read_dir(Path::new(dir)) {
+        Ok(e)  => e,
+        Err(e) => { eprintln!("Verzeichnis '{}' nicht lesbar: {}", dir, e); return games; }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t)  => t,
+            Err(_) => { skipped += 1; continue; }
+        };
+
+        let json: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(v)  => v,
+            Err(_) => { skipped += 1; continue; }
+        };
+
+        // pgn4-Feld extrahieren
+        let pgn4 = match json["pgn4"].as_str() {
+            Some(s) => s,
+            None    => { skipped += 1; continue; }
+        };
+
+        // standings[0..4] als u8 extrahieren
+        let sa = &json["standings"];
+        let s: Option<[u8; 4]> = (|| {
+            Some([
+                sa[0].as_u64()? as u8,
+                sa[1].as_u64()? as u8,
+                sa[2].as_u64()? as u8,
+                sa[3].as_u64()? as u8,
+            ])
+        })();
+        let standings = match s {
+            Some(v) => v,
+            None    => { skipped += 1; continue; }
+        };
+
+        let outcome   = standings_to_outcome(standings);
+        let positions = match parse_positions_from_pgn(pgn4) {
+            Some(p) if !p.is_empty() => p,
+            _                        => { skipped += 1; continue; }
+        };
+
+        games.push(ParsedGame { positions, outcome });
+        ok += 1;
+    }
+
+    println!("JSON: {} Partien geladen, {} übersprungen.", ok, skipped);
+    games
+}
+
 // ─── Internes Parsing ─────────────────────────────────────────────────────────
 
 /// Teilt einen Text mit mehreren Partien (getrennt durch Leerzeilen + '['-Tags).
@@ -70,11 +131,7 @@ fn split_games(text: &str) -> Vec<&str> {
 
 fn parse_game(text: &str) -> Option<ParsedGame> {
     let mut outcome_opt: Option<[f32; 4]> = None;
-    let mut move_text = String::new();
 
-    // chess.com-Headers können mehrzeilig sein (z.B. `[StartFen4 "..."]` läuft
-    // über alle 14 Brett-Reihen). Wir tracken explizit, ob wir noch in einem
-    // Tag-Block sind, sonst rutschen die FEN-Zeilen als „Züge" durch.
     let mut in_header = false;
     for line in text.lines() {
         let line = line.trim();
@@ -91,13 +148,39 @@ fn parse_game(text: &str) -> Option<ParsedGame> {
             if !line.ends_with(']') { in_header = true; }
             continue;
         }
+    }
+
+    let outcome   = outcome_opt?;
+    let positions = parse_positions_from_pgn(text)?;
+    if positions.is_empty() { return None; }
+    Some(ParsedGame { positions, outcome })
+}
+
+/// Parst alle Halbzüge aus einem PGN-Text und gibt den Feature-Vektor jeder
+/// Stellung vor dem Zug zurück.  Gibt `None` zurück wenn ein Zug nicht in der
+/// legalen Zugliste liegt (Stellungsmismatch → Partie verwerfen).
+///
+/// Kompatibel mit chess.com-Annotationen `{ date=... clock=... }`: diese Token
+/// ergeben `None` aus `parse_move_token` und werden per `continue` übersprungen.
+fn parse_positions_from_pgn(text: &str) -> Option<Vec<Vec<f32>>> {
+    let mut move_text = String::new();
+    let mut in_header = false;
+
+    for line in text.lines() {
+        let line = line.trim();
+        if in_header {
+            if line.ends_with(']') { in_header = false; }
+            continue;
+        }
+        if line.starts_with('[') {
+            if !line.ends_with(']') { in_header = true; }
+            continue;
+        }
         if !line.is_empty() {
             move_text.push(' ');
             move_text.push_str(line);
         }
     }
-
-    let outcome = outcome_opt?;
 
     let mut board     = Board::default();
     let mut positions = Vec::new();
@@ -107,21 +190,32 @@ fn parse_game(text: &str) -> Option<ParsedGame> {
 
         let (from_sq, to_sq) = match parse_move_token(token) {
             Some(sq) => sq,
-            None     => continue,  // Nicht parsierbar (z.B. "R" am Ende) → überspringen
+            None     => continue,
         };
 
         let legal = Rules::legal_moves(&board);
         let mv = match legal.iter().find(|m| m.from == from_sq && m.to == to_sq) {
             Some(m) => *m,
-            None    => return None,  // Stellungsmismatch → Partie verwerfen
+            None    => return None,
         };
 
         positions.push(extract(&board));
         board = Rules::apply_with_effects(&board, mv);
     }
 
-    if positions.is_empty() { return None; }
-    Some(ParsedGame { positions, outcome })
+    Some(positions)
+}
+
+/// Konvertiert ein Standings-Array in normalisierte Trainings-Labels.
+///   Rang 1 → +1.0,  Rang 2 → +1/3,  Rang 3 → −1/3,  Rang 4 → −1.0
+fn standings_to_outcome(standings: [u8; 4]) -> [f32; 4] {
+    std::array::from_fn(|i| match standings[i] {
+        1 => 1.0,
+        2 => 1.0 / 3.0,
+        3 => -1.0 / 3.0,
+        4 => -1.0,
+        _ => 0.0,
+    })
 }
 
 /// Tokenisiert den Zugtext: Zugnummern ("1.", "16.") und Separatoren ("..") entfernen.
@@ -309,5 +403,30 @@ x,x,x,x,x,x,x,x,x,x,x,x,x,x\"]
         assert_eq!(g.positions.len(), 8,
             "got {} positions, expected 8 — Header-Filter greift nicht durch?",
             g.positions.len());
+    }
+
+    #[test]
+    fn standings_to_outcome_correct() {
+        let out = standings_to_outcome([1, 3, 2, 4]);
+        assert!((out[0] -  1.0      ).abs() < 1e-6); // Rang 1 → +1.0
+        assert!((out[1] - (-1.0/3.0)).abs() < 1e-6); // Rang 3 → −1/3
+        assert!((out[2] -  1.0/3.0  ).abs() < 1e-6); // Rang 2 → +1/3
+        assert!((out[3] - (-1.0)    ).abs() < 1e-6); // Rang 4 → −1.0
+    }
+
+    /// JSON-pgn4 enthält `{ date=... clock=... }`-Annotationen.
+    /// Diese dürfen nicht als Züge interpretiert werden.
+    #[test]
+    fn parse_positions_skips_json_annotations() {
+        let pgn = "\
+[GameNr \"1\"]
+[Result \"A: 10 - B: 12 - C: 8 - D: 11\"]
+
+1. f5-f6 { date=2024-01-01T00:00:00Z clock=61000 }  .. e9-f9 { date=2024-01-01T00:00:01Z clock=62000 }  .. h10-h9 { date=2024-01-01T00:00:02Z clock=60000 }  .. j6-i6 { date=2024-01-01T00:00:03Z clock=64000 }
+";
+        let positions = parse_positions_from_pgn(pgn)
+            .expect("Annotiertes pgn4 muss parsierbar sein");
+        assert_eq!(positions.len(), 4,
+            "got {} positions, expected 4", positions.len());
     }
 }
