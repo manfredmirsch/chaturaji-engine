@@ -249,10 +249,6 @@ const W_THREAT_GAIN: i32 = 80;
 /// near the full Boat (was 350 + PST 50 + material 100 = 500 cp ≈ Boat 500).
 const PROMO_BONUS: [i32; 8] = [0, 200, 80, 30, 10, 0, 0, 0];
 
-/// Coalition weights, only used when [`EvalParams::coalition`] is on.
-const W_COALITION:       i32 = 2;
-const COALITION_GAP_CAP: i32 = 15;
-
 // ─── Tunable behaviour ────────────────────────────────────────────────────────
 
 /// The evaluation choices that are genuinely open questions, gathered in one
@@ -280,9 +276,6 @@ pub struct EvalParams {
     pub graded_tempo: bool,
     /// Penalty for an opponent attacking the king square who moves first.
     pub ks_direct_imminent: i32,
-    /// Hand-tuned coalition bonus. Redundant once `rank_transform` is on, and
-    /// double-counts if both are enabled — kept switchable to demonstrate that.
-    pub coalition: bool,
 }
 
 impl Default for EvalParams {
@@ -294,7 +287,6 @@ impl Default for EvalParams {
             threat_gain:        W_THREAT_GAIN,
             graded_tempo:       true,
             ks_direct_imminent: KS_DIRECT_IMMINENT,
-            coalition:          false,
         }
     }
 }
@@ -309,7 +301,6 @@ impl EvalParams {
             threat_gain:        0,
             graded_tempo:       false,
             ks_direct_imminent: 5_000,
-            coalition:          true,
         }
     }
 }
@@ -437,64 +428,8 @@ pub fn evaluate_raw_with(board: &Board, p: &EvalParams) -> [i32; 4] {
         }
     }
 
-    // 10. Hand-tuned coalition term, off by default. The rank transform already
-    // produces this effect exactly — damaging the leader raises every other
-    // player's placement probability — so enabling both double-counts it.
-    // Retained only so the arena can measure the old model.
-    if p.coalition {
-        let coalition = coalition_adjustment(board, &atk_v1, &atk_v3, &atk_v5);
-        for ci in 0..4 {
-            if board.active[ci] {
-                scores[ci] += coalition[ci];
-            }
-        }
-    }
 
     scores
-}
-
-/// Bonus for players who are behind and actively pressure the leader's king
-/// zone, plus a penalty for the leader when several opponents converge.
-///
-/// A linear stand-in for the coalition dynamics, superseded by the rank
-/// transform. Only reachable via [`EvalParams::coalition`].
-fn coalition_adjustment(
-    board:  &Board,
-    atk_v1: &[u64; 4],
-    atk_v3: &[u64; 4],
-    atk_v5: &[u64; 4],
-) -> [i32; 4] {
-    let mut adj = [0i32; 4];
-    let leader    = board.scores.leader();
-    let leader_ki = leader.idx();
-
-    if !board.active[leader_ki] { return adj; }
-    let leader_king_bb = board.pieces(leader, PieceKind::King);
-    if leader_king_bb == 0 { return adj; }
-
-    let leader_score = board.scores.get(leader);
-    let leader_zone  = king_zone_bb(leader_king_bb.trailing_zeros() as u8);
-    let mut n_active_threateners = 0i32;
-
-    for c in Color::ALL {
-        let ci = c.idx();
-        if c == leader || !board.active[ci] { continue; }
-
-        let gap = (leader_score - board.scores.get(c)).clamp(0, COALITION_GAP_CAP);
-        if gap == 0 { continue; }
-
-        let own_atk = atk_v1[ci] | atk_v3[ci] | atk_v5[ci];
-        if own_atk & leader_zone != 0 {
-            adj[ci] += gap * W_COALITION;
-            n_active_threateners += 1;
-        }
-    }
-
-    if n_active_threateners >= 2 {
-        adj[leader_ki] -= n_active_threateners * W_COALITION * 3;
-    }
-
-    adj
 }
 
 /// Bonus for near-Boat-Triumph patterns, penalty for opponent near-triumphs.
