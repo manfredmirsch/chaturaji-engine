@@ -161,6 +161,46 @@ Schlechter als konstant Null ist keine bloße Verteilungsverschiebung. Solange
 das nicht geklärt ist, ist ein Pre-Training auf dem TD-Netz ein Schuss ins
 Dunkle — deshalb die Option `start_from: frisch`.
 
+## Training von vorn beginnen
+
+Nötig wird das, wenn sich die Punktelogik geändert hat: der Punktestand geht
+über `dense_features` als Eingabe ins Netz und über `place_values` ins
+Trainingsziel. Ein Netz, das mit falschen Punkten trainiert wurde, hat etwas
+anderes gelernt als das Spiel, das jetzt implementiert ist.
+
+Drei Schritte, keiner davon Handarbeit an Dateien:
+
+1. **Einmalig** `game_data.tar.gz` ans Release `nnue-state` hängen
+   (`cd ~/chaturaji && tar czf game_data.tar.gz game_data`, 215 MB → 32 MB).
+
+2. *Actions → NNUE-Pre-Training → Run workflow* mit
+
+   | Eingabe | Wert |
+   |---|---|
+   | `start_from` | `frisch` |
+   | `promote` | ✔ |
+   | `run_seed` | eine neue Zahl |
+   | `epochs` | 1 (oder mehr) |
+
+   Das trainiert ein frisch initialisiertes Netz auf den echten Partien und
+   übernimmt das Ergebnis anschließend als `weights.json`. Der Fortschritt wird
+   auf `games_done: 0` zurückgesetzt — ε beginnt wieder bei 0,3 und die
+   Lernrate beim vollen `--lr`; ohne das liefe ein frisches Netz mit dem
+   Zeitplan eines ausgereiften weiter.
+
+   Die bisherigen Gewichte gehen nicht verloren: sie werden vorher als
+   `weights-legacy.json` ins Release gesichert.
+
+3. *Actions → NNUE-Training → Run workflow* wie gewohnt. Bei `lr` jetzt den
+   vollen Startwert nehmen (`0.001`), nicht die 0,0013 aus der Fortsetzung des
+   alten Laufs — die waren nur dazu da, den bereits gelaufenen
+   Lernraten-Zerfall auszugleichen.
+
+Das Eröffnungsbuch muss nicht neu gebaut werden. Es liest nur die ersten 12–16
+Halbzüge, und in keiner der 11.558 Partien gibt es dort eine Aufgabe oder
+Zeitüberschreitung — der Importer-Fehler, der ein Viertel der Partien verwarf,
+hat es nie erreicht.
+
 ## Grenzen, die man kennen sollte
 
 - **Kein Ersatz für eine schnelle Maschine.** Pro Kern ist ein Runner eher

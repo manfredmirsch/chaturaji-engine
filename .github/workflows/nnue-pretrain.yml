@@ -34,6 +34,14 @@ on:
         description: 'Datensatz-Asset im Release nnue-state'
         type: string
         default: 'game_data.tar.gz'
+      promote:
+        description: 'Ergebnis als weights.json übernehmen und Fortschritt auf 0 setzen'
+        type: boolean
+        default: false
+      run_seed:
+        description: 'Lauf-Seed für das anschließende Self-Play (nur mit promote)'
+        type: number
+        default: 7
 
 env:
   STATE_TAG: nnue-state
@@ -104,9 +112,8 @@ jobs:
             --log-every 250 \
             | tee pretrain.log
 
-      # Bewusst getrennte Namen: weights.json im Release bleibt unangetastet.
-      # Zum Übernehmen später einmal von Hand hochladen — oder erst in der
-      # Arena gegen das bisherige Netz antreten lassen.
+      # Ohne `promote` bewusst getrennte Namen: weights.json im Release bleibt
+      # unangetastet, und ob das Ergebnis besser ist, entscheidet die Arena.
       - name: Ergebnis ins Release legen
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -114,6 +121,37 @@ jobs:
           set -euo pipefail
           gh release upload "$STATE_TAG" \
             state/weights-pretrained.json state/opt_state-pretrained.bin --clobber
+
+      # Übernehmen heißt: das Self-Play startet ab jetzt hier. Der bisherige
+      # Stand wird vorher als weights-legacy.json gesichert — ein Lauf über
+      # Millionen Schritte soll nicht durch einen Klick verschwinden.
+      - name: Als Startpunkt übernehmen
+        if: ${{ inputs.promote }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release download "$STATE_TAG" --pattern 'weights.json' --dir legacy --clobber 2>/dev/null; then
+            mv legacy/weights.json legacy/weights-legacy.json
+            gh release upload "$STATE_TAG" legacy/weights-legacy.json --clobber
+            echo "Bisherige Gewichte als weights-legacy.json gesichert."
+          else
+            echo "Keine bisherigen Gewichte vorhanden - nichts zu sichern."
+          fi
+
+          cp state/weights-pretrained.json state/weights.json
+          cp state/opt_state-pretrained.bin state/opt_state.bin
+
+          # Der Fortschritt beginnt von vorn: Epsilon startet wieder bei 0,3 und
+          # die Lernrate beim vollen --lr. Ohne das liefe ein frisches Netz mit
+          # dem Zeitplan eines ausgereiften weiter.
+          printf '{\n  "round": 0,\n  "games_done": 0,\n  "run_seed": %s,\n  "last_avg_loss": null,\n  "last_avg_plies": null\n}\n' \
+            '${{ inputs.run_seed }}' > state/progress.json
+          cat state/progress.json
+
+          gh release upload "$STATE_TAG" \
+            state/weights.json state/opt_state.bin state/progress.json --clobber
+          echo "Uebernommen. Self-Play startet bei Partie 0 mit Seed ${{ inputs.run_seed }}." 
 
       - name: Zusammenfassung
         if: always()
