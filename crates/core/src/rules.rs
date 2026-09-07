@@ -33,41 +33,46 @@ impl Rules {
     /// Apply `mv` and return the new board with all rule effects resolved.
     pub fn apply_with_effects(board: &Board, mv: Move) -> Board {
         let mut next = board.apply_move(mv);
-        Self::apply_check_bonus(&mut next, mv.mover, mv.to);
+        Self::apply_check_bonus(board, &mut next, mv.mover);
         next
     }
 
     // ─── Check bonus ──────────────────────────────────────────────────────────
     //
-    // Maßgeblich ist allein die gerade gezogene Figur: wie viele gegnerische
-    // Könige greift *sie* nach dem Zug an?
-    //   2 Könige → +1 (Doppelschach)
-    //   3 Könige → +5 (Dreifachschach)
+    // Ein Zug bringt den Bonus, wenn danach zwei (+1) oder drei (+5) fremde
+    // Könige im Schach des Ziehenden stehen, die es vorher nicht taten.
     //
-    // "Angreifen" heißt: die Figur hat einen Zug auf das Feld des Königs.
+    // "Im Schach" heißt: der Ziehende hat einen Zug auf das Feld des Königs.
     //
-    // Nicht maßgeblich ist, wie viele Könige insgesamt im Schach stehen. Das
-    // ist keine Feinheit, sondern der häufigste Irrtum — zwei Könige im
-    // Schach, aber von zwei verschiedenen Figuren, bringen nichts:
+    // Zwei Dinge sind dabei nicht verlangt. Erstens muss es nicht dieselbe
+    // Figur sein — ein Abzugsschach zählt genauso wie ein Angriff der
+    // gezogenen Figur. Zweitens zählt nicht der Zustand, sondern die
+    // Veränderung: ein schon bestehendes Schach bringt nichts mehr.
     //
-    //   Partie 100058474, Zug 28, Grün: `Rk10-e10+` (Boot h7-b7) setzt Gelbs
-    //     König auf b3 ins Schach. Rots König auf b1 stand schon vorher durch
-    //     den Läufer auf f5 im Schach. Zwei Könige im Schach, zwei Figuren,
-    //     ein `+` in der Notation, kein Punkt.
-    //   Partie 100283066, Blau: `g9-h9++` erzeugt das Doppelschach, `Bd9-e10`
-    //     lässt es bloß bestehen und trägt kein `+` — dort zieht eine andere
-    //     Figur als die, die das Schach gibt.
+    // Beides an echten Partien belegt:
     //
-    // Ein `+` in der Notation steht damit für einen König, den die gezogene
-    // Figur angreift. Über alle 11.558 Partien aus `game_data/` trifft diese
-    // Regel 11.276 Endstände exakt (97,6 %). Zum Vergleich: alle Könige im
-    // Schach zu zählen traf 11.163, nur die neu hinzugekommenen 11.274.
+    //   Partie 100010111, Zug 23, Rot: `g7-g8++` (Bauer d4-d5) gibt Blau auf
+    //     e6 Schach — mehr kann der Bauer nicht, er erreicht nur dieses Feld.
+    //     Das zweite Schach kommt aus der freigelegten Linie. chess.com zahlt.
+    //   Partie 100058474, Zug 28, Grün: `Rk10-e10+` (Boot h7-b7) setzt Gelb
+    //     auf b3 ins Schach, während Rot auf b1 schon vom Läufer auf f5
+    //     bedroht wird. Zwei Könige im Schach, aber nur eines neu — ein `+`
+    //     in der Notation, kein Punkt.
     //
-    // Der verbleibende Fehler ist einseitig — wir zahlen nur noch zu wenig,
-    // nie zu viel. Das liegt an der Zuggenerierung, nicht an dieser Regel.
+    // Über alle 11.558 Partien aus `game_data/` gemessen (exakte Endstände):
+    //
+    //   neu im Schach des Ziehenden       11.274   97,5 %   ← diese Regel
+    //   die gezogene Figur allein         11.276   97,6 %
+    //   neu im Schach, von wem auch immer 10.813   93,6 %
+    //   alle Könige im Schach              5.095   44,1 %
+    //
+    // Die ersten beiden liegen zwei Partien auseinander und sind damit nicht
+    // unterscheidbar; den Ausschlag gab Partie 100010111, die nur mit dieser
+    // Lesart aufgeht. Der verbleibende Fehler ist einseitig — wir zahlen nur
+    // noch zu wenig, nie zu viel.
 
-    fn apply_check_bonus(next: &mut Board, mover: Color, moved_to: u8) {
-        let bonus = match Self::kings_attacked_from(next, mover, moved_to) {
+    fn apply_check_bonus(before: &Board, next: &mut Board, mover: Color) {
+        let bonus = match Self::newly_checked_by_mover(before, next, mover) {
             2 => 1,
             3 => 5,
             _ => 0,
@@ -75,6 +80,48 @@ impl Rules {
         if bonus > 0 {
             next.scores.add(mover, bonus);
         }
+    }
+
+    /// Steht der König von `c` im Schach — von wem auch immer?
+    pub fn king_in_check(board: &Board, c: Color) -> bool {
+        let king = board.pieces(c, PieceKind::King);
+        if king == 0 { return false; }
+        Color::ALL.iter().any(|&d| {
+            d != c && board.active[d.idx()]
+                && Self::attacked_squares(board, d) & king != 0
+        })
+    }
+
+    /// Wie viele fremde Könige stehen nach dem Zug im Schach *des Ziehenden*,
+    /// die es vorher nicht taten?
+    ///
+    /// Auf welche Figur das zurückgeht, spielt keine Rolle: ein Abzugsschach
+    /// zählt genauso wie ein Angriff der gezogenen Figur. Beide Schachs müssen
+    /// aber neu sein — ein schon bestehendes zählt nicht noch einmal.
+    fn newly_checked_by_mover(before: &Board, after: &Board, mover: Color) -> usize {
+        let att_before = Self::attacked_squares(before, mover);
+        let att_after  = Self::attacked_squares(after,  mover);
+        Color::ALL
+            .iter()
+            .filter(|&&c| c != mover && after.active[c.idx()])
+            .filter(|&&c| {
+                after.pieces(c, PieceKind::King) & att_after != 0
+                    && before.pieces(c, PieceKind::King) & att_before == 0
+            })
+            .count()
+    }
+
+    /// Wie viele fremde Könige stehen nach dem Zug im Schach, die es vorher
+    /// nicht taten — unabhängig davon, wer sie angreift?
+    ///
+    /// Nur zum Vergleich behalten: diese Lesart trifft an den echten Partien
+    /// deutlich schlechter (93,6 % gegen 97,5 %).
+    pub fn newly_checked_kings(before: &Board, after: &Board, mover: Color) -> usize {
+        Color::ALL
+            .iter()
+            .filter(|&&c| c != mover && after.active[c.idx()])
+            .filter(|&&c| Self::king_in_check(after, c) && !Self::king_in_check(before, c))
+            .count()
     }
 
     /// Wie viele gegnerische Könige greift die Figur auf `from` allein an?
@@ -367,25 +414,48 @@ mod tests {
     }
 
     /// Doppelschach: ein Punkt.
+    ///
+    /// Beide Könige stehen auf Rang 3, den das Boot erst nach dem Zug
+    /// bestreicht. Auf Datei 3 dürfen sie nicht stehen — die greift das Boot
+    /// schon von d3 aus an, das Schach wäre dann nicht neu.
     #[test]
     fn double_check_gives_one_point() {
         let b = check_bonus_board(&[
-            (Color::Blue,   sq(3, 7)),   // Datei 3
-            (Color::Yellow, sq(7, 3)),   // Rang 3
+            (Color::Blue,   sq(0, 3)),   // Rang 3, westlich
+            (Color::Yellow, sq(7, 3)),   // Rang 3, östlich
             (Color::Green,  sq(0, 7)),   // abseits
         ]);
         assert_eq!(score_after_boat_step(&b), 1);
     }
 
-    /// Dreifachschach: fünf Punkte.
+    /// Dreifachschach: fünf Punkte — und zugleich die Probe darauf, dass ein
+    /// Abzugsschach mitzählt.
+    ///
+    /// Das Boot zieht c3→c4 und setzt über Rang 4 Blau und Gelb ins Schach.
+    /// Dabei gibt es die lange Diagonale frei, auf der ein Läufer auf a1 steht
+    /// — der greift nun Grün auf e5 an. Drei neue Schachs, zwei Figuren.
     #[test]
     fn triple_check_gives_five_points() {
-        let b = check_bonus_board(&[
-            (Color::Blue,   sq(3, 7)),   // Datei 3, nördlich
-            (Color::Yellow, sq(7, 3)),   // Rang 3, östlich
-            (Color::Green,  sq(0, 3)),   // Rang 3, westlich
-        ]);
-        assert_eq!(score_after_boat_step(&b), 5);
+        let mut b = Board::empty();
+        b.bb[Color::Red.idx()][PieceKind::Boat.idx()]   = bit(sq(2, 2)); // c3
+        b.bb[Color::Red.idx()][PieceKind::Bishop.idx()] = bit(sq(0, 0)); // a1
+        b.bb[Color::Red.idx()][PieceKind::King.idx()]   = bit(sq(7, 0)); // h1
+        b.bb[Color::Blue.idx()][PieceKind::King.idx()]   = bit(sq(0, 3)); // a4
+        b.bb[Color::Yellow.idx()][PieceKind::King.idx()] = bit(sq(7, 3)); // h4
+        b.bb[Color::Green.idx()][PieceKind::King.idx()]  = bit(sq(4, 4)); // e5
+        b.to_move = Color::Red;
+
+        assert_eq!(Rules::count_attacked_kings(&b, Color::Red), 0,
+                   "vor dem Zug greift Rot keinen König an");
+
+        let mv = Rules::legal_moves(&b)
+            .into_iter()
+            .find(|m| m.from == sq(2, 2) && m.to == sq(2, 3))
+            .expect("Boot muss c3→c4 ziehen können");
+        let after = Rules::apply_with_effects(&b, mv);
+
+        assert_eq!(Rules::count_attacked_kings(&after, Color::Red), 3);
+        assert_eq!(after.scores.get(Color::Red), 5);
     }
 
     /// Eine verstellte Linie ist kein Schach. Ohne diese Probe könnte
