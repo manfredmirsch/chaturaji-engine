@@ -33,44 +33,41 @@ impl Rules {
     /// Apply `mv` and return the new board with all rule effects resolved.
     pub fn apply_with_effects(board: &Board, mv: Move) -> Board {
         let mut next = board.apply_move(mv);
-        Self::apply_check_bonus(board, &mut next, mv.mover);
+        Self::apply_check_bonus(&mut next, mv.mover, mv.to);
         next
     }
 
     // ─── Check bonus ──────────────────────────────────────────────────────────
     //
-    // Zwei Bedingungen müssen zusammenkommen:
-    //   * nach dem Zug stehen 2 Könige im Schach → +1, 3 Könige → +5
-    //   * der Zug setzt mindestens einen davon NEU ins Schach
+    // Maßgeblich ist allein die gerade gezogene Figur: wie viele gegnerische
+    // Könige greift *sie* nach dem Zug an?
+    //   2 Könige → +1 (Doppelschach)
+    //   3 Könige → +5 (Dreifachschach)
     //
-    // "Im Schach" heißt: der Ziehende hat mindestens einen Zug auf das Feld
-    // des Königs.
+    // "Angreifen" heißt: die Figur hat einen Zug auf das Feld des Königs.
     //
-    // Die zweite Bedingung ist der Kern der Regel und keine Feinheit. Ohne sie
-    // kassiert ein Spieler den Punkt in jedem weiteren Zug erneut, solange die
-    // Lage bestehen bleibt — auch für einen Zug am anderen Ende des Bretts.
+    // Nicht maßgeblich ist, wie viele Könige insgesamt im Schach stehen. Das
+    // ist keine Feinheit, sondern der häufigste Irrtum — zwei Könige im
+    // Schach, aber von zwei verschiedenen Figuren, bringen nichts:
     //
-    // Die Notation von chess.com belegt beide Hälften. Ein `+` je König im
-    // Schach, und zwar genau dann, wenn der Zug es gibt:
+    //   Partie 100058474, Zug 28, Grün: `Rk10-e10+` (Boot h7-b7) setzt Gelbs
+    //     König auf b3 ins Schach. Rots König auf b1 stand schon vorher durch
+    //     den Läufer auf f5 im Schach. Zwei Könige im Schach, zwei Figuren,
+    //     ein `+` in der Notation, kein Punkt.
+    //   Partie 100283066, Blau: `g9-h9++` erzeugt das Doppelschach, `Bd9-e10`
+    //     lässt es bloß bestehen und trägt kein `+` — dort zieht eine andere
+    //     Figur als die, die das Schach gibt.
     //
-    //   Partie 100283066, Blau: `g9-h9++` (Hz 245) erzeugt das Doppelschach,
-    //     `Bd9-e10` (Hz 265) lässt es bestehen — und trägt kein `+`.
-    //   Partie 98003558, Grün: `Ke5-f6++` (Hz 1370) und `Kf6-g6++` (Hz 1385)
-    //     tragen beide `++`. Beim zweiten stehen wieder zwei Könige im Schach,
-    //     aber ein anderer als zuvor ist neu dabei.
+    // Ein `+` in der Notation steht damit für einen König, den die gezogene
+    // Figur angreift. Über alle 11.558 Partien aus `game_data/` trifft diese
+    // Regel 11.276 Endstände exakt (97,6 %). Zum Vergleich: alle Könige im
+    // Schach zu zählen traf 11.163, nur die neu hinzugekommenen 11.274.
     //
-    // Bloß zu prüfen, ob die Zahl gestiegen ist, träfe den zweiten Fall nicht:
-    // dort bleibt sie bei 2. Über alle 11.558 Partien trifft die Zählung der
-    // neu gegebenen Schachs 11.167 Endstände exakt, die Zahlprüfung 11.163.
+    // Der verbleibende Fehler ist einseitig — wir zahlen nur noch zu wenig,
+    // nie zu viel. Das liegt an der Zuggenerierung, nicht an dieser Regel.
 
-    fn apply_check_bonus(before: &Board, next: &mut Board, mover: Color) {
-        let after_count = Self::count_attacked_kings(next, mover);
-        if after_count < 2 { return; }
-
-        // Der Zug muss mindestens einen König NEU ins Schach setzen.
-        if Self::fresh_checks(before, next, mover) == 0 { return; }
-
-        let bonus = match after_count {
+    fn apply_check_bonus(next: &mut Board, mover: Color, moved_to: u8) {
+        let bonus = match Self::kings_attacked_from(next, mover, moved_to) {
             2 => 1,
             3 => 5,
             _ => 0,
@@ -80,18 +77,22 @@ impl Rules {
         }
     }
 
-    /// Wie viele gegnerische Könige setzt der Zug NEU ins Schach — angegriffen
-    /// nach dem Zug, vorher nicht?
-    fn fresh_checks(before: &Board, after: &Board, mover: Color) -> usize {
-        let before_att = Self::attacked_squares(before, mover);
-        let after_att  = Self::attacked_squares(after,  mover);
+    /// Wie viele gegnerische Könige greift die Figur auf `from` allein an?
+    ///
+    /// Nicht wie viele Könige insgesamt im Schach stehen: gefragt ist das
+    /// Doppelschach einer einzelnen Figur.
+    pub fn kings_attacked_from(board: &Board, mover: Color, from: u8) -> usize {
+        let mut tmp = board.clone();
+        tmp.to_move = mover;
+        let targets = MoveGen::generate(&tmp)
+            .iter()
+            .filter(|m| m.from == from)
+            .fold(0u64, |acc, m| acc | bit(m.to));
+
         Color::ALL
             .iter()
-            .filter(|&&c| c != mover && after.active[c.idx()])
-            .filter(|&&c| {
-                let k = after.pieces(c, PieceKind::King);
-                k & after_att != 0 && before.pieces(c, PieceKind::King) & before_att == 0
-            })
+            .filter(|&&c| c != mover && board.active[c.idx()])
+            .filter(|&&c| board.pieces(c, PieceKind::King) & targets != 0)
             .count()
     }
 
@@ -431,35 +432,39 @@ mod tests {
         assert_eq!(after.scores.get(Color::Red), 0, "kein neues Schach, kein Punkt");
     }
 
-    /// Bleibt es bei zwei Königen im Schach, ist aber ein *anderer* neu dabei,
-    /// zählt es wieder. Genau dieser Fall steht in Partie 98003558: `Ke5-f6++`
-    /// und danach `Kf6-g6++`, beide mit Doppelkreuz.
+    /// Zwei Könige im Schach, aber von zwei verschiedenen Figuren — kein
+    /// Punkt. Das ist Partie 100058474, Zug 28: das Boot setzt Gelb ins
+    /// Schach, während Rot schon vom Läufer bedroht wird.
     ///
-    /// Der Aufbau: das Boot zieht d4→d6 und wechselt damit von Rang 4 auf
-    /// Rang 6. Blau auf der Datei bleibt die ganze Zeit im Schach, Gelb auf
-    /// Rang 4 fällt heraus, Grün auf Rang 6 kommt neu hinzu — zwei vorher,
-    /// zwei nachher, aber nicht dieselben.
+    /// Aufbau: Läufer auf a1 greift über die lange Diagonale Blaus König auf
+    /// d4 an, und zwar schon vor dem Zug. Das Boot zieht h8→h6 und greift von
+    /// dort über Reihe 6 Gelbs König auf e6 an.
     #[test]
-    fn a_newly_checked_king_pays_again() {
+    fn two_kings_checked_by_two_pieces_pays_nothing() {
         let mut b = Board::empty();
-        b.bb[Color::Red.idx()][PieceKind::Boat.idx()] = bit(sq(3, 3));
-        b.bb[Color::Red.idx()][PieceKind::King.idx()] = bit(sq(0, 0));
-        b.bb[Color::Blue.idx()][PieceKind::King.idx()]   = bit(sq(3, 7)); // Datei 3
-        b.bb[Color::Yellow.idx()][PieceKind::King.idx()] = bit(sq(7, 3)); // Rang 3
-        b.bb[Color::Green.idx()][PieceKind::King.idx()]  = bit(sq(7, 5)); // Rang 5
+        b.bb[Color::Red.idx()][PieceKind::Bishop.idx()] = bit(sq(0, 0)); // a1
+        b.bb[Color::Red.idx()][PieceKind::Boat.idx()]   = bit(sq(7, 7)); // h8
+        b.bb[Color::Red.idx()][PieceKind::King.idx()]   = bit(sq(6, 0)); // g1
+        b.bb[Color::Blue.idx()][PieceKind::King.idx()]   = bit(sq(3, 3)); // d4
+        b.bb[Color::Yellow.idx()][PieceKind::King.idx()] = bit(sq(4, 5)); // e6
+        b.bb[Color::Green.idx()][PieceKind::King.idx()]  = bit(sq(0, 6)); // a7
         b.to_move = Color::Red;
 
-        assert_eq!(Rules::count_attacked_kings(&b, Color::Red), 2, "vorher Blau und Gelb");
+        assert_eq!(Rules::count_attacked_kings(&b, Color::Red), 1,
+                   "vor dem Zug hält der Läufer Blau im Schach");
 
         let mv = Rules::legal_moves(&b)
             .into_iter()
-            .find(|m| m.from == sq(3, 3) && m.to == sq(3, 5))
-            .expect("Boot muss d4→d6 ziehen können");
+            .find(|m| m.from == sq(7, 7) && m.to == sq(7, 5))
+            .expect("Boot muss h8→h6 ziehen können");
         let after = Rules::apply_with_effects(&b, mv);
 
-        assert_eq!(Rules::count_attacked_kings(&after, Color::Red), 2, "nachher Blau und Grün");
-        assert_eq!(after.scores.get(Color::Red), 1,
-                   "Grün kommt neu ins Schach — der Bonus fällt erneut an");
+        assert_eq!(Rules::count_attacked_kings(&after, Color::Red), 2,
+                   "danach stehen zwei Könige im Schach");
+        assert_eq!(Rules::kings_attacked_from(&after, Color::Red, sq(7, 5)), 1,
+                   "das Boot allein greift nur einen an");
+        assert_eq!(after.scores.get(Color::Red), 0,
+                   "zwei Figuren, zwei Könige — kein Doppelschach");
     }
 
     /// Der Bonus richtet sich nach der Zahl der Könige, nicht nach der Zahl

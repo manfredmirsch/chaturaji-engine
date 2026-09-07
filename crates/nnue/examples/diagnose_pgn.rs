@@ -137,6 +137,29 @@ fn detail(path: &str) {
 
         if gained != 0 {
             let checks_after = Rules::count_attacked_kings(&next, mover);
+            // Bei einem Schach-Bonus zeigen, WELCHE Koenige als angegriffen
+            // gelten und durch welche Figur - dort sitzt der Fehler, wenn die
+            // Zahl nicht zur Notation passt.
+            if checks_after >= 2 {
+                let mut probe = next.clone();
+                probe.to_move = mover;
+                let atk = Rules::legal_moves(&probe);
+                for c in Color::ALL {
+                    if c == mover || !next.active[c.idx()] { continue; }
+                    let king = next.bb[c.idx()][PieceKind::King.idx()];
+                    if king == 0 { continue; }
+                    let ksq = king.trailing_zeros() as u8;
+                    let by: Vec<String> = atk.iter().filter(|m| m.to == ksq)
+                        .map(|m| format!("{:?} von {}",
+                             piece_at(&next, m.from).map(|(_, k)| k).unwrap(),
+                             square_name(m.from)))
+                        .collect();
+                    if !by.is_empty() {
+                        println!("        -> {} Koenig auf {} angegriffen von: {}",
+                                 c.name(), square_name(ksq), by.join(", "));
+                    }
+                }
+            }
             let capture = mv.captured
                 .map(|c| format!("schlägt {} {:?} ({})",
                                  c.color.name(), c.kind, c.kind.capture_value()))
