@@ -167,6 +167,84 @@ fn detail(path: &str) {
              .filter(|c| board.active[c.idx()]).map(|c| c.name()).collect::<Vec<_>>());
 }
 
+/// Sucht Partien, in denen ein Spieler zweimal nacheinander im Doppelschach
+/// steht: erst erzeugt sein Zug es (vorher < 2, nachher 2), danach bleibt es
+/// bei einem weiteren seiner Züge bestehen (vorher 2, nachher 2).
+fn find_double(dir: &str, want: usize) {
+    let mut paths: Vec<_> = std::fs::read_dir(dir)
+        .expect("Verzeichnis nicht lesbar")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+        .collect();
+    paths.sort();
+
+    let mut found = 0usize;
+
+    for path in &paths {
+        if found >= want { return; }
+        let text = match std::fs::read_to_string(path) { Ok(t) => t, Err(_) => continue };
+        let json: serde_json::Value = match serde_json::from_str(&text) { Ok(v) => v, Err(_) => continue };
+        let pgn4 = match json["pgn4"].as_str() { Some(s) => s, None => continue };
+
+        let mut move_text = String::new();
+        let mut in_header = false;
+        for line in pgn4.lines() {
+            let line = line.trim();
+            if in_header { if line.ends_with(']') { in_header = false; } continue; }
+            if line.starts_with('[') { if !line.ends_with(']') { in_header = true; } continue; }
+            if !line.is_empty() { move_text.push(' '); move_text.push_str(line); }
+        }
+        let tokens: Vec<&str> = move_text.split_whitespace()
+            .filter(|t| !t.ends_with('.') && *t != ".." && *t != "*").collect();
+
+        let mut board = Board::default();
+        // je Spieler: das zuletzt erzeugte Doppelschach (Halbzug, Token)
+        let mut created: [Option<(usize, String)>; 4] = [None, None, None, None];
+        let mut hit: Option<(Color, (usize, String), (usize, String))> = None;
+
+        for (ply, token) in tokens.iter().enumerate() {
+            if Rules::is_game_over(&board) { break; }
+            if *token == "R" || *token == "T" { board = Rules::resign(&board); continue; }
+            let (from_sq, to_sq) = match parse_move_token(token) { Some(v) => v, None => continue };
+            let legal = Rules::legal_moves(&board);
+            let mv = match legal.iter().find(|m| m.from == from_sq && m.to == to_sq) {
+                Some(m) => *m, None => break,
+            };
+            let mover  = board.to_move;
+            let before = Rules::count_attacked_kings(&board, mover);
+            let next   = Rules::apply_with_effects(&board, mv);
+            let after  = Rules::count_attacked_kings(&next, mover);
+
+            if after == 2 && before < 2 {
+                created[mover.idx()] = Some((ply, (*token).to_string()));
+            } else if after == 2 && before == 2 {
+                if let Some(first) = created[mover.idx()].clone() {
+                    hit = Some((mover, first, (ply, (*token).to_string())));
+                    break;
+                }
+            } else if after < 2 {
+                created[mover.idx()] = None;
+            }
+            board = next;
+        }
+
+        if let Some((mover, first, second)) = hit {
+            let name = path.file_stem().unwrap().to_string_lossy();
+            println!("Partie {name}   https://www.chess.com/variants/chaturaji/game/{name}");
+            println!("  Spieler: {}", mover.name());
+            println!("    Halbzug {:>4}  {:<12} erzeugt das Doppelschach (vorher <2, nachher 2)",
+                     first.0, first.1);
+            println!("    Halbzug {:>4}  {:<12} Doppelschach bestand bereits (vorher 2, nachher 2)",
+                     second.0, second.1);
+            println!("  Notation: erstes {:?}, zweites {:?}\n",
+                     first.1.matches('+').count(), second.1.matches('+').count());
+            found += 1;
+        }
+    }
+    if found == 0 { println!("keine solche Partie gefunden"); }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir   = args.get(1).cloned().unwrap_or_else(|| "game_data".to_string());
@@ -175,6 +253,13 @@ fn main() {
     // Einzelne Datei → Detailansicht statt Massenauswertung.
     if dir.ends_with(".json") {
         detail(&dir);
+        return;
+    }
+
+    // Suchlauf: zwei Doppelschachs desselben Spielers nacheinander, wobei das
+    // zweite schon vorher bestand.
+    if args.iter().any(|a| a == "--find-double") {
+        find_double(&dir, args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5));
         return;
     }
 

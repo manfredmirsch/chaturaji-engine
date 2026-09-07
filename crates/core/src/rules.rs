@@ -39,30 +39,36 @@ impl Rules {
 
     // ─── Check bonus ──────────────────────────────────────────────────────────
     //
-    // Der Zug muss das Mehrfachschach *geben*:
-    //   2 Könige im Schach, vorher weniger → +1 (Doppelschach)
-    //   3 Könige im Schach, vorher weniger → +5 (Dreifachschach)
+    // Zwei Bedingungen müssen zusammenkommen:
+    //   * nach dem Zug stehen 2 Könige im Schach → +1, 3 Könige → +5
+    //   * der Zug setzt mindestens einen davon NEU ins Schach
     //
     // "Im Schach" heißt: der Ziehende hat mindestens einen Zug auf das Feld
     // des Königs.
     //
-    // Der Vergleich mit dem Zustand *vor* dem Zug ist der Kern der Regel und
-    // nicht bloß eine Feinheit. Ohne ihn kassiert ein Spieler den Punkt in
-    // jedem weiteren Zug erneut, solange die Lage bestehen bleibt — auch für
-    // einen Zug am anderen Ende des Bretts, der mit dem Schach nichts zu tun
-    // hat. In Partie 100021895 vergab die Engine so zwei Boni, chess.com nur
-    // einen: nur `Rd9-i9++` trägt dort das Doppelkreuz, der Königszug
-    // `Kj6-k5` bei Halbzug 94 nicht — dort standen schon vorher zwei Könige
-    // im Schach.
+    // Die zweite Bedingung ist der Kern der Regel und keine Feinheit. Ohne sie
+    // kassiert ein Spieler den Punkt in jedem weiteren Zug erneut, solange die
+    // Lage bestehen bleibt — auch für einen Zug am anderen Ende des Bretts.
+    //
+    // Die Notation von chess.com belegt beide Hälften. Ein `+` je König im
+    // Schach, und zwar genau dann, wenn der Zug es gibt:
+    //
+    //   Partie 100283066, Blau: `g9-h9++` (Hz 245) erzeugt das Doppelschach,
+    //     `Bd9-e10` (Hz 265) lässt es bestehen — und trägt kein `+`.
+    //   Partie 98003558, Grün: `Ke5-f6++` (Hz 1370) und `Kf6-g6++` (Hz 1385)
+    //     tragen beide `++`. Beim zweiten stehen wieder zwei Könige im Schach,
+    //     aber ein anderer als zuvor ist neu dabei.
+    //
+    // Bloß zu prüfen, ob die Zahl gestiegen ist, träfe den zweiten Fall nicht:
+    // dort bleibt sie bei 2. Über alle 11.558 Partien trifft die Zählung der
+    // neu gegebenen Schachs 11.167 Endstände exakt, die Zahlprüfung 11.163.
 
     fn apply_check_bonus(before: &Board, next: &mut Board, mover: Color) {
         let after_count = Self::count_attacked_kings(next, mover);
         if after_count < 2 { return; }
 
-        // Vor dem Zug in derselben Zählweise: nur aktive Gegner. Wer gerade
-        // seinen König verloren hat, zählt hinterher nicht mehr mit, und ein
-        // geschlagener König ist kein gegebenes Schach.
-        if after_count <= Self::count_attacked_kings(before, mover) { return; }
+        // Der Zug muss mindestens einen König NEU ins Schach setzen.
+        if Self::fresh_checks(before, next, mover) == 0 { return; }
 
         let bonus = match after_count {
             2 => 1,
@@ -72,6 +78,21 @@ impl Rules {
         if bonus > 0 {
             next.scores.add(mover, bonus);
         }
+    }
+
+    /// Wie viele gegnerische Könige setzt der Zug NEU ins Schach — angegriffen
+    /// nach dem Zug, vorher nicht?
+    fn fresh_checks(before: &Board, after: &Board, mover: Color) -> usize {
+        let before_att = Self::attacked_squares(before, mover);
+        let after_att  = Self::attacked_squares(after,  mover);
+        Color::ALL
+            .iter()
+            .filter(|&&c| c != mover && after.active[c.idx()])
+            .filter(|&&c| {
+                let k = after.pieces(c, PieceKind::King);
+                k & after_att != 0 && before.pieces(c, PieceKind::King) & before_att == 0
+            })
+            .count()
     }
 
     /// Count how many *active* opponents' kings the `mover` attacks.
@@ -408,6 +429,37 @@ mod tests {
 
         assert_eq!(Rules::count_attacked_kings(&after, Color::Red), 2, "Lage unverändert");
         assert_eq!(after.scores.get(Color::Red), 0, "kein neues Schach, kein Punkt");
+    }
+
+    /// Bleibt es bei zwei Königen im Schach, ist aber ein *anderer* neu dabei,
+    /// zählt es wieder. Genau dieser Fall steht in Partie 98003558: `Ke5-f6++`
+    /// und danach `Kf6-g6++`, beide mit Doppelkreuz.
+    ///
+    /// Der Aufbau: das Boot zieht d4→d6 und wechselt damit von Rang 4 auf
+    /// Rang 6. Blau auf der Datei bleibt die ganze Zeit im Schach, Gelb auf
+    /// Rang 4 fällt heraus, Grün auf Rang 6 kommt neu hinzu — zwei vorher,
+    /// zwei nachher, aber nicht dieselben.
+    #[test]
+    fn a_newly_checked_king_pays_again() {
+        let mut b = Board::empty();
+        b.bb[Color::Red.idx()][PieceKind::Boat.idx()] = bit(sq(3, 3));
+        b.bb[Color::Red.idx()][PieceKind::King.idx()] = bit(sq(0, 0));
+        b.bb[Color::Blue.idx()][PieceKind::King.idx()]   = bit(sq(3, 7)); // Datei 3
+        b.bb[Color::Yellow.idx()][PieceKind::King.idx()] = bit(sq(7, 3)); // Rang 3
+        b.bb[Color::Green.idx()][PieceKind::King.idx()]  = bit(sq(7, 5)); // Rang 5
+        b.to_move = Color::Red;
+
+        assert_eq!(Rules::count_attacked_kings(&b, Color::Red), 2, "vorher Blau und Gelb");
+
+        let mv = Rules::legal_moves(&b)
+            .into_iter()
+            .find(|m| m.from == sq(3, 3) && m.to == sq(3, 5))
+            .expect("Boot muss d4→d6 ziehen können");
+        let after = Rules::apply_with_effects(&b, mv);
+
+        assert_eq!(Rules::count_attacked_kings(&after, Color::Red), 2, "nachher Blau und Grün");
+        assert_eq!(after.scores.get(Color::Red), 1,
+                   "Grün kommt neu ins Schach — der Bonus fällt erneut an");
     }
 
     /// Der Bonus richtet sich nach der Zahl der Könige, nicht nach der Zahl
