@@ -96,7 +96,6 @@ fn detail(path: &str) {
     println!("{}", "─".repeat(104));
 
     let mut board  = Board::default();
-    let mut halfmove = 0usize;
     let mut movenum = String::from("?");
 
     for token in &tokens {
@@ -117,7 +116,6 @@ fn detail(path: &str) {
             println!("{:>4} {:<7} {:<12} {:<11} {:<24} {:>7}  {:?}",
                      movenum, who.name(), token, "",
                      "scheidet aus", "", board.scores.as_array());
-            halfmove += 1;
             continue;
         }
 
@@ -157,7 +155,6 @@ fn detail(path: &str) {
         }
 
         board = next;
-        halfmove += 1;
     }
 
     let replayed = Rules::final_scores(&board);
