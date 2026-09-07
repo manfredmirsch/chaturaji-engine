@@ -81,9 +81,26 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p state data
-          gh release download "$STATE_TAG" --pattern '${{ inputs.data_asset }}' --dir . --clobber
+
+          # Ohne Datensatz kein Pre-Training. Die Meldung soll sagen, was fehlt
+          # und wie es dorthin kommt — ein blankes "exit 1" aus gh hilft nicht.
+          if ! gh release download "$STATE_TAG" --pattern '${{ inputs.data_asset }}' --dir . --clobber; then
+            echo "::error::'${{ inputs.data_asset }}' liegt nicht am Release '$STATE_TAG'."
+            echo "::error::Vorhandene Anhänge:"
+            gh release view "$STATE_TAG" --json assets \
+              --jq '.assets[].name' 2>/dev/null | sed 's/^/::error::  /' || echo "::error::  (keine)"
+            echo "::error::Erzeugen mit: python3 scripts/pack-game-data.py <game_data> game_data.tar.gz"
+            echo "::error::Dann bei Releases → $STATE_TAG → Edit anhängen (max. 25 MB, .gz)."
+            exit 1
+          fi
+
           tar xf '${{ inputs.data_asset }}' -C data --strip-components=1
-          echo "$(find data -name '*.json' | wc -l) JSON-Dateien entpackt."
+          count=$(find data -name '*.json' | wc -l)
+          echo "$count JSON-Dateien entpackt."
+          if [ "$count" -eq 0 ]; then
+            echo "::error::Archiv enthält keine .json-Dateien — falsche Verzeichnisebene?"
+            exit 1
+          fi
 
           if [ "${{ inputs.start_from }}" = "weights.json" ]; then
             gh release download "$STATE_TAG" --pattern 'weights.json'  --dir state --clobber
