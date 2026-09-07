@@ -129,6 +129,62 @@ impl Rules {
             .fold(0u64, |acc, mv| acc | bit(mv.to))
     }
 
+    // ─── Aufgabe und Zeitüberschreitung ───────────────────────────────────────
+
+    /// Der Spieler am Zug gibt auf (oder überschreitet die Zeit).
+    ///
+    /// Er scheidet aus, seine Figuren bleiben stehen — auch der König, der
+    /// danach noch 3 Punkte wert ist. `MoveGen` erzeugt für einen inaktiven
+    /// Spieler keine Züge, und die Zugrechtweitergabe überspringt ihn ohnehin;
+    /// es genügt also, das Flag zu löschen und weiterzureichen.
+    ///
+    /// Im Self-Play kommt das nicht vor — dort scheidet man nur durch den
+    /// Verlust des Königs aus. Gebraucht wird es beim Einlesen echter Partien.
+    pub fn resign(board: &Board) -> Board {
+        let mut next = board.clone();
+        next.active[board.to_move.idx()] = false;
+
+        let mut next_player = board.to_move.next();
+        for _ in 0..4 {
+            if next.active[next_player.idx()] { break; }
+            next_player = next_player.next();
+        }
+        next.to_move = next_player;
+        next
+    }
+
+    // ─── Endstand ─────────────────────────────────────────────────────────────
+
+    /// Der Punktestand am Partieende, einschließlich der Könige, die nie
+    /// geschlagen wurden.
+    ///
+    /// Bleibt genau ein Spieler übrig, bekommt er für jeden noch stehenden
+    /// König eines Ausgeschiedenen 3 Punkte. Stehen bleiben können nur Könige
+    /// von Spielern, die aufgegeben haben — ein geschlagener König ist vom
+    /// Brett und wurde bereits verrechnet.
+    ///
+    /// An 1000 echten Partien gemessen: ohne diesen Zuschlag stimmten 352
+    /// Endstände mit chess.com überein, mit ihm 927.
+    pub fn final_scores(board: &Board) -> [i32; 4] {
+        let mut scores = board.scores.as_array();
+
+        let survivors: Vec<Color> = Color::ALL
+            .into_iter()
+            .filter(|c| board.active[c.idx()])
+            .collect();
+
+        if let [winner] = survivors[..] {
+            let standing_kings = Color::ALL
+                .iter()
+                .filter(|&&c| !board.active[c.idx()])
+                .filter(|&&c| board.pieces(c, PieceKind::King) != 0)
+                .count() as i32;
+            scores[winner.idx()] += standing_kings * PieceKind::King.capture_value();
+        }
+
+        scores
+    }
+
     // ─── Game-over ────────────────────────────────────────────────────────────
 
     /// Returns true when the game has ended (≤1 active player).
@@ -154,6 +210,83 @@ mod tests {
     fn legal_moves_non_empty_at_start() {
         let b = Board::default();
         assert!(!Rules::legal_moves(&b).is_empty());
+    }
+
+    /// Aufgeben nimmt den Spieler aus der Zugfolge, lässt seine Figuren aber
+    /// stehen. Verschwänden sie, wären die Stellungen beim Einlesen echter
+    /// Partien falsch besetzt.
+    #[test]
+    fn resign_skips_player_but_keeps_pieces() {
+        let b = Board::default();
+        assert_eq!(b.to_move, Color::Red);
+
+        let after = Rules::resign(&b);
+        assert!(!after.active[Color::Red.idx()], "Aufgeber ist ausgeschieden");
+        assert_eq!(after.to_move, Color::Blue, "Zugrecht geht weiter");
+        assert_eq!(
+            after.bb[Color::Red.idx()], b.bb[Color::Red.idx()],
+            "die Figuren bleiben auf dem Brett",
+        );
+        assert!(Rules::legal_moves(&after).iter().all(|m| m.mover == Color::Blue));
+    }
+
+    /// Gibt der übernächste Spieler ebenfalls auf, muss das Zugrecht über
+    /// beide hinwegspringen.
+    #[test]
+    fn resign_skips_over_already_eliminated() {
+        let mut b = Board::default();
+        b.active[Color::Blue.idx()] = false;      // Blau ist schon raus
+        let after = Rules::resign(&b);            // Rot gibt auf
+        assert_eq!(after.to_move, Color::Yellow);
+    }
+
+    /// Der König eines Ausgeschiedenen zählt beim Schlagen weiterhin 3 Punkte.
+    #[test]
+    fn dead_kings_still_score_when_captured() {
+        let mut b = Board::empty();
+        let d4 = sq(3, 3);
+        let d5 = sq(3, 4);
+
+        b.bb[Color::Red.idx()][PieceKind::Boat.idx()]  = bit(d4);
+        b.bb[Color::Blue.idx()][PieceKind::King.idx()] = bit(d5);
+        b.bb[Color::Red.idx()][PieceKind::King.idx()]  = bit(sq(0, 0));
+        b.active = [true, false, false, false];    // Blau hat aufgegeben
+        b.to_move = Color::Red;
+
+        let mv = Rules::legal_moves(&b)
+            .into_iter()
+            .find(|m| m.from == d4 && m.to == d5)
+            .expect("Boot schlägt den stehengebliebenen König");
+        let after = Rules::apply_with_effects(&b, mv);
+
+        assert_eq!(after.scores.get(Color::Red), PieceKind::King.capture_value());
+    }
+
+    /// Bleibt einer übrig, gehören ihm die nie geschlagenen Könige.
+    #[test]
+    fn survivor_gets_three_per_standing_king() {
+        let mut b = Board::empty();
+        b.bb[Color::Red.idx()][PieceKind::King.idx()]    = bit(sq(0, 0));
+        b.bb[Color::Blue.idx()][PieceKind::King.idx()]   = bit(sq(7, 7));
+        b.bb[Color::Yellow.idx()][PieceKind::King.idx()] = bit(sq(0, 7));
+        // Grün wurde regulär geschlagen: kein König mehr auf dem Brett.
+        b.active = [true, false, false, false];
+        b.scores.add(Color::Red, 10);
+
+        let scores = Rules::final_scores(&b);
+        assert_eq!(scores[Color::Red.idx()], 10 + 2 * 3, "zwei stehende Könige");
+        assert_eq!(scores[Color::Blue.idx()], 0);
+    }
+
+    /// Solange mehr als einer aktiv ist, gibt es den Zuschlag nicht — sonst
+    /// bekäme eine im Ply-Limit abgebrochene Selbstspiel-Partie Punkte
+    /// geschenkt.
+    #[test]
+    fn no_survivor_bonus_while_game_runs() {
+        let mut b = Board::default();
+        b.active = [true, true, false, false];
+        b.scores.add(Color::Red, 7);
+        assert_eq!(Rules::final_scores(&b), b.scores.as_array());
     }
 
     #[test]

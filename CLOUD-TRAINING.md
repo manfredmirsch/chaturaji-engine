@@ -124,8 +124,16 @@ Schritte, Lernrate) und in `progress.json`.
 SGD geht die Stellungen der Reihe nach durch, da ist nichts zu parallelisieren.
 
 Gemessen: ~1.900 Stellungen/s, also gut **neun Minuten** für den ganzen
-Datensatz, bei 35 MB Speicherbedarf. Aus 1.000 Dateien werden 758 Partien mit
-90.771 Stellungen.
+Datensatz, bei 35 MB Speicherbedarf. Aus 1.000 Dateien werden 1.000 Partien mit
+116.160 Stellungen.
+
+Die Regelimplementierung ist an allen 11.558 Partien geprüft: alle sind
+nachspielbar, und bei 92,7 % stimmt der nachgespielte Endstand exakt mit
+`points1..4` von chess.com überein. Nachprüfen lässt sich das jederzeit mit
+
+```bash
+cargo run --release -p chaturaji-nnue --example diagnose_pgn -- ~/chaturaji/game_data
+```
 
 Dafür muss `game_data.tar.gz` einmalig ans Release `nnue-state`:
 
@@ -137,15 +145,6 @@ Das Ergebnis überschreibt `weights.json` **nicht**, sondern liegt als
 `weights-pretrained.json` daneben. Ein Pre-Training zieht das Netz auf eine
 andere Zielverteilung — ob das besser ist, entscheidet die Arena, nicht der
 Workflow. Übernehmen ist ein bewusster zweiter Schritt.
-
-Zwei Dinge, die man vorher wissen sollte:
-
-**Ein Viertel der Partien fällt weg.** `parse_positions_from_pgn` verwirft eine
-ganze Partie, sobald ein einziger Zug nicht in `Rules::legal_moves` auftaucht —
-gemessen 242 von 1.000 Dateien. Es liegt nicht am Datenformat: alle 1.000 haben
-`pgn4` und `points1-4`. Es ist eine Abweichung zwischen den aufgezeichneten
-Partien und der Regelimplementierung, und dieselbe Implementierung spielt auch
-die Engine-Züge.
 
 **Das TD-Netz sagt echte Ausgänge schlechter vorher als ein untrainiertes.**
 Auf denselben 758 Partien gemessen:

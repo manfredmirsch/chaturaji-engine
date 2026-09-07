@@ -188,6 +188,14 @@ fn parse_positions_from_pgn(text: &str) -> Option<Vec<Vec<f32>>> {
     for token in tokenize_moves(&move_text) {
         if Rules::is_game_over(&board) { break; }
 
+        // Siehe `chaturaji_nnue::pgn_import`: `R` und `T` belegen einen
+        // Zugslot. Nur zu überspringen verschiebt das Zugrecht und lässt den
+        // Rest der Partie auseinanderlaufen.
+        if token == "R" || token == "T" {
+            board = Rules::resign(&board);
+            continue;
+        }
+
         let (from_sq, to_sq) = match parse_move_token(token) {
             Some(sq) => sq,
             None     => continue,

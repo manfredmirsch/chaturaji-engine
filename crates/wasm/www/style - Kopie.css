@@ -1,0 +1,452 @@
+/* ─── Design-Tokens ─────────────────────────────────────────────────────────── */
+:root {
+  /* Spielerfarben (Hex + RGB-Triplets für rgba()-Komposition bei Badges) */
+  --color-red:        #e74c3c;
+  --color-blue:       #3498db;
+  --color-yellow:     #f1c40f;
+  --color-green:      #2ecc71;
+  --color-red-rgb:    231, 76, 60;
+  --color-blue-rgb:   52, 152, 219;
+  --color-yellow-rgb: 241, 196, 15;
+  --color-green-rgb:  46, 204, 113;
+
+  /* Akzent + Hintergründe */
+  --color-accent:     #f0c040;
+  --bg-page:          #1a1a2e;
+  --bg-panel:         #16213e;
+  --bg-row-hover:     #1a2a4a;
+  --bg-input:         #0f3460;
+  --bg-hover:         #1a5276;
+  --bg-active:        #0a2540;
+  --bg-track:         #0d1b2a;
+  --color-overlay:    rgba(0, 0, 0, 0.75);
+  --color-shadow:     rgba(0, 0, 0, 0.6);
+
+  /* Textstufen */
+  --text-bright:  #fff;
+  --text:         #e0e0e0;
+  --text-muted:   #ccc;
+  --text-dim:     #aaa;
+  --text-dim-2:   #888;
+  --text-dim-3:   #666;
+  --text-dim-4:   #444;
+
+  /* Layout-Dimensionen */
+  --w-app:                1500px;
+  --w-board:               660px;
+  --w-captures-col:        110px;
+  --h-cap-slot:            165px;
+  /* Linke Hauptspalte = Board + 2 Capture-Spalten + 2 Gaps. Breit genug,
+     dass alles bündig sitzt und Listen nicht den Container aufblähen. */
+  --w-main-left:           calc(var(--w-board) + 2 * (var(--w-captures-col) + var(--px-8)));
+  --w-main-right-min:      240px;
+  --w-main-right-col-min:  200px;
+  --w-replay-pos-min:       64px;
+  --h-filter-results-max:  240px;
+  --h-movelist-max:        360px;
+  --h-chat-max:            560px;
+
+  /* Pixel-Skala */
+  --px-1:    1px;
+  --px-2:    2px;
+  --px-3:    3px;
+  --px-4:    4px;
+  --px-6:    6px;
+  --px-8:    8px;
+  --px-10:  10px;
+  --px-14:  14px;
+  --px-18:  18px;
+  --px-20:  20px;
+  --px-36:  36px;
+  --px-38:  38px;
+  --px-48:  48px;
+  --px-60:  60px;
+  --px-80:  80px;
+  --size-capture-img: 28px;
+  --size-capture-img-shift: 10px;
+
+  /* Border-Radius */
+  --radius-sm:    3px;
+  --radius-md:    4px;
+  --radius-lg:    6px;
+  --radius-pill:  7px;
+  --radius-xl:    8px;
+
+  /* Rem-Skala (für Spacings und Font-Sizes geteilt) */
+  --rem-010:  0.1rem;
+  --rem-015:  0.15rem;
+  --rem-020:  0.2rem;
+  --rem-025:  0.25rem;
+  --rem-030:  0.3rem;
+  --rem-035:  0.35rem;
+  --rem-040:  0.4rem;
+  --rem-050:  0.5rem;
+  --rem-060:  0.6rem;
+  --rem-065:  0.65rem;
+  --rem-072:  0.72rem;
+  --rem-075:  0.75rem;
+  --rem-078:  0.78rem;
+  --rem-080:  0.8rem;
+  --rem-082:  0.82rem;
+  --rem-085:  0.85rem;
+  --rem-090:  0.9rem;
+  --rem-095:  0.95rem;
+  --rem-100:  1rem;
+  --rem-125:  1.25rem;
+  --rem-150:  1.5rem;
+  --rem-200:  2rem;
+  --rem-220:  2.2rem;
+  --rem-400:  4rem;
+  --rem-550:  5.5rem;
+}
+
+/* ─── Reset & base ──────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: var(--bg-page); color: var(--text); min-height: 100vh;
+}
+#app { max-width: var(--w-app); margin: 0 auto; padding: var(--rem-150); }
+
+header { position: relative; text-align: center; margin-bottom: var(--rem-150); }
+header h1 { font-size: var(--rem-200); color: var(--color-accent); letter-spacing: var(--px-2); }
+header .subtitle { color: var(--text-dim-2); font-size: var(--rem-090); margin-top: var(--rem-025); }
+
+/* ─── Sprachumschalter (oben rechts im Header) ─────────────────────────────── */
+#lang-switcher {
+  position: absolute; top: 0; right: 0;
+  display: flex; align-items: center; gap: var(--rem-040);
+  font-size: var(--rem-085); color: var(--text-dim);
+}
+[dir="rtl"] #lang-switcher { right: auto; left: 0; }
+#lang-switcher label { user-select: none; }
+#lang-select {
+  background: var(--bg-input); color: var(--text);
+  border: var(--px-1) solid var(--bg-hover);
+  border-radius: var(--radius-lg); padding: var(--rem-030) var(--rem-050);
+  font-size: var(--rem-085); cursor: pointer;
+}
+#lang-select:focus { outline: none; border-color: var(--color-accent); }
+
+/* ─── Brett mit Punkteboxen + Captures-Spalten ───────────────────────────────── */
+#board-frame {
+  display: flex; align-items: center; gap: var(--px-8);
+  margin-bottom: var(--rem-100); width: max-content;
+}
+#board-area { display: flex; flex-direction: column; width: var(--w-board); }
+#score-top, #score-bottom { display: flex; justify-content: space-between; }
+#score-top  { margin-bottom: var(--px-4); }
+#score-bottom { margin-top: var(--px-4); }
+.score {
+  flex: 0 0 40%; background: var(--bg-panel); border-radius: var(--radius-lg);
+  padding: var(--rem-035) var(--rem-060); font-size: var(--rem-085);
+  display: flex; align-items: center; gap: var(--rem-040);
+}
+.score-name { cursor: pointer; user-select: none; }
+.score.left-slot {
+  border-left: var(--px-4) solid transparent;
+}
+.score.right-slot {
+  flex-direction: row-reverse;
+  border-right: var(--px-4) solid transparent;
+}
+
+.score-pts  { font-weight: bold; font-size: var(--rem-100); }
+.score-time { font-family: monospace; }
+.score-time:not(:empty)::after { content: "s ";}
+.score.red    { border-color: var(--color-red); }
+.score.blue   { border-color: var(--color-blue); }
+.score.yellow { border-color: var(--color-yellow); }
+.score.green  { border-color: var(--color-green); }
+
+/* Erbeutete Figuren: je Spieler eine eigene Box außerhalb des Bretts, eine
+   Zeile pro Figurenart (Königswert oben, Bauern unten). */
+.captures-col {
+  display: flex; flex-direction: column; justify-content: space-between;
+  width: var(--w-captures-col); height: var(--w-board);
+}
+/* Jede Box = ein Viertel der Brett-Höhe. Obere am Brett-Top,
+   untere am Brett-Bottom; dazwischen bleibt eine Lücke. */
+.cap-slot { flex: 0 0 var(--h-cap-slot); min-height: 0; display: flex; }
+.captures {
+  flex: 1;
+  padding: var(--px-6) var(--px-6) var(--px-6) var(--px-8);
+  display: flex; flex-direction: column; gap: var(--px-3);
+  overflow: hidden;
+}
+/* In den unteren Eckboxen: Figuren von unten nach oben stapeln, damit der
+   König (höchster Sortierwert) jeweils an der Außenseite (nahe Score-Box) liegt. */
+#cap-slot-BL .captures,
+#cap-slot-BR .captures {
+  flex-direction: column-reverse;
+}
+.capture-row {
+  display: flex; flex-wrap: wrap; gap: 0;
+  align-items: center; min-height: var(--size-capture-img);
+}
+.capture-row img {
+  width: var(--size-capture-img); height: var(--size-capture-img);
+  margin-left: calc(var(--size-capture-img-shift) - var(--size-capture-img));
+  filter: drop-shadow(0 0 var(--px-1) var(--color-shadow));
+}
+.capture-row img:first-child { margin-left: 0; }
+
+
+/* ─── Zweispalten-Layout ─────────────────────────────────────────────────────── */
+main { display: flex; gap: var(--rem-125); align-items: flex-start; }
+.main-left { flex: 0 0 var(--w-main-left); }
+.main-right {
+  flex: 1; min-width: var(--w-main-right-min);
+  display: flex; gap: var(--rem-100); align-items: flex-start;
+}
+.main-right-col { flex: 1; min-width: var(--w-main-right-col-min); }
+
+/* ─── Spiel-Loader ───────────────────────────────────────────────────────────── */
+#game-loader-section {
+  background: var(--bg-panel); border-radius: var(--radius-xl);
+  padding: var(--rem-075) var(--rem-100); margin-bottom: var(--rem-100);
+}
+#game-loader-section summary { cursor: pointer; color: var(--color-accent); }
+.game-loader-inner {
+  display: flex; gap: var(--rem-075); align-items: flex-start; flex-wrap: wrap; margin-top: var(--rem-050);
+}
+#game-info { font-size: var(--rem-085); color: var(--text-dim); }
+
+/* ─── Spiel-Filter ───────────────────────────────────────────────────────────── */
+#game-filter-box {
+  flex: 1 1 100%; display: flex; align-items: center; gap: var(--rem-050);
+  margin-top: var(--rem-050);
+}
+#game-filter {
+  flex: 1; background: var(--bg-input); color: var(--text);
+  border: var(--px-1) solid var(--bg-hover);
+  border-radius: var(--radius-lg); padding: var(--rem-040) var(--rem-060); font-size: var(--rem-085);
+}
+#game-filter:focus { outline: none; border-color: var(--color-accent); }
+#game-filter-color, #game-filter-placement {
+  background: var(--bg-input); color: var(--text);
+  border: var(--px-1) solid var(--bg-hover);
+  border-radius: var(--radius-lg); padding: var(--rem-035) var(--rem-040); font-size: var(--rem-082);
+}
+#game-filter-color:focus, #game-filter-placement:focus { outline: none; border-color: var(--color-accent); }
+#game-filter-count { font-size: var(--rem-078); color: var(--text-dim-2); min-width: var(--rem-400); text-align: right; }
+#game-filter-results {
+  flex: 1 1 100%; max-height: var(--h-filter-results-max); overflow-y: auto; list-style: none;
+  padding: 0; margin: 0; font-size: var(--rem-082);
+}
+#game-filter-results:empty { display: none; }
+.game-row {
+  display: flex; align-items: center; gap: var(--rem-050); flex-wrap: wrap;
+  padding: var(--rem-035) var(--rem-050); border-radius: var(--radius-md); cursor: pointer;
+  border-bottom: var(--px-1) solid var(--bg-input);
+}
+.game-row:hover { background: var(--bg-row-hover); }
+.game-row .gr-date { color: var(--text-dim-2); font-family: monospace; min-width: var(--rem-550); }
+.game-row .gr-nr   { color: var(--text-dim-3); font-family: monospace; font-size: var(--rem-075); }
+.game-row .gr-players { display: flex; gap: var(--rem-030); flex-wrap: wrap; }
+.game-players { display: flex; gap: var(--rem-040); flex-wrap: wrap; margin-top: var(--rem-035); }
+.player-badge { padding: var(--rem-015) var(--rem-050); border-radius: var(--radius-md); font-size: var(--rem-080); font-weight: bold; }
+.player-badge.red    { background: rgba(var(--color-red-rgb),    .2); color: var(--color-red);    border: var(--px-1) solid rgba(var(--color-red-rgb),    .5); }
+.player-badge.blue   { background: rgba(var(--color-blue-rgb),   .2); color: var(--color-blue);   border: var(--px-1) solid rgba(var(--color-blue-rgb),   .5); }
+.player-badge.yellow { background: rgba(var(--color-yellow-rgb), .2); color: var(--color-yellow); border: var(--px-1) solid rgba(var(--color-yellow-rgb), .5); }
+.player-badge.green  { background: rgba(var(--color-green-rgb),  .2); color: var(--color-green);  border: var(--px-1) solid rgba(var(--color-green-rgb),  .5); }
+
+/* ─── Replay-Controls ────────────────────────────────────────────────────────── */
+#replay-controls {
+  display: flex; gap: var(--rem-050); align-items: center; justify-content: center;
+  background: var(--bg-panel); border-radius: var(--radius-xl);
+  padding: var(--rem-040) var(--rem-075); margin-bottom: var(--rem-075);
+}
+#replay-controls.hidden { display: none; }
+#replay-pos { font-size: var(--rem-085); color: var(--text-dim); font-family: monospace; min-width: var(--w-replay-pos-min); text-align: center; }
+#replay-controls button { padding: var(--rem-030) var(--rem-065); font-size: var(--rem-100); }
+
+#play-replay-controls {
+  display: flex; gap: var(--rem-050); align-items: center; justify-content: center;
+  background: var(--bg-panel); border-radius: var(--radius-xl); padding: var(--rem-040) var(--rem-075);
+  flex-basis: 100%;
+}
+#play-replay-controls.hidden { display: none; }
+#play-replay-controls button { padding: var(--rem-030) var(--rem-065); font-size: var(--rem-100); }
+
+/* ─── Chat-Panel ─────────────────────────────────────────────────────────────── */
+#top-moves-panel {
+  background: var(--bg-panel); border-radius: var(--radius-xl);
+  padding: var(--rem-075) var(--rem-100);
+  margin-bottom: var(--rem-075);
+}
+#top-moves-panel h3 { font-size: var(--rem-095); color: var(--color-accent); margin-bottom: var(--rem-050); }
+#top-moves-panel.hidden { display: none; }
+#top-moves-list { display: flex; flex-direction: column; gap: var(--rem-040); }
+.top-move-row {
+  display: flex; align-items: center; gap: var(--rem-050); font-size: var(--rem-085);
+  background: transparent; border: var(--px-1) solid transparent; border-radius: var(--radius-md);
+  color: inherit; font-family: inherit;
+  padding: var(--rem-030) var(--rem-050); cursor: pointer; text-align: left; width: 100%;
+  transition: background 0.15s, border-color 0.15s;
+}
+.top-move-row:hover  { background: var(--bg-row-hover); }
+.top-move-row.active { background: var(--bg-row-hover); border-color: var(--color-accent); }
+.top-move-notation { font-family: monospace; min-width: var(--px-80); font-weight: bold; }
+.top-move-bar-wrap { flex: 1; background: var(--bg-track); border-radius: var(--radius-sm); height: var(--px-10); overflow: hidden; }
+.top-move-bar { height: 100%; border-radius: var(--radius-sm); background: var(--color-accent); transition: width 0.25s; }
+.top-move-pct { min-width: var(--px-36); text-align: right; color: var(--text-dim); font-size: var(--rem-078); }
+
+/* ─── Engine-Kandidaten (Top-3 nach Engine-Zug) ────────────────────────────── */
+#engine-candidates-panel {
+  background: var(--bg-panel); border-radius: var(--radius-xl);
+  padding: var(--rem-060) var(--rem-090);
+  margin: var(--rem-050) 0 var(--rem-075);
+}
+#engine-candidates-panel.hidden { display: none; }
+.engine-cand-header { font-size: var(--rem-085); color: var(--color-accent); margin-bottom: var(--rem-040); }
+#engine-candidates-list { display: flex; flex-direction: column; gap: var(--rem-030); }
+.engine-cand-row {
+  display: flex; align-items: center; gap: var(--rem-050); font-size: var(--rem-082);
+}
+.engine-cand-marker {
+  width: var(--px-10); height: var(--px-10); border-radius: 50%; flex-shrink: 0;
+}
+.engine-cand-rank { color: var(--text-dim-2); min-width: var(--px-18); }
+.engine-cand-mv   { font-family: monospace; min-width: var(--px-80); font-weight: bold; }
+.engine-cand-bar-wrap { flex: 1; background: var(--bg-track); border-radius: var(--radius-sm); height: var(--px-8); overflow: hidden; }
+.engine-cand-bar { height: 100%; border-radius: var(--radius-sm); transition: width 0.25s; }
+.engine-cand-pct { min-width: var(--px-36); text-align: right; color: var(--text-dim); font-size: var(--rem-078); }
+
+#chat-panel {
+  background: var(--bg-panel); border-radius: var(--radius-xl);
+  padding: var(--rem-075) var(--rem-100);
+  position: sticky; top: var(--rem-100);
+}
+#chat-panel h3 { font-size: var(--rem-095); color: var(--color-accent); margin-bottom: var(--rem-050); }
+#chat-messages {
+  max-height: var(--h-chat-max); overflow-y: auto;
+  display: flex; flex-direction: column; gap: var(--rem-020); font-size: var(--rem-082);
+}
+.chat-empty { color: var(--text-dim-4); font-style: italic; }
+.chat-msg { padding: var(--rem-020) var(--rem-035); border-radius: var(--radius-sm); line-height: 1.4; }
+.chat-msg.info { color: var(--text-bright); font-style: italic; font-weight: bold; text-decoration: underline; }
+.chat-msg .chat-user { font-weight: bold; margin-right: var(--rem-020); }
+.chat-msg.red    { color: var(--color-red); }
+.chat-msg.blue   { color: var(--color-blue); }
+.chat-msg.yellow { color: var(--color-yellow); }
+.chat-msg.green  { color: var(--color-green); }
+
+/* ─── Brett ──────────────────────────────────────────────────────────────────── */
+#board-container {
+  position: relative; display: block; width: var(--w-board);
+  border-radius: var(--radius-md); overflow: hidden;
+  box-shadow: 0 var(--px-8) calc(var(--px-8) * 4) var(--color-shadow);
+}
+#board { display: block; cursor: pointer; }
+#overlay-msg {
+  position: absolute; inset: 0; background: var(--color-overlay);
+  display: flex; align-items: center; justify-content: center;
+  font-size: var(--rem-200); font-weight: bold; color: var(--color-accent); border-radius: var(--radius-md);
+}
+#overlay-msg.hidden { display: none; }
+
+/* ─── Controls ───────────────────────────────────────────────────────────────── */
+#controls { display: flex; gap: var(--rem-075); flex-wrap: wrap; align-items: center; margin-bottom: var(--rem-100); }
+.control-group {
+  display: flex; align-items: center; gap: var(--rem-050);
+  background: var(--bg-panel); padding: var(--rem-040) var(--rem-075); border-radius: var(--radius-xl);
+}
+.control-group label { font-size: var(--rem-085); color: var(--text-dim); }
+input[type=range] { width: var(--px-60); accent-color: var(--color-accent); }
+
+button {
+  background: var(--bg-input); color: var(--text); border: none; border-radius: var(--radius-xl);
+  padding: var(--rem-050) var(--rem-050); cursor: pointer; font-size: var(--rem-090); transition: background 0.2s;
+}
+button:hover  { background: var(--bg-hover); }
+button:active { background: var(--bg-active); }
+button:disabled { opacity: 0.4; cursor: default; }
+
+/* ─── Status ─────────────────────────────────────────────────────────────────── */
+#status { display: flex; justify-content: space-between; font-size: var(--rem-090); color: var(--text-dim); margin-bottom: var(--rem-100); }
+#turn-indicator strong { color: var(--color-accent); }
+#engine-info { font-style: italic; }
+
+/* ─── Neuronales Netz ────────────────────────────────────────────────────────── */
+#net-section {
+  background: var(--bg-panel); border-radius: var(--radius-xl);
+  padding: var(--rem-075) var(--rem-100); margin-bottom: var(--rem-100);
+}
+#net-section summary { cursor: pointer; color: var(--color-accent); margin-bottom: var(--rem-050); }
+#net-status { font-size: var(--rem-085); color: var(--text-dim); margin-bottom: var(--rem-050); font-style: italic; }
+#net-status.ok  { color: var(--color-green); font-style: normal; }
+#net-status.err { color: var(--color-red);   font-style: normal; }
+
+.net-buttons { display: flex; gap: var(--rem-050); margin-bottom: var(--rem-075); flex-wrap: wrap; }
+.file-btn {
+  background: var(--bg-input); color: var(--text); border-radius: var(--radius-xl);
+  padding: var(--rem-050) var(--rem-100); cursor: pointer; font-size: var(--rem-090);
+  transition: background 0.2s; user-select: none;
+}
+.file-btn:hover { background: var(--bg-hover); }
+.file-btn input[type=file] { display: none; }
+
+/* Eval bars */
+#net-eval-bars { margin-top: var(--rem-050); }
+.eval-label { font-size: var(--rem-080); color: var(--text-dim-2); margin-bottom: var(--rem-050); }
+.eval-bar-wrap { display: flex; align-items: center; gap: var(--rem-050); margin-bottom: var(--rem-035); }
+.eval-color { font-size: var(--rem-080); width: var(--px-38); text-align: right; }
+.eval-color.red    { color: var(--color-red); }
+.eval-color.blue   { color: var(--color-blue); }
+.eval-color.yellow { color: var(--color-yellow); }
+.eval-color.green  { color: var(--color-green); }
+.eval-track { flex: 1; height: var(--px-14); background: var(--bg-track); border-radius: var(--radius-pill); overflow: hidden; }
+.bar-fill { height: 100%; width: 50%; border-radius: var(--radius-pill); transition: width 0.3s ease; }
+.red-fill    { background: var(--color-red); }
+.blue-fill   { background: var(--color-blue); }
+.yellow-fill { background: var(--color-yellow); }
+.green-fill  { background: var(--color-green); }
+.eval-val { font-size: var(--rem-080); font-family: monospace; width: var(--px-48); color: var(--text-muted); }
+
+/* ─── PGN ────────────────────────────────────────────────────────────────────── */
+#pgn-section { background: var(--bg-panel); border-radius: var(--radius-xl); padding: var(--rem-075) var(--rem-100); margin-bottom: var(--rem-100); }
+#pgn-section summary { cursor: pointer; color: var(--color-accent); margin-bottom: var(--rem-050); }
+#pgn-input {
+  width: 100%; background: var(--bg-track); color: var(--text);
+  border: var(--px-1) solid var(--bg-input); border-radius: var(--radius-lg);
+  padding: var(--rem-050); font-family: monospace; font-size: var(--rem-085);
+  resize: vertical; margin-bottom: var(--rem-050);
+}
+.pgn-buttons { display: flex; gap: var(--rem-050); }
+#pgn-output { margin-top: var(--rem-075); font-family: monospace; font-size: var(--rem-080); color: var(--text-dim); white-space: pre-wrap; }
+
+/* ─── Zugprotokoll ───────────────────────────────────────────────────────────── */
+#movelog { background: var(--bg-panel); border-radius: var(--radius-xl); padding: var(--rem-075) var(--rem-100); margin-bottom: var(--rem-075); }
+#movelog h3 { font-size: var(--rem-095); color: var(--color-accent); margin-bottom: var(--rem-050); }
+#movelist {
+  max-height: var(--h-movelist-max); overflow-y: auto; padding-left: 0; list-style: none;
+  font-family: monospace; font-size: var(--rem-085); color: var(--text-muted);
+  counter-reset: round-num;
+}
+#movelist li {
+  padding: var(--px-4) 0;
+  display: grid;
+  /* Erste Spalte = Rundennummer (per CSS-Counter), dann 4 Spielerspalten. */
+  grid-template-columns: var(--rem-220) repeat(4, 1fr);
+  grid-auto-rows: auto;
+  column-gap: var(--rem-040);
+  row-gap: var(--rem-010);
+  counter-increment: round-num;
+}
+#movelist li::before {
+  content: counter(round-num) ".";
+  grid-column: 1;
+  grid-row: 1 / span 2; /* Nummer überspannt Zug- und Score-Zeile */
+  align-self: center;
+  text-align: right;
+  padding-right: var(--rem-040);
+  color: var(--text-dim-2);
+  font-size: var(--rem-078);
+}
+.mv-cell    { font-weight: bold; }
+.score-cell { font-size: var(--rem-072); opacity: 0.65; }
+.mv-red    { color: var(--color-red); }
+.mv-blue   { color: var(--color-blue); }
+.mv-yellow { color: var(--color-yellow); }
+.mv-green  { color: var(--color-green); }

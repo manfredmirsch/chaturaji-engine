@@ -303,7 +303,13 @@ fn sample_book_move(
 /// Dieselbe Kodierung wie im PGN-/JSON-Import (`outcome::place_values`), damit
 /// Self-Play und Supervised Learning dasselbe lernen.
 pub fn final_targets(board: &Board) -> [f32; 4] {
-    crate::outcome::place_values(board.scores.as_array())
+    // `Rules::final_scores` statt `board.scores`: bleibt genau ein Spieler
+    // übrig, gehören ihm die 3 Punkte je nie geschlagenem König. Im Self-Play
+    // ändert das nichts — dort scheidet man nur durch den Verlust des Königs
+    // aus, es bleibt also keiner stehen. Beide Wege sollen aber dieselbe
+    // Rechnung benutzen, damit Self-Play und echte Partien dasselbe Ziel
+    // lernen.
+    crate::outcome::place_values(Rules::final_scores(board))
 }
 
 #[cfg(test)]
