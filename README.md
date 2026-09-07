@@ -221,3 +221,7 @@ Gute Quelle: https://github.com/lichess-org/lila/tree/master/public/piece
 - [ ] Netz in die Alpha-Beta-Bewertung integrieren (hybride Eval-Funktion)
 - [ ] Killer-Züge & History-Heuristik
 - [ ] Multiplayer über WebRTC
+
+## Lizenz
+
+MIT — siehe [LICENSE](LICENSE).

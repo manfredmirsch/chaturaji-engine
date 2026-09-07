@@ -2,6 +2,7 @@
 name    = "chaturaji-core"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 # intentionally zero external deps – no_std compatible
