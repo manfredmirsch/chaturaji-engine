@@ -137,11 +137,8 @@ statt der sonst überall geltenden +3. Nachprüfen lässt sich das jederzeit mit
 cargo run --release -p chaturaji-nnue --example diagnose_pgn -- ~/chaturaji/game_data
 ```
 
-Dafür muss `game_data.tar.gz` einmalig ans Release `nnue-state`:
-
-```bash
-cd ~/chaturaji && tar czf game_data.tar.gz game_data      # 215 MB → 32 MB
-```
+Dafür muss der Datensatz einmalig ans Release `nnue-state` — siehe
+[Training von vorn beginnen](#training-von-vorn-beginnen), Schritt 1.
 
 Das Ergebnis überschreibt `weights.json` **nicht**, sondern liegt als
 `weights-pretrained.json` daneben. Ein Pre-Training zieht das Netz auf eine
@@ -170,8 +167,25 @@ anderes gelernt als das Spiel, das jetzt implementiert ist.
 
 Drei Schritte, keiner davon Handarbeit an Dateien:
 
-1. **Einmalig** `game_data.tar.gz` ans Release `nnue-state` hängen
-   (`cd ~/chaturaji && tar czf game_data.tar.gz game_data`, 215 MB → 32 MB).
+1. **Einmalig** den Datensatz ans Release `nnue-state` hängen:
+
+   ```bash
+   python3 scripts/pack-game-data.py ~/chaturaji/game_data ~/chaturaji/game_data.tar.xz
+   ```
+
+   Das Skript wirft alles weg, was das Training nie liest — Avatare, Chat,
+   IP-Hashes, Ratings — und behält Zugfolge und Endstand. Nötig ist das nicht
+   aus Sparsamkeit: die Weboberfläche von GitHub nimmt nur Dateien bis 25 MB,
+   und das vollständige Archiv liegt mit 32 MB darüber.
+
+   | Variante | Größe |
+   |---|---|
+   | vollständig, gzip | 32 MB — Upload wird abgelehnt |
+   | reduziert, gzip | 21 MB |
+   | reduziert, xz | **13 MB** |
+
+   Geprüft: mit den reduzierten Dateien liefert `diagnose_pgn` dieselben
+   Zahlen wie mit den vollständigen.
 
 2. *Actions → NNUE-Pre-Training → Run workflow* mit
 
