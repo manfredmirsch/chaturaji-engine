@@ -1,0 +1,189 @@
+name: NNUE-Arena
+
+# Zwei Netze gegeneinander. Der Vergleich ist der einzige Weg zu sagen, ob ein
+# Trainingslauf etwas gebracht hat — der TD-Fehler taugt dafür nicht: er misst
+# nur, wie konsistent aufeinanderfolgende Bewertungen sind, nicht wie gut.
+#
+# Ideal für die Matrix: die Gruppen sind vollständig unabhängig voneinander.
+
+on:
+  workflow_dispatch:
+    inputs:
+      a:
+        description: 'Netz A (Asset im Release nnue-state)'
+        type: string
+        default: 'weights.json'
+      b:
+        description: 'Netz B'
+        type: string
+        default: 'weights-pretrained.json'
+      groups:
+        description: 'Gruppen à 6 Partien (über alle Shards)'
+        type: number
+        default: 96
+      shards:
+        description: 'Parallele Runner'
+        type: number
+        default: 16
+      depth:
+        description: 'Suchtiefe'
+        type: number
+        default: 4
+      beam_width:
+        description: 'Beam-Breite'
+        type: number
+        default: 6
+      max_moves:
+        description: 'Halbzüge je Partie'
+        type: number
+        default: 150
+      seed:
+        description: 'Seed der Eröffnungen'
+        type: number
+        default: 1
+
+env:
+  STATE_TAG: nnue-state
+  CARGO_TERM_COLOR: always
+  GH_REPO: ${{ github.repository }}
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.shards.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cargo-Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Arena bauen
+        run: cargo build --release -p chaturaji-nnue --example nnue_arena
+
+      - name: Netze holen
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p nets
+          for asset in '${{ inputs.a }}' '${{ inputs.b }}'; do
+            if ! gh release download "$STATE_TAG" --pattern "$asset" --dir nets --clobber; then
+              echo "::error::'$asset' liegt nicht am Release '$STATE_TAG'."
+              gh release view "$STATE_TAG" --json assets --jq '.assets[].name' \
+                | sed 's/^/::error::  vorhanden: /'
+              exit 1
+            fi
+          done
+          ls -la nets/
+
+      - name: Shard-Liste
+        id: shards
+        run: |
+          set -euo pipefail
+          echo "matrix=$(seq 0 $(( ${{ inputs.shards }} - 1 )) | jq -R . | jq -s -c .)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arena-input
+          retention-days: 2
+          path: |
+            target/release/examples/nnue_arena
+            nets/
+          if-no-files-found: error
+
+  match:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: arena-input
+
+      - name: Partien spielen
+        run: |
+          set -euo pipefail
+          chmod +x target/release/examples/nnue_arena
+          mkdir -p out
+          ./target/release/examples/nnue_arena \
+            --a nets/'${{ inputs.a }}' \
+            --b nets/'${{ inputs.b }}' \
+            --groups ${{ inputs.groups }} \
+            --shards ${{ inputs.shards }} \
+            --shard  ${{ matrix.shard }} \
+            --depth  ${{ inputs.depth }} \
+            --beam-width ${{ inputs.beam_width }} \
+            --max-moves  ${{ inputs.max_moves }} \
+            --seed ${{ inputs.seed }} \
+            --out "out/shard-$(printf '%03d' ${{ matrix.shard }}).json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arena-result-${{ matrix.shard }}
+          path: out/*.json
+          retention-days: 2
+          if-no-files-found: error
+
+  report:
+    needs: match
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: arena-result-*
+          merge-multiple: true
+          path: results
+
+      # Zusammenlegen geht nur über Summen: Mittelwerte je Shard ließen sich
+      # nicht zu einem Standardfehler über alle Gruppen verrechnen.
+      - name: Auswerten
+        run: |
+          python3 - <<'PY' | tee summary.md
+          import glob, json, math
+          g = sa = sb = sd = sd2 = sp = 0
+          for f in sorted(glob.glob('results/*.json')):
+              d = json.load(open(f))
+              g += d['groups']; sa += d['sum_a']; sb += d['sum_b']
+              sd += d['sum_d']; sd2 += d['sum_d2']; sp += d['sum_plies']
+          if g == 0:
+              print('Keine Ergebnisse.'); raise SystemExit(1)
+          mean_d = sd / g
+          var = (sd2 - g * mean_d ** 2) / (g - 1) if g > 1 else 0.0
+          se = math.sqrt(var / g) if var > 0 else 0.0
+          t = mean_d / se if se else float('inf')
+          print('## NNUE-Arena\n')
+          print(f'**A:** `${{ inputs.a }}`   **B:** `${{ inputs.b }}`\n')
+          print(f'{g} Gruppen à 6 Partien = {g*6} Partien, '
+                f'Tiefe ${{ inputs.depth }}, Beam ${{ inputs.beam_width }}, Seed ${{ inputs.seed }}\n')
+          print('| Größe | Wert |')
+          print('|---|---|')
+          print(f'| Ø Platzwert A | {sa/g:+.4f} |')
+          print(f'| Ø Platzwert B | {sb/g:+.4f} |')
+          print(f'| **Differenz A−B** | **{mean_d:+.4f} ± {se:.4f}** |')
+          print(f'| t | {t:+.2f} |')
+          print(f'| Ø Halbzüge | {sp/g:.1f} |')
+          print()
+          if abs(t) < 2:
+              print('Kein belastbarer Unterschied (|t| < 2).')
+          elif mean_d > 0:
+              print('**A ist besser.**')
+          else:
+              print('**B ist besser.**')
+          print('\nEin Lauf ist kein Befund — über mehrere `seed` wiederholen.')
+          PY
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"

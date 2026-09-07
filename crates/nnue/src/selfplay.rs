@@ -162,7 +162,7 @@ fn nnue_maxn(
 /// Bewertet alle legalen Züge mit NNUE Max^n und gibt den besten zurück.
 /// Die Wurzel betrachtet immer alle legalen Züge (kein Beam auf Wurzelebene).
 /// Die TT wird vor jedem Aufruf geleert (korrektes Tiefenhandling über Züge hinweg).
-fn nnue_best_move(
+pub fn nnue_best_move(
     net:        &NnueNetwork,
     board:      &Board,
     moves:      &[Move],
