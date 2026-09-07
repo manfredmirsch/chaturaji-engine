@@ -7,3 +7,14 @@ members = [
     "crates/wasm",
 ]
 resolver = "2"
+
+# Profile wirken nur aus dem Workspace-Root; das `[profile.release]` in
+# crates/wasm/Cargo.toml war bisher wirkungslos.
+#
+# Für den Trainer ist das kein Kosmetikposten: LTO über Crate-Grenzen hinweg
+# lässt `Rules::legal_moves` und die NNUE-Forwards ineinander inlinen, und das
+# ist die innerste Schleife des Self-Plays.
+[profile.release]
+opt-level     = 3
+lto           = "fat"
+codegen-units = 1
