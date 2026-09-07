@@ -8,18 +8,23 @@ name: NNUE-Runde
 # `nnue-state` — nicht im Git-Verlauf, der sonst je Runde um 7 MB wüchse.
 
 on:
+  # Alle Zahlen als `string`, nicht als `number`: Eingaben aus
+  # `workflow_dispatch` reicht GitHub immer als Zeichenkette weiter, auch wenn
+  # sie dort als `number` deklariert sind. Ein `number` an dieser Stelle lehnt
+  # den Aufruf mit "Unexpected value '6400'" ab, bevor irgendein Job startet.
+  # Gebraucht werden die Werte ohnehin nur in Shell-Befehlen.
   workflow_call:
     inputs:
-      games:        { type: number, required: true }
-      shards:       { type: number, required: true }
-      depth:        { type: number, required: true }
-      beam_width:   { type: number, required: true }
-      max_moves:    { type: number, required: true }
+      games:        { type: string, required: true }
+      shards:       { type: string, required: true }
+      depth:        { type: string, required: true }
+      beam_width:   { type: string, required: true }
+      max_moves:    { type: string, required: true }
       lambda:       { type: string, required: true }
       lr:           { type: string, required: true }
       lr_decay:     { type: string, required: true }
-      save_every:   { type: number, required: true }
-      max_seconds:  { type: number, required: true }
+      save_every:   { type: string, required: true }
+      max_seconds:  { type: string, required: true }
       use_book:     { type: boolean, required: true }
 
 env:
