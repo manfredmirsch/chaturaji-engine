@@ -170,7 +170,7 @@ Drei Schritte, keiner davon Handarbeit an Dateien:
 1. **Einmalig** den Datensatz ans Release `nnue-state` hängen:
 
    ```bash
-   python3 scripts/pack-game-data.py ~/chaturaji/game_data ~/chaturaji/game_data.tar.xz
+   python3 scripts/pack-game-data.py ~/chaturaji/game_data ~/chaturaji/game_data.tar.gz
    ```
 
    Das Skript wirft alles weg, was das Training nie liest — Avatare, Chat,
@@ -178,11 +178,14 @@ Drei Schritte, keiner davon Handarbeit an Dateien:
    aus Sparsamkeit: die Weboberfläche von GitHub nimmt nur Dateien bis 25 MB,
    und das vollständige Archiv liegt mit 32 MB darüber.
 
-   | Variante | Größe |
-   |---|---|
-   | vollständig, gzip | 32 MB — Upload wird abgelehnt |
-   | reduziert, gzip | 21 MB |
-   | reduziert, xz | **13 MB** |
+   | Variante | Größe | |
+   |---|---|---|
+   | vollständig, gzip | 32 MB | über dem Limit |
+   | **reduziert, gzip** | **20,5 MB** | passt |
+   | reduziert, xz | 13 MB | `.xz` nimmt GitHub nicht an |
+
+   Die Endung muss `.gz` sein — `.xz` steht nicht auf GitHubs Liste erlaubter
+   Dateitypen für Release-Anhänge.
 
    Geprüft: mit den reduzierten Dateien liefert `diagnose_pgn` dieselben
    Zahlen wie mit den vollständigen.

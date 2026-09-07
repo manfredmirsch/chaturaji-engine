@@ -33,7 +33,7 @@ on:
       data_asset:
         description: 'Datensatz-Asset im Release nnue-state'
         type: string
-        default: 'game_data.tar.xz'
+        default: 'game_data.tar.gz'
       promote:
         description: 'Ergebnis als weights.json übernehmen und Fortschritt auf 0 setzen'
         type: boolean

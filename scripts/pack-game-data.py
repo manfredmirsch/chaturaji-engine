@@ -8,14 +8,14 @@ willen: die Weboberfläche von GitHub nimmt nur Dateien bis 25 MB, und das
 vollständige Archiv liegt darüber.
 
     vollständig, gzip   32 MB   ← zu groß für den Upload im Browser
-    reduziert, gzip     21 MB
-    reduziert, xz       14 MB   ← Voreinstellung
+    reduziert, gzip     20,5 MB ← passt, und `.gz` nimmt GitHub an
+    reduziert, xz       13 MB   ← kleiner, aber `.xz` wird abgelehnt
 
 Geprüft: mit den reduzierten Dateien liefert `diagnose_pgn` dieselben Zahlen
 wie mit den vollständigen — 11.558 nachspielbar, 11.555 exakte Endstände.
 
 Aufruf:
-    python3 scripts/pack-game-data.py ~/chaturaji/game_data ~/chaturaji/game_data.tar.xz
+    python3 scripts/pack-game-data.py ~/chaturaji/game_data ~/chaturaji/game_data.tar.gz
 """
 
 import json
