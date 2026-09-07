@@ -2,7 +2,7 @@
 //!
 //! Jede Partie aus `game_data/` wird nachgespielt und der errechnete Endstand
 //! mit `points1..4` aus der Aufzeichnung verglichen. Das ist die schärfste
-//! Probe, die es für die Regeln gibt: Schlagwerte, Bootstriumph, Doppel- und
+//! Probe, die es für die Regeln gibt: Schlagwerte, Doppel- und
 //! Dreifachschach-Bonus, Aufgabe und der Zuschlag für stehengebliebene Könige
 //! müssen alle stimmen, sonst geht die Summe nicht auf.
 //!

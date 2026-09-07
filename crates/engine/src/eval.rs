@@ -179,8 +179,8 @@ pub(crate) const NEVER_MOVES: i32 = 4;
 /// *next* is a categorically different danger from the one who moves three
 /// plies later, because you get one, two or three chances to react in between.
 /// This is roughly γ = 0.62 per ply, and it replaces what used to be a handful
-/// of scattered "imminent vs. later" constants across threats, king safety,
-/// promotion and boat triumph — same idea, one curve.
+/// of scattered "imminent vs. later" constants across threats, king safety
+/// and promotion — same idea, one curve.
 ///
 /// Index 4 is `NEVER_MOVES`: an eliminated player poses no future threat at all.
 const TEMPO_DISCOUNT: [i32; 5] = [100, 62, 38, 24, 0];
@@ -407,17 +407,14 @@ pub fn evaluate_raw_with(board: &Board, p: &EvalParams) -> [i32; 4] {
         // 6. Promotion proximity (separate from PST so it scales with Boat value)
         let promo = promotion_bonus(board, c, p);
 
-        // 7. Boat Triumph threat / near-triumph detection
-        let triumph = boat_triumph_threat(board, c, p);
-
-        // 8. Pawn structure
+        // 7. Pawn structure
         let pawn_struct = pawn_structure_bonus(board, c, occ);
 
         scores[ci] = game_pts + material + pst_bonus + mobility
-                   + king_safety + promo + triumph + pawn_struct;
+                   + king_safety + promo + pawn_struct;
     }
 
-    // 9. Pending captures, booked as transfers: the owner of a hanging piece
+    // 8. Pending captures, booked as transfers: the owner of a hanging piece
     // loses potential and the opponent who will actually take it gains points.
     // Handled outside the per-player loop because a single threat touches two
     // players at once.
@@ -430,71 +427,6 @@ pub fn evaluate_raw_with(board: &Board, p: &EvalParams) -> [i32; 4] {
 
 
     scores
-}
-
-/// Bonus for near-Boat-Triumph patterns, penalty for opponent near-triumphs.
-///
-/// Boat Triumph (a 2×2 square of 4 boats) is worth 15 game points = ~1500 cp.
-/// We reward players who are 1–2 boats away from completing one, and penalise
-/// players whose opponent already has 3 boats in a 2×2 pattern.
-fn boat_triumph_threat(board: &Board, c: Color, p: &EvalParams) -> i32 {
-    let own_boats = board.pieces(c, PieceKind::Boat);
-    if own_boats.count_ones() < 2 && {
-        // Fast path: also skip if no opponent has ≥ 2 boats.
-        let opp_max = Color::ALL.iter()
-            .filter(|&&e| e != c && board.active[e.idx()])
-            .map(|&e| board.pieces(e, PieceKind::Boat).count_ones())
-            .max()
-            .unwrap_or(0);
-        opp_max < 2
-    } { return 0; }
-
-    let mut bonus = 0i32;
-
-    // Own near-triumph patterns. Three boats already in place is a one-move
-    // threat, so it is worth what the mover can actually reach: discounted by
-    // how long the opponents have to break the pattern up first. Two boats is
-    // a multi-round plan and stays undiscounted.
-    if own_boats.count_ones() >= 2 {
-        let t = tempo(plies_until_move(board, c), p.graded_tempo);
-        for rank in 0..7u8 {
-            for file in 0..7u8 {
-                let mask = bit(sq(file,     rank))
-                         | bit(sq(file + 1, rank))
-                         | bit(sq(file,     rank + 1))
-                         | bit(sq(file + 1, rank + 1));
-                match (own_boats & mask).count_ones() {
-                    3 => bonus += 800 * t / 100,
-                    2 => bonus += 100,
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    // Opponent 3-in-a-2×2 patterns (immediate triumph threat).
-    for opp in Color::ALL {
-        let oi = opp.idx();
-        if opp == c || !board.active[oi] { continue; }
-        let opp_boats = board.pieces(opp, PieceKind::Boat);
-        if opp_boats.count_ones() < 3 { continue; }
-        // Symmetrically: how alarming an opponent's near-triumph is depends on
-        // how soon they get to complete it.
-        let opp_t = tempo(plies_until_move(board, opp), p.graded_tempo);
-        for rank in 0..7u8 {
-            for file in 0..7u8 {
-                let mask = bit(sq(file,     rank))
-                         | bit(sq(file + 1, rank))
-                         | bit(sq(file,     rank + 1))
-                         | bit(sq(file + 1, rank + 1));
-                if (opp_boats & mask).count_ones() >= 3 {
-                    bonus -= 800 * opp_t / 100;
-                }
-            }
-        }
-    }
-
-    bonus
 }
 
 /// Pawn structure bonuses.

@@ -79,7 +79,7 @@ chaturaji-engine/
     │       ├── board.rs        8x8 Board + 4×5 Bitboards
     │       ├── piece.rs        Figurtypen & 4 Farben
     │       ├── movegen.rs      Pseudo-legaler Zuggenerator
-    │       ├── rules.rs        Regeleffekte (Boat-Triumph, Check-Bonus)
+    │       ├── rules.rs        Regeleffekte (Check-Bonus, Aufgabe, Endstand)
     │       ├── score.rs        Punkteverfolgung
     │       ├── notation.rs     Algebraische Notation & PGN
     │       └── zobrist.rs      Zobrist-Hashing
@@ -133,7 +133,6 @@ chaturaji-engine/
 **Sonderregeln**:
 - Kein Schach/Matt – Könige werden einfach geschlagen
 - Wer seinen König verliert, scheidet aus (Figuren inaktiv)
-- **Schiff-Triumph**: 4 Schiffe bilden ein 2×2-Quadrat → alle 3 fremden Schiffe werden geschlagen (+15 Punkte)
 - **Doppelschach**: +1 Punkt; **Dreifachschach**: +5 Punkte
 - Bauernumwandlung: immer zum Schiff
 

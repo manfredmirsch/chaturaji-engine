@@ -11,7 +11,7 @@
 //!   8.  Spielphase (One-Hot früh/mittel/spät)         =  3
 //!   9.  Halbzug-Normalisierung                        =  1
 //!  10.  König-Distanz zur Mitte pro Spieler           =  4
-//!  11.  Boot-Anzahl pro Spieler (Triumph-Potential)   =  4
+//!  11.  Boot-Anzahl pro Spieler                       =  4
 //!                                                   ----
 //!                                                     56
 

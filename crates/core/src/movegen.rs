@@ -195,8 +195,6 @@ impl MoveGen {
     fn gen_boats(board: &Board, mover: Color, friendly: u64, moves: &mut Vec<Move>) {
         const DIRS: [(i8,i8);4] = [(-1,0),(1,0),(0,-1),(0,1)];
         Self::gen_slider(board, mover, PieceKind::Boat, friendly, &DIRS, moves);
-        // Note: Boat triumph (capturing 3 boats by completing a 2×2) is handled
-        // in rules.rs post-move, not in move generation, to keep movegen pure.
     }
 
     // ─── Utility ─────────────────────────────────────────────────────────────
