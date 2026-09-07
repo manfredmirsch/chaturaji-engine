@@ -135,6 +135,47 @@ fn detail(path: &str) {
         let next   = Rules::apply_with_effects(&board, mv);
         let gained = next.scores.get(mover) - before;
 
+        // Jede Stelle zeigen, an der die Notation mehr Schachs meldet als wir
+        // der ziehenden Figur zutrauen — dort entgeht uns ein Bonus.
+        let noted = token.chars().filter(|&c| c == '+').count();
+        let by_mover_chk = Rules::kings_attacked_from(&next, mover, to_sq);
+        // Neu ins Schach gesetzt: nachher angegriffen, vorher nicht.
+        let att_before = Rules::attacked_squares(&board, mover);
+        let att_after  = Rules::attacked_squares(&next,  mover);
+        let fresh = Color::ALL.into_iter()
+            .filter(|&c| c != mover && next.active[c.idx()])
+            .filter(|&c| {
+                next.bb[c.idx()][PieceKind::King.idx()] & att_after != 0
+                    && board.bb[c.idx()][PieceKind::King.idx()] & att_before == 0
+            }).count();
+        if noted != fresh {
+            println!("{:>4} {:<7} {:<12} {:<11} Notation meldet {} Schach(s), wir {} von der ziehenden Figur",
+                     movenum, mover.name(), token,
+                     format!("{}-{}", square_name(from_sq), square_name(to_sq)),
+                     noted, by_mover_chk);
+            // Wohin zieht die Figur von ihrem neuen Feld, und wo stehen die
+            // Könige? Genau dazwischen sitzt der Unterschied.
+            let mut probe = next.clone();
+            probe.to_move = mover;
+            let mut reach: Vec<String> = Rules::legal_moves(&probe).iter()
+                .filter(|m| m.from == to_sq)
+                .map(|m| square_name(m.to))
+                .collect();
+            reach.sort();
+            println!("        Figur {:?} erreicht: {}",
+                     piece_at(&next, to_sq).map(|(_, k)| k).unwrap(), reach.join(" "));
+            let kings: Vec<String> = Color::ALL.into_iter()
+                .filter(|&c| c != mover)
+                .filter_map(|c| {
+                    let k = next.bb[c.idx()][PieceKind::King.idx()];
+                    if k == 0 { return None; }
+                    Some(format!("{} {}{}", c.name(),
+                                 square_name(k.trailing_zeros() as u8),
+                                 if next.active[c.idx()] { "" } else { " (ausgeschieden)" }))
+                }).collect();
+            println!("        Könige: {}", kings.join(" | "));
+        }
+
         if gained != 0 {
             let checks_after = Rules::count_attacked_kings(&next, mover);
             // Bei einem Schach-Bonus zeigen, WELCHE Koenige als angegriffen
@@ -155,7 +196,7 @@ fn detail(path: &str) {
                              square_name(m.from)))
                         .collect();
                     if !by.is_empty() {
-                        println!("        -> {} Koenig auf {} angegriffen von: {}",
+                        println!("        -> {} König auf {} angegriffen von: {}",
                                  c.name(), square_name(ksq), by.join(", "));
                     }
                 }
@@ -164,7 +205,8 @@ fn detail(path: &str) {
                 .map(|c| format!("schlägt {} {:?} ({})",
                                  c.color.name(), c.kind, c.kind.capture_value()))
                 .unwrap_or_default();
-            let bonus = match checks_after {
+            let by_mover = Rules::kings_attacked_from(&next, mover, to_sq);
+            let bonus = match by_mover {
                 2 => " +1 Doppelschach",
                 3 => " +5 Dreifachschach",
                 _ => "",
