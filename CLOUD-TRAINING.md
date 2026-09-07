@@ -128,8 +128,10 @@ Datensatz, bei 35 MB Speicherbedarf. Aus 1.000 Dateien werden 1.000 Partien mit
 116.160 Stellungen.
 
 Die Regelimplementierung ist an allen 11.558 Partien geprüft: alle sind
-nachspielbar, und bei 92,7 % stimmt der nachgespielte Endstand exakt mit
-`points1..4` von chess.com überein. Nachprüfen lässt sich das jederzeit mit
+nachspielbar, und bei 11.555 davon stimmt der nachgespielte Endstand exakt mit
+`points1..4` von chess.com überein. Die drei übrigen wurden mit einer anderen
+Einstellung gespielt — ihr Systemchat sagt „Checkmates/kings = +10 points"
+statt der sonst überall geltenden +3. Nachprüfen lässt sich das jederzeit mit
 
 ```bash
 cargo run --release -p chaturaji-nnue --example diagnose_pgn -- ~/chaturaji/game_data

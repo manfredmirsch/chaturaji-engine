@@ -11,8 +11,21 @@ use crate::board::{bit, Board, Move};
 use crate::movegen::MoveGen;
 use crate::piece::{Color, PieceKind};
 
-/// Punkte je Überlebendem, wenn die Partie an der Zugobergrenze endet.
+/// Punkte je Überlebendem, wenn die Partie nicht durch Ausscheiden endet.
 const SURVIVOR_BONUS: i32 = 2;
+
+/// Könige Ausgeschiedener, die noch auf dem Brett stehen.
+///
+/// Stehen bleiben können nur Könige von Spielern, die aufgegeben haben oder in
+/// die Zeit gelaufen sind — ein geschlagener König ist vom Brett und wurde
+/// beim Schlagen schon verrechnet.
+fn standing_kings(board: &Board) -> i32 {
+    Color::ALL
+        .iter()
+        .filter(|&&c| !board.active[c.idx()])
+        .filter(|&&c| board.pieces(c, PieceKind::King) != 0)
+        .count() as i32
+}
 
 /// Stateless rule-checker.
 pub struct Rules;
@@ -196,30 +209,32 @@ impl Rules {
 
     /// Der Punktestand am Partieende.
     ///
-    /// Zwei Zuschläge, die sich gegenseitig ausschließen:
+    /// Wer am Ende noch lebt, bekommt etwas — was genau, hängt daran, ob die
+    /// Partie durch Ausscheiden endete oder nicht. Die Zahl der Überlebenden
+    /// verrät das: durch Ausscheiden bliebe nur einer übrig.
     ///
-    /// * **Genau ein Überlebender** — die Partie endete durch Ausscheiden der
-    ///   anderen. Er bekommt 3 Punkte für jeden noch stehenden König eines
-    ///   Ausgeschiedenen. Stehen bleiben können nur Könige von Spielern, die
-    ///   aufgegeben haben oder in die Zeit gelaufen sind; ein geschlagener
-    ///   König ist vom Brett und schon verrechnet.
-    /// * **Mehrere Überlebende** — dann endete die Partie an der Zugobergrenze,
-    ///   denn durch Ausscheiden bliebe nur einer übrig. Jeder Überlebende
-    ///   bekommt 2 Punkte.
+    /// * **Genau ein Überlebender.** Ihm gehören die stehengebliebenen Könige
+    ///   ganz: 3 Punkte je Stück.
+    /// * **Mehrere Überlebende** — Zugobergrenze oder Zugwiederholung. Jeder
+    ///   bekommt 2 Punkte, und die stehengebliebenen Könige werden unter ihnen
+    ///   aufgeteilt.
     ///
-    /// Die Zahl der Überlebenden ist hier also nicht bloß ein Kriterium,
-    /// sondern verrät den Grund des Endes — deshalb braucht die Funktion
-    /// keinen zusätzlichen Parameter dafür.
+    /// Partie 99188189 zeigt den zweiten Fall: Blau läuft bei Zug 43 in die
+    /// Zeit und lässt seinen König stehen, die Partie endet bei Zug 57 durch
+    /// Zugwiederholung mit drei Überlebenden. Jeder bekommt 2 + 3/3 = 3.
     ///
-    /// Beides an allen 11.558 Partien aus `game_data/` gemessen. Der Anteil
-    /// exakt getroffener Endstände:
+    /// An allen 11.558 Partien aus `game_data/` gemessen (exakte Endstände):
     ///
-    /// | Regel                          | Treffer |
-    /// |--------------------------------|---------|
-    /// | ohne beide Zuschläge           |  30,6 % |
-    /// | nur 3 je König                 |  92,7 % |
-    /// | 1 statt 3 je König             |  35,9 % |
-    /// | 3 je König + 2 je Überlebendem |  96,5 % |
+    /// | Regel                                      | Treffer |
+    /// |--------------------------------------------|---------|
+    /// | ohne jeden Zuschlag                        |  30,6 % |
+    /// | nur 3 je stehendem König                   |  96,0 % |
+    /// | + 2 je Überlebendem                        |  99,97 %|
+    /// | + 2 je Überlebendem und König geteilt      | 100,0 % |
+    ///
+    /// Die drei dann noch abweichenden Partien sind mit einer anderen
+    /// Einstellung gespielt worden — ihr Systemchat sagt "Checkmates/kings =
+    /// +10 points" statt +3. Sie sind kein Regelfehler.
     pub fn final_scores(board: &Board) -> [i32; 4] {
         let mut scores = board.scores.as_array();
 
@@ -229,17 +244,18 @@ impl Rules {
             .collect();
 
         match survivors[..] {
+            // Ein Überlebender: ihm gehören die stehengebliebenen Könige ganz.
             [winner] => {
-                let standing_kings = Color::ALL
-                    .iter()
-                    .filter(|&&c| !board.active[c.idx()])
-                    .filter(|&&c| board.pieces(c, PieceKind::King) != 0)
-                    .count() as i32;
-                scores[winner.idx()] += standing_kings * PieceKind::King.capture_value();
+                scores[winner.idx()] +=
+                    standing_kings(board) * PieceKind::King.capture_value();
             }
+            // Mehrere: jeder bekommt seine 2 Punkte, und die stehengebliebenen
+            // Könige werden unter ihnen aufgeteilt.
             _ => {
+                let share = standing_kings(board) * PieceKind::King.capture_value()
+                          / survivors.len() as i32;
                 for c in &survivors {
-                    scores[c.idx()] += SURVIVOR_BONUS;
+                    scores[c.idx()] += SURVIVOR_BONUS + share;
                 }
             }
         }
@@ -340,12 +356,14 @@ mod tests {
         assert_eq!(scores[Color::Blue.idx()], 0);
     }
 
-    /// Endet die Partie an der Zugobergrenze, bekommt jeder Überlebende 2
-    /// Punkte. Mehr als ein Überlebender heißt genau das: durch Ausscheiden
-    /// bliebe nur einer übrig.
+    /// Endet die Partie ohne dass einer übrig bleibt, bekommt jeder
+    /// Überlebende 2 Punkte. Hier sind Gelb und Grün regulär geschlagen
+    /// worden, ihre Könige also vom Brett — es gibt nichts zu verteilen.
     #[test]
     fn move_limit_end_gives_two_per_survivor() {
-        let mut b = Board::default();
+        let mut b = Board::empty();
+        b.bb[Color::Red.idx()][PieceKind::King.idx()]  = bit(sq(0, 0));
+        b.bb[Color::Blue.idx()][PieceKind::King.idx()] = bit(sq(7, 7));
         b.active = [true, true, false, false];
         b.scores.add(Color::Red, 7);
 
@@ -354,6 +372,27 @@ mod tests {
         assert_eq!(scores[Color::Blue.idx()],  2);
         assert_eq!(scores[Color::Yellow.idx()], 0, "Ausgeschiedene bekommen nichts");
         assert_eq!(scores[Color::Green.idx()],  0);
+    }
+
+    /// Bleiben mehrere übrig und steht der König eines Ausgeschiedenen noch,
+    /// wird er unter ihnen aufgeteilt. Das ist Partie 99188189: Blau läuft bei
+    /// Zug 43 in die Zeit, die Partie endet bei Zug 57 durch Zugwiederholung
+    /// mit drei Überlebenden, jeder bekommt 2 + 3/3 = 3.
+    #[test]
+    fn standing_king_is_shared_among_survivors() {
+        let mut b = Board::empty();
+        b.bb[Color::Red.idx()][PieceKind::King.idx()]    = bit(sq(0, 0));
+        b.bb[Color::Yellow.idx()][PieceKind::King.idx()] = bit(sq(7, 7));
+        b.bb[Color::Green.idx()][PieceKind::King.idx()]  = bit(sq(0, 7));
+        // Blau ist in die Zeit gelaufen — ausgeschieden, König steht noch.
+        b.bb[Color::Blue.idx()][PieceKind::King.idx()]   = bit(sq(7, 0));
+        b.active = [true, false, true, true];
+
+        let scores = Rules::final_scores(&b);
+        for c in [Color::Red, Color::Yellow, Color::Green] {
+            assert_eq!(scores[c.idx()], 3, "2 Punkte plus ein Drittel von 3");
+        }
+        assert_eq!(scores[Color::Blue.idx()], 0);
     }
 
     /// Die beiden Zuschläge schließen sich aus: bei einem Überlebenden zählen

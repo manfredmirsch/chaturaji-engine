@@ -476,7 +476,19 @@ fn main() {
             }
             sc
         };
-        let cands = [variant(3, 0), variant(1, 0), variant(3, 2), variant(1, 2)];
+        // Zusatzvariante: die 3 Punkte je stehengebliebenem König werden unter
+        // den Überlebenden aufgeteilt, zusätzlich zu den 2 Punkten je Kopf.
+        let shared = {
+            let mut sc = base;
+            if survivors.len() == 1 {
+                sc[survivors[0].idx()] += standing_kings * 3;
+            } else if !survivors.is_empty() {
+                let share = standing_kings * 3 / survivors.len() as i32;
+                for c in &survivors { sc[c.idx()] += 2 + share; }
+            }
+            sc
+        };
+        let cands = [variant(3, 0), variant(3, 2), shared, variant(1, 2)];
 
         let replayed = Rules::final_scores(&board);
         let recorded: Option<[i32; 4]> = (|| Some([
