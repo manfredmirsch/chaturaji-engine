@@ -289,6 +289,107 @@ mod tests {
         assert_eq!(Rules::final_scores(&b), b.scores.as_array());
     }
 
+    // ─── Doppel- und Dreifachschach ───────────────────────────────────────────
+    //
+    // Aufbau für alle drei Fälle: ein rotes Boot zieht von d3 nach d4 (Feld
+    // sq(3,3)). Von dort greift es die ganze Datei 3 und den ganzen Rang 3 ab.
+    // Wie viele Könige darauf stehen, steuert der jeweilige Test.
+    //
+    //        Datei 3
+    //           │
+    //   sq(0,3)─┼─sq(3,3)──sq(7,3)      ← Rang 3
+    //           │   ▲
+    //           │  Boot zieht von sq(3,2) herauf
+
+    /// Baut die Grundstellung: rotes Boot auf d3, roter König abseits.
+    fn check_bonus_board(enemy_kings: &[(Color, u8)]) -> Board {
+        let mut b = Board::empty();
+        b.bb[Color::Red.idx()][PieceKind::Boat.idx()] = bit(sq(3, 2));
+        b.bb[Color::Red.idx()][PieceKind::King.idx()] = bit(sq(0, 0));
+        for &(c, square) in enemy_kings {
+            b.bb[c.idx()][PieceKind::King.idx()] = bit(square);
+        }
+        b.to_move = Color::Red;
+        b
+    }
+
+    /// Führt den Zug d3→d4 aus und gibt Rots Punkte zurück. Der Zug schlägt
+    /// nichts, der gesamte Punktezuwachs ist also der Schach-Bonus.
+    fn score_after_boat_step(b: &Board) -> i32 {
+        let mv = Rules::legal_moves(b)
+            .into_iter()
+            .find(|m| m.from == sq(3, 2) && m.to == sq(3, 3))
+            .expect("Boot muss d3→d4 ziehen können");
+        assert!(mv.captured.is_none(), "der Testzug darf nichts schlagen");
+        Rules::apply_with_effects(b, mv).scores.get(Color::Red)
+    }
+
+    /// Ein einzelnes Schach bringt nichts — die Abgrenzung nach unten.
+    #[test]
+    fn single_check_gives_no_bonus() {
+        let b = check_bonus_board(&[
+            (Color::Blue,   sq(3, 7)),   // auf der Datei: angegriffen
+            (Color::Yellow, sq(7, 7)),   // abseits
+            (Color::Green,  sq(0, 7)),   // abseits
+        ]);
+        assert_eq!(Rules::count_attacked_kings(&b, Color::Red), 1,
+                   "das Boot steht schon vor dem Zug auf der Datei des blauen Königs");
+        assert_eq!(score_after_boat_step(&b), 0);
+    }
+
+    /// Doppelschach: ein Punkt.
+    #[test]
+    fn double_check_gives_one_point() {
+        let b = check_bonus_board(&[
+            (Color::Blue,   sq(3, 7)),   // Datei 3
+            (Color::Yellow, sq(7, 3)),   // Rang 3
+            (Color::Green,  sq(0, 7)),   // abseits
+        ]);
+        assert_eq!(score_after_boat_step(&b), 1);
+    }
+
+    /// Dreifachschach: fünf Punkte.
+    #[test]
+    fn triple_check_gives_five_points() {
+        let b = check_bonus_board(&[
+            (Color::Blue,   sq(3, 7)),   // Datei 3, nördlich
+            (Color::Yellow, sq(7, 3)),   // Rang 3, östlich
+            (Color::Green,  sq(0, 3)),   // Rang 3, westlich
+        ]);
+        assert_eq!(score_after_boat_step(&b), 5);
+    }
+
+    /// Eine verstellte Linie ist kein Schach. Ohne diese Probe könnte
+    /// `attacked_squares` Figuren durch andere hindurch angreifen lassen und
+    /// die Tests oben wären trotzdem grün.
+    #[test]
+    fn blocked_line_is_not_check() {
+        let mut b = check_bonus_board(&[
+            (Color::Blue,   sq(3, 7)),
+            (Color::Yellow, sq(7, 3)),
+            (Color::Green,  sq(0, 7)),
+        ]);
+        // Ein roter Bauer stellt die Datei zwischen Boot und blauem König zu.
+        b.bb[Color::Red.idx()][PieceKind::Pawn.idx()] = bit(sq(3, 5));
+        assert_eq!(score_after_boat_step(&b), 0, "nur noch Gelb im Angriff = einfaches Schach");
+    }
+
+    /// Der Bonus richtet sich nach der Zahl der Könige, nicht nach der Zahl
+    /// der angreifenden Figuren: zwei Angreifer auf denselben König bleiben
+    /// ein einfaches Schach.
+    #[test]
+    fn two_attackers_on_one_king_is_not_double_check() {
+        let mut b = check_bonus_board(&[
+            (Color::Blue,   sq(3, 7)),   // einziger angegriffener König
+            (Color::Yellow, sq(7, 0)),   // weit ab von Datei 3, Rang 3 und Rang 7
+            (Color::Green,  sq(6, 0)),
+        ]);
+        // Zweites rotes Boot greift denselben blauen König über Rang 7 an.
+        // Nach Süden stößt es auf den eigenen König und kommt nicht weiter.
+        b.bb[Color::Red.idx()][PieceKind::Boat.idx()] |= bit(sq(0, 7));
+        assert_eq!(score_after_boat_step(&b), 0);
+    }
+
     #[test]
     fn boat_triumph_captures_three_boats() {
         // Set up four boats in a 2×2 square: d4, e4, d5, e5
