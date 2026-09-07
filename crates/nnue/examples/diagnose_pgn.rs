@@ -138,7 +138,7 @@ fn detail(path: &str) {
         // Jede Stelle zeigen, an der die Notation mehr Schachs meldet als wir
         // der ziehenden Figur zutrauen — dort entgeht uns ein Bonus.
         let noted = token.chars().filter(|&c| c == '+').count();
-        let by_mover_chk = Rules::kings_attacked_from(&next, mover, to_sq);
+        let by_mover_chk = Rules::newly_threatened_kings(&board, &next, mover);
         // Neu ins Schach gesetzt: nachher angegriffen, vorher nicht.
         let att_before = Rules::attacked_squares(&board, mover);
         let att_after  = Rules::attacked_squares(&next,  mover);
@@ -205,7 +205,7 @@ fn detail(path: &str) {
                 .map(|c| format!("schlägt {} {:?} ({})",
                                  c.color.name(), c.kind, c.kind.capture_value()))
                 .unwrap_or_default();
-            let by_mover = Rules::kings_attacked_from(&next, mover, to_sq);
+            let by_mover = Rules::newly_threatened_kings(&board, &next, mover);
             let bonus = match by_mover {
                 2 => " +1 Doppelschach",
                 3 => " +5 Dreifachschach",

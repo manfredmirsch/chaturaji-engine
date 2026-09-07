@@ -43,39 +43,40 @@ impl Rules {
     // NEU bedroht.
     //
     // Neu bedroht heißt: der König wird von einem Feld aus angegriffen, von
-    // dem aus er vorher nicht angegriffen wurde. Zwei Dinge sind damit nicht
-    // verlangt:
+    // dem aus er vorher nicht angegriffen wurde. Drei Dinge sind dabei *nicht*
+    // verlangt, und jedes davon war einmal eine falsche Fassung dieser Regel:
     //
-    //   * Es muss nicht dieselbe Figur sein. Ein Abzugsschach zählt so gut wie
-    //     ein Angriff der gezogenen Figur.
-    //   * Der König muss vorher nicht schachfrei gewesen sein. Stand er schon
-    //     im Schach und kommt ein zweiter Angreifer hinzu, ist das eine neue
+    //   * Es muss nicht die gezogene Figur sein. Ein Abzugsschach zählt.
+    //   * Es muss nicht einmal eine Figur des Ziehenden sein. Legt der Zug die
+    //     Linie eines Dritten frei, gehört die Bedrohung trotzdem dem, der
+    //     gezogen hat.
+    //   * Der König muss vorher nicht schachfrei gewesen sein. Kommt zu einem
+    //     bestehenden Angriff ein zweiter Angreifer hinzu, ist das eine neue
     //     Bedrohung.
     //
-    // Der zweite Punkt ist der Unterschied zwischen "neue Bedrohung" und
-    // "neues Schach", und er ist groß: über alle 11.558 Partien aus
-    // `game_data/` steigen die exakt getroffenen Endstände von 11.274 auf
-    // 11.444.
-    //
-    // An echten Partien belegt:
+    // Jede dieser drei Lockerungen ist an echten Partien belegt:
     //
     //   Partie 100010111, Zug 23, Rot: `g7-g8++` (Bauer d4-d5) gibt Blau auf
     //     e6 Schach — mehr kann der Bauer nicht, er erreicht nur dieses Feld.
     //     Das zweite Schach kommt aus der Linie, die er freigibt.
+    //   Partie 100107229, Zug 10, Gelb: `Ni8-g7++` (Springer f5-d4) bedroht
+    //     Rot auf b3. Grüns König auf h3 wird durch dieselbe Bewegung frei —
+    //     angegriffen aber vom *blauen* Läufer auf e6. Gelb bekommt den Punkt.
     //   Partie 100058474, Zug 28, Grün: `Rk10-e10+` (Boot h7-b7) bedroht Gelb
-    //     auf b3 neu, während Rots König auf b1 schon vom Läufer auf f5
-    //     angegriffen wird — unverändert derselbe Angriff. Eine neue
-    //     Bedrohung, ein `+` in der Notation, kein Punkt.
+    //     auf b3 neu, während Rot auf b1 unverändert vom Läufer auf f5
+    //     angegriffen wird. Eine neue Bedrohung, kein Punkt.
     //
-    // Gemessene Lesarten (exakte Endstände von 11.558):
+    // Gemessen an allen 11.558 Partien aus `game_data/` (exakte Endstände):
     //
-    //   neu bedrohte Könige               11.444   99,0 %   <- diese Regel
-    //   Könige neu im Schach des Ziehers  11.274   97,5 %
-    //   die gezogene Figur allein         11.276   97,6 %
-    //   neu im Schach, von wem auch immer 10.813   93,6 %
-    //   alle Könige im Schach              5.095   44,1 %
+    //   neu bedroht, von wem auch immer   11.554   100,0 %   <- diese Regel
+    //   neu bedroht, nur durch den Zieher 11.444    99,0 %
+    //   Könige neu im Schach des Ziehers  11.274    97,5 %
+    //   die gezogene Figur allein         11.276    97,6 %
+    //   neu im Schach, von wem auch immer 10.813    93,6 %
+    //   alle Könige im Schach              5.095    44,1 %
     //
-    // Der verbleibende Fehler ist einseitig: wir zahlen nur noch zu wenig.
+    // Die vier verbleibenden Partien weichen um Vielfache von 7 ab und folgen
+    // damit einem anderen Muster als alles hier Behandelte.
 
     fn apply_check_bonus(before: &Board, next: &mut Board, mover: Color) {
         let bonus = match Self::newly_threatened_kings(before, next, mover) {
@@ -108,19 +109,14 @@ impl Rules {
     /// Der Unterschied zum Zustand des Königs: stand er schon im Schach und
     /// kommt eine zweite Figur hinzu, ist das eine neue Bedrohung, aber kein
     /// neues Schach.
-    fn newly_threatened_kings(before: &Board, after: &Board, mover: Color) -> usize {
-        // Je Brett ein Durchgang durch die Zuggenerierung, danach nur noch
-        // Bitmasken — die Königsfelder ändern sich durch einen fremden Zug
-        // nicht.
-        let mut tmp_before = before.clone();
-        tmp_before.to_move = mover;
-        let mut tmp_after = after.clone();
-        tmp_after.to_move = mover;
-        let moves_before = MoveGen::generate(&tmp_before);
-        let moves_after  = MoveGen::generate(&tmp_after);
+    pub fn newly_threatened_kings(before: &Board, after: &Board, mover: Color) -> usize {
+        let before_moves = Self::moves_per_player(before);
+        let after_moves  = Self::moves_per_player(after);
 
-        let attackers = |moves: &[Move], target: u8| -> u64 {
-            moves.iter()
+        // Von welchen Feldern aus bedroht Spieler `d` das Feld `target`?
+        let sources = |moves: &[Vec<Move>; 4], d: Color, target: u8| -> u64 {
+            moves[d.idx()]
+                .iter()
                 .filter(|m| m.to == target)
                 .fold(0u64, |acc, m| acc | bit(m.from))
         };
@@ -132,60 +128,23 @@ impl Rules {
                 let king = after.pieces(c, PieceKind::King);
                 if king == 0 { return false; }
                 let ksq = king.trailing_zeros() as u8;
-                attackers(&moves_after, ksq) & !attackers(&moves_before, ksq) != 0
+                // Je Angreifer getrennt vergleichen: dasselbe Feld kann vor und
+                // nach dem Zug von verschiedenen Spielern besetzt sein.
+                Color::ALL.iter().filter(|&&d| d != c).any(|&d| {
+                    sources(&after_moves, d, ksq) & !sources(&before_moves, d, ksq) != 0
+                })
             })
             .count()
     }
 
-    /// Wie viele fremde Könige stehen nach dem Zug im Schach *des Ziehenden*,
-    /// die es vorher nicht taten?
-    ///
-    /// Auf welche Figur das zurückgeht, spielt keine Rolle: ein Abzugsschach
-    /// zählt genauso wie ein Angriff der gezogenen Figur. Beide Schachs müssen
-    /// aber neu sein — ein schon bestehendes zählt nicht noch einmal.
-    fn newly_checked_by_mover(before: &Board, after: &Board, mover: Color) -> usize {
-        let att_before = Self::attacked_squares(before, mover);
-        let att_after  = Self::attacked_squares(after,  mover);
-        Color::ALL
-            .iter()
-            .filter(|&&c| c != mover && after.active[c.idx()])
-            .filter(|&&c| {
-                after.pieces(c, PieceKind::King) & att_after != 0
-                    && before.pieces(c, PieceKind::King) & att_before == 0
-            })
-            .count()
-    }
-
-    /// Wie viele fremde Könige stehen nach dem Zug im Schach, die es vorher
-    /// nicht taten — unabhängig davon, wer sie angreift?
-    ///
-    /// Nur zum Vergleich behalten: diese Lesart trifft an den echten Partien
-    /// deutlich schlechter (93,6 % gegen 97,5 %).
-    pub fn newly_checked_kings(before: &Board, after: &Board, mover: Color) -> usize {
-        Color::ALL
-            .iter()
-            .filter(|&&c| c != mover && after.active[c.idx()])
-            .filter(|&&c| Self::king_in_check(after, c) && !Self::king_in_check(before, c))
-            .count()
-    }
-
-    /// Wie viele gegnerische Könige greift die Figur auf `from` allein an?
-    ///
-    /// Nicht wie viele Könige insgesamt im Schach stehen: gefragt ist das
-    /// Doppelschach einer einzelnen Figur.
-    pub fn kings_attacked_from(board: &Board, mover: Color, from: u8) -> usize {
-        let mut tmp = board.clone();
-        tmp.to_move = mover;
-        let targets = MoveGen::generate(&tmp)
-            .iter()
-            .filter(|m| m.from == from)
-            .fold(0u64, |acc, m| acc | bit(m.to));
-
-        Color::ALL
-            .iter()
-            .filter(|&&c| c != mover && board.active[c.idx()])
-            .filter(|&&c| board.pieces(c, PieceKind::King) & targets != 0)
-            .count()
+    /// Die Züge jedes aktiven Spielers, unabhängig davon, wer am Zug ist.
+    fn moves_per_player(board: &Board) -> [Vec<Move>; 4] {
+        std::array::from_fn(|i| {
+            if !board.active[i] { return Vec::new(); }
+            let mut tmp = board.clone();
+            tmp.to_move = Color::ALL[i];
+            MoveGen::generate(&tmp)
+        })
     }
 
     /// Count how many *active* opponents' kings the `mover` attacks.
@@ -578,9 +537,9 @@ mod tests {
                    "Blau kommt ein Angreifer hinzu, Gelb ist neu bedroht");
     }
 
-    /// Zwei Könige im Schach, aber von zwei verschiedenen Figuren — kein
-    /// Punkt. Das ist Partie 100058474, Zug 28: das Boot setzt Gelb ins
-    /// Schach, während Rot schon vom Läufer bedroht wird.
+    /// Zwei Könige im Schach, aber nur einer davon neu bedroht — kein Punkt.
+    /// Das ist Partie 100058474, Zug 28: das Boot bedroht Gelb neu, während
+    /// Rot unverändert vom Läufer angegriffen wird.
     ///
     /// Aufbau: Läufer auf a1 greift über die lange Diagonale Blaus König auf
     /// d4 an, und zwar schon vor dem Zug. Das Boot zieht h8→h6 und greift von
@@ -607,10 +566,10 @@ mod tests {
 
         assert_eq!(Rules::count_attacked_kings(&after, Color::Red), 2,
                    "danach stehen zwei Könige im Schach");
-        assert_eq!(Rules::kings_attacked_from(&after, Color::Red, sq(7, 5)), 1,
-                   "das Boot allein greift nur einen an");
+        assert_eq!(Rules::newly_threatened_kings(&b, &after, Color::Red), 1,
+                   "nur Gelb ist neu bedroht; der Läufer greift Blau unverändert an");
         assert_eq!(after.scores.get(Color::Red), 0,
-                   "zwei Figuren, zwei Könige — kein Doppelschach");
+                   "eine neue Bedrohung reicht nicht");
     }
 
     /// Der Bonus richtet sich nach der Zahl der Könige, nicht nach der Zahl
