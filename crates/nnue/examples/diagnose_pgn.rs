@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 
 use chaturaji_core::board::{bit, Board};
 use chaturaji_core::piece::{Color, PieceKind};
+use chaturaji_core::notation::square_name;
 use chaturaji_core::rules::Rules;
 use chaturaji_nnue::pgn_import::parse_move_token;
 
@@ -84,19 +85,27 @@ fn detail(path: &str) {
 
     let tokens: Vec<&str> = move_text
         .split_whitespace()
-        .filter(|t| !t.ends_with('.') && *t != ".." && *t != "*")
+        .filter(|t| *t != ".." && *t != "*")
         .collect();
 
     let name = std::path::Path::new(path).file_stem().unwrap().to_string_lossy();
     println!("Partie {name}");
     println!("https://www.chess.com/variants/chaturaji/game/{name}\n");
-    println!("{:>5}  {:<12} {:<26} {:>10}  {}", "Halbz", "Zug", "Ereignis", "Punkte", "Stand");
-    println!("{}", "─".repeat(88));
+    println!("{:>4} {:<7} {:<12} {:<11} {:<24} {:>7}  {}",
+             "Zug", "Spieler", "pgn4", "8x8-Brett", "Ereignis", "Punkte", "Stand");
+    println!("{}", "─".repeat(104));
 
     let mut board  = Board::default();
     let mut halfmove = 0usize;
+    let mut movenum = String::from("?");
 
     for token in &tokens {
+        // Zugnummer aus der Aufzeichnung uebernehmen - genau die zeigt
+        // chess.com an.
+        if token.ends_with('.') {
+            movenum = token.trim_end_matches('.').to_string();
+            continue;
+        }
         if Rules::is_game_over(&board) {
             println!("{:>5}  {:<12} {:<26}", "", "", "Partie zu Ende (≤1 aktiv)");
             break;
@@ -105,9 +114,9 @@ fn detail(path: &str) {
         if *token == "R" || *token == "T" {
             let who = board.to_move;
             board = Rules::resign(&board);
-            println!("{:>5}  {:<12} {:<26} {:>10}  {:?}",
-                     halfmove, token,
-                     format!("{} scheidet aus", who.name()), "", board.scores.as_array());
+            println!("{:>4} {:<7} {:<12} {:<11} {:<24} {:>7}  {:?}",
+                     movenum, who.name(), token, "",
+                     "scheidet aus", "", board.scores.as_array());
             halfmove += 1;
             continue;
         }
@@ -139,8 +148,9 @@ fn detail(path: &str) {
                 3 => " +5 Dreifachschach",
                 _ => "",
             };
-            println!("{:>5}  {:<12} {:<26} {:>+10}  {:?}   [{} → {} Könige im Schach]",
-                     halfmove, token,
+            println!("{:>4} {:<7} {:<12} {:<11} {:<24} {:>+7}  {:?}   [{} → {} Könige im Schach]",
+                     movenum, mover.name(), token,
+                     format!("{}-{}", square_name(from_sq), square_name(to_sq)),
                      format!("{}{}", capture, bonus),
                      gained, next.scores.as_array(),
                      checks_before, checks_after);
