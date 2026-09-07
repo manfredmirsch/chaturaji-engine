@@ -9,6 +9,7 @@
 //!   cargo run --release -p chaturaji-nnue --bin train_nnue -- --stats
 
 use chaturaji_nnue::db;
+use chaturaji_nnue::dist::{self, GenerateConfig, LearnConfig, Progress};
 use chaturaji_nnue::network::NnueNetwork;
 use chaturaji_nnue::pgn_import::{load_games_from_dir, load_games_from_json_dir};
 use chaturaji_nnue::supervised::run_supervised;
@@ -36,6 +37,21 @@ fn main() {
     let mut book_min     = 2u32;
     let mut pgn_dir      = String::new();
     let mut json_dir     = String::new();
+    let mut lr_decay     = 0.99f32;
+
+    // Verteiltes Training
+    let mut weights_path = "weights.json".to_string();
+    let mut weights_out  = String::new();
+    let mut opt_state    = "opt_state.bin".to_string();
+    let mut progress_path = "progress.json".to_string();
+    let mut games_dir    = String::new();
+    let mut out_path     = String::new();
+    let mut shards       = 1u64;
+    let mut shard        = 0u64;
+    let mut max_seconds  = 0u64;
+    let mut threads      = 0usize;
+    let mut run_seed     = 42u64;
+    let mut games_done   = 0u64;
 
     let mut i = 1;
     while i < args.len() {
@@ -67,6 +83,28 @@ fn main() {
                 }
             }
             "--stats"      => { mode = Mode::Stats; }
+            "--generate"   => {
+                mode = Mode::Generate;
+                i += 1;
+                if i < args.len() { out_path = args[i].clone(); }
+            }
+            "--learn"      => {
+                mode = Mode::Learn;
+                i += 1;
+                if i < args.len() { games_dir = args[i].clone(); }
+            }
+            "--init-state" => { mode = Mode::InitState; }
+            "--weights"     => { i += 1; if i < args.len() { weights_path  = args[i].clone(); } }
+            "--weights-out" => { i += 1; if i < args.len() { weights_out   = args[i].clone(); } }
+            "--opt-state"   => { i += 1; if i < args.len() { opt_state     = args[i].clone(); } }
+            "--progress"    => { i += 1; if i < args.len() { progress_path = args[i].clone(); } }
+            "--shards"      => { i += 1; if i < args.len() { shards      = args[i].parse().unwrap_or(shards); } }
+            "--shard"       => { i += 1; if i < args.len() { shard       = args[i].parse().unwrap_or(shard); } }
+            "--max-seconds" => { i += 1; if i < args.len() { max_seconds = args[i].parse().unwrap_or(max_seconds); } }
+            "--threads"     => { i += 1; if i < args.len() { threads     = args[i].parse().unwrap_or(threads); } }
+            "--seed"        => { i += 1; if i < args.len() { run_seed    = args[i].parse().unwrap_or(run_seed); } }
+            "--games-done"  => { i += 1; if i < args.len() { games_done  = args[i].parse().unwrap_or(games_done); } }
+            "--lr-decay"    => { i += 1; if i < args.len() { lr_decay    = args[i].parse().unwrap_or(lr_decay); } }
             "--book"       => { i += 1; if i < args.len() { book_path = args[i].clone(); } }
             "--no-book"    => { use_book = false; }
             "--book-plies" => { i += 1; if i < args.len() { book_plies = args[i].parse().unwrap_or(book_plies); } }
@@ -77,8 +115,132 @@ fn main() {
         i += 1;
     }
 
+    if threads > 0 {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build_global()
+            .expect("Thread-Pool konnte nicht gesetzt werden");
+    }
+
+    let load_book = |use_book: bool, book_path: &str| -> Option<OpeningBook> {
+        if !use_book { return None; }
+        match OpeningBook::load(book_path) {
+            Ok(b) => {
+                println!("Eröffnungsbuch geladen: {book_path} ({} Stellungen)", b.len());
+                Some(b)
+            }
+            Err(e) => {
+                eprintln!("Warnung: Buch '{book_path}' nicht ladbar ({e}). Training ohne Buch.");
+                None
+            }
+        }
+    };
+
     match mode {
         Mode::Stats  => show_stats(&db_path, 20),
+
+        Mode::InitState => {
+            // Startzustand für einen verteilten Lauf: entweder aus der lokalen
+            // Trainings-DB (dann geht der bisherige Lauf weiter) oder frisch.
+            let out = if weights_out.is_empty() { weights_path.clone() } else { weights_out.clone() };
+            let net = match db::open(&db_path).ok().and_then(|c| db::load_latest_network(&c).ok().flatten()) {
+                Some(mut n) => {
+                    n.init_momentum();
+                    println!("Gewichte aus '{db_path}' übernommen ({} Schritte).", n.steps);
+                    n
+                }
+                None => {
+                    println!("Keine DB gefunden — neues NNUE.");
+                    let mut n = NnueNetwork::new(lr, 0.9);
+                    n.init_momentum();
+                    n
+                }
+            };
+            dist::save_weights(&out, &net).expect("Gewichte nicht schreibbar");
+            let progress = Progress {
+                round: 0,
+                games_done,
+                run_seed,
+                last_avg_loss:  None,
+                last_avg_plies: None,
+            };
+            progress.save(&progress_path).expect("Fortschritt nicht schreibbar");
+            println!("Startzustand geschrieben: {out}, {progress_path}");
+            println!("  Seed {run_seed} | bereits gespielt: {games_done} Partien");
+        }
+
+        Mode::Generate => {
+            if out_path.is_empty() {
+                eprintln!("Fehler: --generate braucht einen Ausgabepfad.");
+                return;
+            }
+            let cfg = GenerateConfig {
+                weights_path,
+                progress_path,
+                out_path:    out_path.clone(),
+                shards,
+                shard,
+                games_total: total_games as u64,
+                selfplay: SelfPlayConfig {
+                    engine_depth:   depth,
+                    beam_width,
+                    book_max_plies: book_plies,
+                    book_min_count: book_min,
+                    max_moves,
+                    ..SelfPlayConfig::default()
+                },
+                book: load_book(use_book, &book_path),
+                max_seconds,
+            };
+            match dist::generate(cfg) {
+                Ok(s) => {
+                    println!(
+                        "\n{} Partien in {:.1} min | ∅Züge {:.1} | {}",
+                        s.games, s.seconds / 60.0, s.avg_plies,
+                        if s.hit_budget { "Zeitbudget erreicht" } else { "vollständig" },
+                    );
+                    println!("Geschrieben: {out_path}");
+                }
+                Err(e) => {
+                    eprintln!("Erzeugen fehlgeschlagen: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Mode::Learn => {
+            if games_dir.is_empty() {
+                eprintln!("Fehler: --learn braucht ein Verzeichnis mit .jsonl-Dateien.");
+                return;
+            }
+            let cfg = LearnConfig {
+                weights_path: weights_path.clone(),
+                weights_out:  if weights_out.is_empty() { weights_path } else { weights_out },
+                opt_state_path: opt_state,
+                progress_path,
+                games_dir,
+                lambda,
+                lr0: lr,
+                lr_decay,
+                save_every,
+            };
+            match dist::learn(cfg) {
+                Ok(s) => {
+                    if s.skipped > 0 {
+                        eprintln!("{} Partien übersprungen.", s.skipped);
+                    }
+                    if s.games == 0 {
+                        eprintln!("Keine Partie gelernt — Abbruch, damit die Runde nicht als erledigt gilt.");
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Lernen fehlgeschlagen: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
         Mode::Export => export_weights(&db_path, &export_path),
         Mode::Supervised => {
             if pgn_dir.is_empty() && json_dir.is_empty() {
@@ -103,18 +265,7 @@ fn main() {
             println!("Gewichte gespeichert in '{db_path}'.");
         }
         Mode::Train  => {
-            let book = if use_book {
-                match OpeningBook::load(&book_path) {
-                    Ok(b) => {
-                        println!("Eröffnungsbuch geladen: {} ({} Stellungen)", book_path, b.len());
-                        Some(b)
-                    }
-                    Err(e) => {
-                        eprintln!("Warnung: Buch '{}' nicht ladbar ({e}). Training ohne Buch.", book_path);
-                        None
-                    }
-                }
-            } else { None };
+            let book = load_book(use_book, &book_path);
 
             let cfg = TrainConfig {
                 db_path,
@@ -132,7 +283,7 @@ fn main() {
                     max_moves,
                     ..SelfPlayConfig::default()
                 },
-                lr_decay: 0.99,
+                lr_decay,
                 book,
             };
             run(cfg);
@@ -140,7 +291,7 @@ fn main() {
     }
 }
 
-enum Mode { Train, Stats, Export, Supervised }
+enum Mode { Train, Stats, Export, Supervised, Generate, Learn, InitState }
 
 fn print_help() {
     println!("Chaturaji NNUE TD(λ) Trainer\n");
@@ -167,7 +318,23 @@ fn print_help() {
     println!("  --book-min <n>       Mindestbeobachtungen je Buchzug [Standard: 2]");
     println!("  --pgn-dir <pfad>     Supervised Training aus PGN-Verzeichnis");
     println!("  --json-dir <pfad>    Supervised Training aus JSON-Verzeichnis (chess.com Export)");
+    println!("  --lr-decay <f>       Lernraten-Zerfall je save-every       [Standard: 0.99]");
+    println!("  --threads <n>        Worker-Threads (0 = alle Kerne)       [Standard: 0]");
     println!("  --help               Diese Hilfe\n");
+    println!("VERTEILTES TRAINING (mehrere Runner, rundenweise):");
+    println!("  --init-state         Startzustand aus --db (oder frisch) schreiben");
+    println!("  --generate <datei>   Partien gegen eingefrorene Gewichte spielen → JSONL");
+    println!("  --learn <verz>       JSONL-Partien nachspielen und TD-Updates anwenden");
+    println!("  --weights <datei>    Gewichte (Ein-/Ausgabe)               [Standard: weights.json]");
+    println!("  --weights-out <d>    Ziel für neue Gewichte               [Standard: wie --weights]");
+    println!("  --opt-state <datei>  Adam-Momente über Runden hinweg      [Standard: opt_state.bin]");
+    println!("  --progress <datei>   Runde, Partienzahl, Seed             [Standard: progress.json]");
+    println!("  --shards <n>         Anzahl paralleler Erzeuger dieser Runde");
+    println!("  --shard <i>          Nummer dieses Erzeugers (0-basiert)");
+    println!("  --games <n>          Partien der *ganzen* Runde (über alle Shards)");
+    println!("  --seed <n>           Lauf-Seed (nur bei --init-state)      [Standard: 42]");
+    println!("  --games-done <n>     Bisher gespielte Partien (nur --init-state)");
+    println!("  --max-seconds <n>    Zeitbudget je Erzeuger (0 = keins)\n");
     println!("EMPFOHLENER WORKFLOW:");
     println!("  1. Supervised Pre-Training mit echten Top-Partien:");
     println!("     cargo run --release -p chaturaji-nnue --bin train_nnue -- --json-dir ./game_data");

@@ -15,7 +15,9 @@
 
 use std::collections::HashMap;
 use std::cmp::Reverse;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
+use rand::rngs::SmallRng;
+use rayon::prelude::*;
 use chaturaji_core::board::{Board, Move};
 use chaturaji_core::piece::{Color, PieceKind};
 use chaturaji_core::rules::Rules;
@@ -227,6 +229,55 @@ pub fn play_game(
 
     let winner = Rules::winner(&board);
     GameResult { steps, final_board: board, move_log, winner }
+}
+
+// ─── Paralleles Self-Play ─────────────────────────────────────────────────────
+
+/// Eine zu spielende Partie: laufende Nummer, RNG-Seed und ε.
+///
+/// Der Seed hängt allein an der globalen Partienummer, nicht an der Reihenfolge
+/// der Abarbeitung. Damit liefert derselbe Lauf dasselbe Ergebnis, egal auf wie
+/// vielen Kernen oder in wie vielen Shards er läuft — ohne das wäre ein
+/// verteilter Lauf nicht reproduzierbar und ein Fehler nicht nachstellbar.
+#[derive(Clone, Copy)]
+pub struct GameJob {
+    pub index:   u64,
+    pub seed:    u64,
+    pub epsilon: f32,
+}
+
+/// Ableitung des Partie-Seeds aus Lauf-Seed und Partienummer.
+pub fn game_seed(run_seed: u64, index: u64) -> u64 {
+    // SplitMix64-Finalizer: streut benachbarte Indizes weit auseinander, damit
+    // Partie 7 und Partie 8 nicht mit verwandten Zufallsfolgen starten.
+    let mut z = run_seed
+        .wrapping_add(index.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Spielt einen Stapel Partien parallel gegen dasselbe, eingefrorene Netz.
+///
+/// Das Netz wird nur gelesen (`forward` nimmt `&self`), deshalb braucht es
+/// keinen Lock. Die Rückgabe ist nach `GameJob::index` sortiert, damit die
+/// anschließenden TD-Updates in fester Reihenfolge laufen.
+pub fn play_batch(
+    net:  &NnueNetwork,
+    cfg:  &SelfPlayConfig,
+    jobs: &[GameJob],
+    book: Option<&OpeningBook>,
+    keys: &ZobristKeys,
+) -> Vec<(u64, GameResult)> {
+    let mut out: Vec<(u64, GameResult)> = jobs
+        .par_iter()
+        .map(|job| {
+            let mut rng = SmallRng::seed_from_u64(job.seed);
+            (job.index, play_game(net, cfg, job.epsilon, &mut rng, book, keys))
+        })
+        .collect();
+    out.sort_by_key(|(idx, _)| *idx);
+    out
 }
 
 fn sample_book_move(

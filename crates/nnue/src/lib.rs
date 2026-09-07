@@ -1,4 +1,5 @@
 pub mod db;
+pub mod dist;
 pub mod eval;
 pub mod features;
 pub mod network;

@@ -17,3 +17,9 @@ chaturaji.db
 chaturaji.db-shm
 chaturaji.db-wal
 crates/wasm/www/game_analysis/
+
+# Verteiltes Training: Zustand und erzeugte Partien gehören ins Release
+# `nnue-state` bzw. in die Job-Artefakte, nicht in den Git-Verlauf.
+progress.json
+opt_state.bin
+*.jsonl
