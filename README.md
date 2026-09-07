@@ -224,4 +224,22 @@ Gute Quelle: https://github.com/lichess-org/lila/tree/master/public/piece
 
 ## Lizenz
 
-MIT — siehe [LICENSE](LICENSE).
+Der Code steht unter der **MIT-Lizenz** — siehe [LICENSE](LICENSE).
+
+Die mitgelieferten Partiedaten nicht. Sie sind aus Chaturaji-Partien von
+chess.com abgeleitet, und ihre Weitergabe richtet sich nach den
+Nutzungsbedingungen von chess.com, nicht nach der MIT-Lizenz:
+
+| Datei | Inhalt |
+|---|---|
+| `crates/wasm/www/opening_book.json` | aggregierte Statistiken je Stellung (Zughäufigkeit, mittlere Punkte und Platzierung) — keine Zuordnung zu einzelnen Partien oder Personen |
+| `crates/wasm/www/games_index.json` | Partieübersicht mit **Benutzernamen, Ratings, Datum und Ergebnis** einzelner Spieler |
+
+Beim zweiten Punkt geht es nicht nur um Urheberrecht: Benutzernamen und
+Ratings sind personenbezogene Daten. Wer das Repository forkt oder die Dateien
+weiterverbreitet, sollte das wissen.
+
+Dasselbe gilt für die Trainingsdaten, die außerhalb des Repositories liegen
+(`game_data/`, `game_data.tar.gz` im Release `nnue-state`). Die daraus
+*gelernten* Netzgewichte sind davon unberührt — sie enthalten keine Partien,
+sondern nur Parameter.
