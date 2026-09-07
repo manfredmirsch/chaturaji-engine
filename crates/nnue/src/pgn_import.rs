@@ -8,11 +8,33 @@
 //!   Dateien d-k  →  0-7
 //!   Ränge  4-11  →  0-7
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use chaturaji_core::board::Board;
 use chaturaji_core::rules::Rules;
 
 use crate::outcome::{place_values, place_values_from_standings};
+
+/// Dateien eines Verzeichnisses mit der gesuchten Endung, nach Namen sortiert.
+///
+/// `read_dir` liefert die Reihenfolge des Dateisystems, und die ist auf einem
+/// CI-Runner eine andere als lokal. Beim Supervised Training ist das keine
+/// Kosmetik: SGD läuft die Partien in genau dieser Reihenfolge ab, derselbe
+/// Datensatz ergäbe sonst je Maschine ein anderes Netz.
+fn sorted_files(dir: &str, ext: &str) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = match std::fs::read_dir(Path::new(dir)) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some(ext))
+            .collect(),
+        Err(e) => {
+            eprintln!("Verzeichnis '{dir}' nicht lesbar: {e}");
+            Vec::new()
+        }
+    };
+    paths.sort();
+    paths
+}
 
 pub struct ParsedGame {
     /// Vollständige Stellungen. Früher nur Bitboards — das reichte nicht, weil
@@ -27,15 +49,7 @@ pub fn load_games_from_dir(dir: &str) -> Vec<ParsedGame> {
     let mut ok      = 0usize;
     let mut skipped = 0usize;
 
-    let entries = match std::fs::read_dir(Path::new(dir)) {
-        Ok(e)  => e,
-        Err(e) => { eprintln!("Verzeichnis '{}' nicht lesbar: {}", dir, e); return games; }
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("pgn") { continue; }
-
+    for path in sorted_files(dir, "pgn") {
         let text = match std::fs::read_to_string(&path) {
             Ok(t)  => t,
             Err(_) => { skipped += 1; continue; }
@@ -59,15 +73,7 @@ pub fn load_games_from_json_dir(dir: &str) -> Vec<ParsedGame> {
     let mut ok      = 0usize;
     let mut skipped = 0usize;
 
-    let entries = match std::fs::read_dir(Path::new(dir)) {
-        Ok(e)  => e,
-        Err(e) => { eprintln!("Verzeichnis '{}' nicht lesbar: {}", dir, e); return games; }
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
-
+    for path in sorted_files(dir, "json") {
         let text = match std::fs::read_to_string(&path) {
             Ok(t)  => t,
             Err(_) => { skipped += 1; continue; }

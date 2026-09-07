@@ -1,0 +1,141 @@
+name: NNUE-Pre-Training
+
+# Supervised Pre-Training aus echten chess.com-Partien.
+#
+# Anders als das Self-Play ist das ein einzelner sequentieller Lauf: SGD geht
+# die Stellungen der Reihe nach durch, es gibt nichts zu parallelisieren. Ein
+# Durchlauf über den ganzen Datensatz dauert gemessen etwa neun Minuten und
+# passt damit bequem in einen Job.
+#
+# Das Ergebnis überschreibt `weights.json` im Release NICHT, sondern landet als
+# `weights-pretrained.json` daneben. Ein Pre-Training zieht das Netz auf eine
+# andere Zielverteilung; ob das Ergebnis besser ist, entscheidet die Arena und
+# nicht dieser Workflow. Übernehmen ist dann ein bewusster Schritt.
+
+on:
+  workflow_dispatch:
+    inputs:
+      epochs:
+        description: 'Durchläufe über den Datensatz'
+        type: number
+        default: 1
+      lr:
+        description: 'Lernrate (konstant, kein Zerfall)'
+        type: string
+        default: '0.001'
+      start_from:
+        description: 'Startgewichte'
+        type: choice
+        options:
+          - weights.json
+          - frisch
+        default: weights.json
+      data_asset:
+        description: 'Datensatz-Asset im Release nnue-state'
+        type: string
+        default: 'game_data.tar.gz'
+
+env:
+  STATE_TAG: nnue-state
+  CARGO_TERM_COLOR: always
+  GH_REPO: ${{ github.repository }}
+
+concurrency:
+  group: nnue-training        # teilt sich die Sperre mit dem Self-Play-Lauf
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  pretrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cargo-Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Trainer bauen
+        run: cargo build --release -p chaturaji-nnue --bin train_nnue
+
+      - name: Gewichte und Partien holen
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p state data
+          gh release download "$STATE_TAG" --pattern '${{ inputs.data_asset }}' --dir . --clobber
+          tar xzf '${{ inputs.data_asset }}' -C data --strip-components=1
+          echo "$(find data -name '*.json' | wc -l) JSON-Dateien entpackt."
+
+          if [ "${{ inputs.start_from }}" = "weights.json" ]; then
+            gh release download "$STATE_TAG" --pattern 'weights.json'  --dir state --clobber
+            if gh release download "$STATE_TAG" --pattern 'opt_state.bin' --dir state --clobber; then
+              # Der Lauf liest und schreibt denselben Pfad; die Kopie sorgt
+              # dafür, dass die Momente des TD-Laufs übernommen werden, ohne
+              # dass das Ergebnis später opt_state.bin überschreibt.
+              cp state/opt_state.bin state/opt_state-pretrained.bin
+            else
+              echo "::warning::Kein opt_state.bin — Adam-Momente starten bei 0."
+            fi
+          else
+            echo "Startet mit frisch initialisiertem Netz."
+          fi
+
+      - name: Pre-Training
+        run: |
+          set -euo pipefail
+          ./target/release/train_nnue \
+            --pretrain data \
+            --weights     state/weights.json \
+            --weights-out state/weights-pretrained.json \
+            --opt-state   state/opt_state-pretrained.bin \
+            --lr        ${{ inputs.lr }} \
+            --epochs    ${{ inputs.epochs }} \
+            --log-every 250 \
+            | tee pretrain.log
+
+      # Bewusst getrennte Namen: weights.json im Release bleibt unangetastet.
+      # Zum Übernehmen später einmal von Hand hochladen — oder erst in der
+      # Arena gegen das bisherige Netz antreten lassen.
+      - name: Ergebnis ins Release legen
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload "$STATE_TAG" \
+            state/weights-pretrained.json state/opt_state-pretrained.bin --clobber
+
+      - name: Zusammenfassung
+        if: always()
+        run: |
+          {
+            echo "### NNUE-Pre-Training"
+            echo
+            echo "Start: \`${{ inputs.start_from }}\` · Epochen: ${{ inputs.epochs }} · lr: ${{ inputs.lr }}"
+            echo
+            echo '```'
+            grep -E "^(JSON|PGN):|Partien   :|Stellungen:|Partie |Supervised" pretrain.log 2>/dev/null | tail -20 || echo "(kein Log)"
+            echo '```'
+            echo
+            echo "Ergebnis liegt als \`weights-pretrained.json\` im Release \`$STATE_TAG\`."
+            echo "\`weights.json\` wurde **nicht** überschrieben."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nnue-pretrained
+          path: |
+            state/weights-pretrained.json
+            pretrain.log
+          retention-days: 30

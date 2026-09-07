@@ -9,7 +9,7 @@
 //!   cargo run --release -p chaturaji-nnue --bin train_nnue -- --stats
 
 use chaturaji_nnue::db;
-use chaturaji_nnue::dist::{self, GenerateConfig, LearnConfig, Progress};
+use chaturaji_nnue::dist::{self, GenerateConfig, LearnConfig, PretrainConfig, Progress};
 use chaturaji_nnue::network::NnueNetwork;
 use chaturaji_nnue::pgn_import::{load_games_from_dir, load_games_from_json_dir};
 use chaturaji_nnue::supervised::run_supervised;
@@ -52,6 +52,7 @@ fn main() {
     let mut threads      = 0usize;
     let mut run_seed     = 42u64;
     let mut games_done   = 0u64;
+    let mut epochs       = 1u32;
 
     let mut i = 1;
     while i < args.len() {
@@ -93,6 +94,12 @@ fn main() {
                 i += 1;
                 if i < args.len() { games_dir = args[i].clone(); }
             }
+            "--pretrain"   => {
+                mode = Mode::Pretrain;
+                i += 1;
+                if i < args.len() { games_dir = args[i].clone(); }
+            }
+            "--epochs"      => { i += 1; if i < args.len() { epochs = args[i].parse().unwrap_or(epochs); } }
             "--init-state" => { mode = Mode::InitState; }
             "--weights"     => { i += 1; if i < args.len() { weights_path  = args[i].clone(); } }
             "--weights-out" => { i += 1; if i < args.len() { weights_out   = args[i].clone(); } }
@@ -167,6 +174,32 @@ fn main() {
             progress.save(&progress_path).expect("Fortschritt nicht schreibbar");
             println!("Startzustand geschrieben: {out}, {progress_path}");
             println!("  Seed {run_seed} | bereits gespielt: {games_done} Partien");
+        }
+
+        Mode::Pretrain => {
+            if games_dir.is_empty() {
+                eprintln!("Fehler: --pretrain braucht ein Verzeichnis mit .json- oder .pgn-Partien.");
+                return;
+            }
+            let cfg = PretrainConfig {
+                weights_path: weights_path.clone(),
+                weights_out:  if weights_out.is_empty() { weights_path } else { weights_out },
+                opt_state_path: opt_state,
+                data_dir:  games_dir,
+                lr,
+                epochs,
+                log_every: log_every as usize,
+            };
+            match dist::pretrain(cfg) {
+                Ok(s) => println!(
+                    "\n{} Partien, {} Stellungen, {} Epoche(n) in {:.1} min | Schritte {}",
+                    s.games, s.positions, epochs, s.seconds / 60.0, s.steps,
+                ),
+                Err(e) => {
+                    eprintln!("Pre-Training fehlgeschlagen: {e}");
+                    std::process::exit(1);
+                }
+            }
         }
 
         Mode::Generate => {
@@ -291,7 +324,7 @@ fn main() {
     }
 }
 
-enum Mode { Train, Stats, Export, Supervised, Generate, Learn, InitState }
+enum Mode { Train, Stats, Export, Supervised, Generate, Learn, InitState, Pretrain }
 
 fn print_help() {
     println!("Chaturaji NNUE TD(λ) Trainer\n");
@@ -325,6 +358,8 @@ fn print_help() {
     println!("  --init-state         Startzustand aus --db (oder frisch) schreiben");
     println!("  --generate <datei>   Partien gegen eingefrorene Gewichte spielen → JSONL");
     println!("  --learn <verz>       JSONL-Partien nachspielen und TD-Updates anwenden");
+    println!("  --pretrain <verz>    Supervised Pre-Training aus echten Partien (dateibasiert)");
+    println!("  --epochs <n>         Durchläufe über den Datensatz    [Standard: 1]");
     println!("  --weights <datei>    Gewichte (Ein-/Ausgabe)               [Standard: weights.json]");
     println!("  --weights-out <d>    Ziel für neue Gewichte               [Standard: wie --weights]");
     println!("  --opt-state <datei>  Adam-Momente über Runden hinweg      [Standard: opt_state.bin]");

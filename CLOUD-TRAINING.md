@@ -118,6 +118,48 @@ Arena oder das WASM-Frontend einfach herunterladen und wie bisher verwenden.
 Der Fortschritt steht in der Zusammenfassung jedes Lern-Jobs (∅ Loss, ∅ Züge,
 Schritte, Lernrate) und in `progress.json`.
 
+## Supervised Pre-Training
+
+*Actions → NNUE-Pre-Training → Run workflow.* Ein einzelner Job, keine Shards:
+SGD geht die Stellungen der Reihe nach durch, da ist nichts zu parallelisieren.
+
+Gemessen: ~1.900 Stellungen/s, also gut **neun Minuten** für den ganzen
+Datensatz, bei 35 MB Speicherbedarf. Aus 1.000 Dateien werden 758 Partien mit
+90.771 Stellungen.
+
+Dafür muss `game_data.tar.gz` einmalig ans Release `nnue-state`:
+
+```bash
+cd ~/chaturaji && tar czf game_data.tar.gz game_data      # 215 MB → 32 MB
+```
+
+Das Ergebnis überschreibt `weights.json` **nicht**, sondern liegt als
+`weights-pretrained.json` daneben. Ein Pre-Training zieht das Netz auf eine
+andere Zielverteilung — ob das besser ist, entscheidet die Arena, nicht der
+Workflow. Übernehmen ist ein bewusster zweiter Schritt.
+
+Zwei Dinge, die man vorher wissen sollte:
+
+**Ein Viertel der Partien fällt weg.** `parse_positions_from_pgn` verwirft eine
+ganze Partie, sobald ein einziger Zug nicht in `Rules::legal_moves` auftaucht —
+gemessen 242 von 1.000 Dateien. Es liegt nicht am Datenformat: alle 1.000 haben
+`pgn4` und `points1-4`. Es ist eine Abweichung zwischen den aufgezeichneten
+Partien und der Regelimplementierung, und dieselbe Implementierung spielt auch
+die Engine-Züge.
+
+**Das TD-Netz sagt echte Ausgänge schlechter vorher als ein untrainiertes.**
+Auf denselben 758 Partien gemessen:
+
+| Netz | ∅ Loss |
+|---|---|
+| frisch initialisiert | 0,19 – 0,28 |
+| TD-Netz, 3.181.677 Schritte | 1,31 – 1,44 |
+| Referenz: konstante Ausgabe 0 | ≈ 0,55 |
+
+Schlechter als konstant Null ist keine bloße Verteilungsverschiebung. Solange
+das nicht geklärt ist, ist ein Pre-Training auf dem TD-Netz ein Schuss ins
+Dunkle — deshalb die Option `start_from: frisch`.
+
 ## Grenzen, die man kennen sollte
 
 - **Kein Ersatz für eine schnelle Maschine.** Pro Kern ist ein Runner eher

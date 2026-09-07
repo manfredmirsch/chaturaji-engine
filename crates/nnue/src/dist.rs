@@ -43,7 +43,9 @@ use chaturaji_engine::book::OpeningBook;
 
 use crate::features::INPUT_SIZE;
 use crate::network::{Layer, NnueNetwork, Traces, H1, H2, OUTPUT};
+use crate::pgn_import::{load_games_from_dir, load_games_from_json_dir};
 use crate::selfplay::{final_targets, game_seed, play_batch, GameJob, SelfPlayConfig};
+use crate::supervised::run_supervised;
 
 // ─── Zeitplan: ε und Lernrate aus der globalen Partienummer ───────────────────
 
@@ -320,6 +322,71 @@ pub fn generate(cfg: GenerateConfig) -> io::Result<GenerateStats> {
         avg_plies: if done > 0 { plies as f32 / done as f32 } else { 0.0 },
         seconds:   start.elapsed().as_secs_f64(),
         hit_budget,
+    })
+}
+
+// ─── Supervised Pre-Training ──────────────────────────────────────────────────
+
+pub struct PretrainConfig {
+    pub weights_path:   String,
+    pub weights_out:    String,
+    pub opt_state_path: String,
+    pub data_dir:       String,
+    pub lr:             f32,
+    pub epochs:         u32,
+    pub log_every:      usize,
+}
+
+pub struct PretrainStats {
+    pub games:     usize,
+    pub positions: usize,
+    pub steps:     u64,
+    pub seconds:   f64,
+}
+
+/// Supervised Pre-Training aus echten Partien, mit Gewichten als Datei.
+///
+/// Inhaltlich dasselbe wie der bisherige `--json-dir`-Pfad; abweichend ist nur
+/// die Persistenz: Gewichte und Adam-Momente liegen als Dateien statt in der
+/// SQLite-DB, damit ein Runner sie über ein Release beziehen kann.
+///
+/// Die Partien werden einmal geladen und dann `epochs`-mal durchlaufen. Ein
+/// Durchlauf ist billig genug (gemessen ~1.900 Stellungen/s), dass sich das
+/// Nachladen nicht lohnt.
+pub fn pretrain(cfg: PretrainConfig) -> io::Result<PretrainStats> {
+    let start = Instant::now();
+    let mut net = load_or_init_weights(&cfg.weights_path, cfg.lr, 0.9)?;
+
+    match load_opt_state(&cfg.opt_state_path, &mut net) {
+        Ok(true)  => println!("Adam-Momente übernommen."),
+        Ok(false) => println!("Keine Adam-Momente gefunden — Start bei 0."),
+        Err(e)    => eprintln!("Warnung: Optimizer-Zustand nicht lesbar ({e}); Start bei 0."),
+    }
+    net.lr = cfg.lr;
+
+    let mut games = load_games_from_json_dir(&cfg.data_dir);
+    games.extend(load_games_from_dir(&cfg.data_dir));
+    if games.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("keine verwertbaren Partien in '{}'", cfg.data_dir),
+        ));
+    }
+    let positions: usize = games.iter().map(|g| g.positions.len()).sum();
+
+    for epoch in 1..=cfg.epochs.max(1) {
+        println!("\n─── Epoche {epoch}/{} ───", cfg.epochs.max(1));
+        run_supervised(&mut net, &games, cfg.log_every);
+    }
+
+    save_weights(&cfg.weights_out, &net)?;
+    save_opt_state(&cfg.opt_state_path, &net)?;
+
+    Ok(PretrainStats {
+        games: games.len(),
+        positions,
+        steps: net.steps,
+        seconds: start.elapsed().as_secs_f64(),
     })
 }
 
