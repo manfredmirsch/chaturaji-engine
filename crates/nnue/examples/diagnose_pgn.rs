@@ -21,6 +21,19 @@ use chaturaji_core::piece::{Color, PieceKind};
 use chaturaji_core::rules::Rules;
 use chaturaji_nnue::pgn_import::parse_move_token;
 
+/// Bitmaske: welche gegnerischen Könige greift `mover` an?
+fn attacked_king_set(board: &Board, mover: Color) -> u8 {
+    let attacked = Rules::attacked_squares(board, mover);
+    let mut set = 0u8;
+    for c in Color::ALL {
+        if c != mover && board.active[c.idx()]
+           && board.bb[c.idx()][PieceKind::King.idx()] & attacked != 0 {
+            set |= 1 << c.idx();
+        }
+    }
+    set
+}
+
 /// Wer steht auf dem Feld?
 fn piece_at(board: &Board, sq: u8) -> Option<(Color, PieceKind)> {
     for c in Color::ALL {
@@ -181,6 +194,10 @@ fn main() {
     let mut quit_games     = 0usize;
     // Fehlbetrag je Spieler: bleibt hier etwas übrig, fehlt noch eine Regel.
     let mut diffs: BTreeMap<i32, usize> = BTreeMap::new();
+    let mut variant_hits = [0usize; 4];
+    // (Zahl der '+' in der Notation, von uns gezählte Könige im Schach)
+    let mut check_matrix: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+    let mut fresh_matrix: BTreeMap<(usize, usize), usize> = BTreeMap::new();
     let mut plus2_pattern: BTreeMap<usize, usize> = BTreeMap::new();
     let mut other_pattern: BTreeMap<usize, usize> = BTreeMap::new();
 
@@ -230,7 +247,20 @@ fn main() {
 
             let legal = Rules::legal_moves(&board);
             if let Some(mv) = legal.iter().find(|m| m.from == from_sq && m.to == to_sq) {
-                board = Rules::apply_with_effects(&board, *mv);
+                let mover = board.to_move;
+                let next  = Rules::apply_with_effects(&board, *mv);
+                // Die Notation sagt selbst, wie viele Könige der Zug ins Schach
+                // setzt: ein `+` je König. Das ist der schärfste Maßstab für
+                // unsere Erkennung, den es gibt.
+                let noted = token.chars().filter(|&c| c == '+').count();
+                let ours  = Rules::count_attacked_kings(&next, mover);
+                // Neu ins Schach gesetzt: nach dem Zug angegriffen, vorher nicht.
+                let before_set = attacked_king_set(&board, mover);
+                let after_set  = attacked_king_set(&next,  mover);
+                let fresh = (after_set & !before_set).count_ones() as usize;
+                *check_matrix.entry((noted, ours)).or_default() += 1;
+                *fresh_matrix.entry((noted, fresh)).or_default() += 1;
+                board = next;
                 continue;
             }
 
@@ -272,7 +302,25 @@ fn main() {
         ok += 1;
         if quits > 0 { quit_games += 1; }
 
-        // Gegenprobe gegen chess.com.
+        // Vier Varianten des Endstands in einem Durchlauf vergleichen.
+        let base = board.scores.as_array();
+        let survivors: Vec<Color> = Color::ALL.into_iter()
+            .filter(|c| board.active[c.idx()]).collect();
+        let standing_kings = Color::ALL.iter()
+            .filter(|&&c| !board.active[c.idx()])
+            .filter(|&&c| board.pieces(c, PieceKind::King) != 0)
+            .count() as i32;
+        let variant = |per_king: i32, per_survivor: i32| -> [i32; 4] {
+            let mut sc = base;
+            if survivors.len() == 1 {
+                sc[survivors[0].idx()] += standing_kings * per_king;
+            } else {
+                for c in &survivors { sc[c.idx()] += per_survivor; }
+            }
+            sc
+        };
+        let cands = [variant(3, 0), variant(1, 0), variant(3, 2), variant(1, 2)];
+
         let replayed = Rules::final_scores(&board);
         let recorded: Option<[i32; 4]> = (|| Some([
             json["points1"].as_i64()? as i32,
@@ -281,6 +329,9 @@ fn main() {
             json["points4"].as_i64()? as i32,
         ]))();
         if let Some(rec) = recorded {
+            for (i, sc) in cands.iter().enumerate() {
+                if *sc == rec { variant_hits[i] += 1; }
+            }
             if rec == replayed {
                 score_match += 1;
             } else {
@@ -320,6 +371,34 @@ fn main() {
         for f in failures.iter().take(5) {
             println!("  {} | Halbzug {} | {:?}\n      {}", f.file, f.ply, f.token, f.detail);
         }
+    }
+
+    println!("\nSchach-Erkennung: Notation '+' gegen eigene Zaehlung");
+    println!("  {:>10} {:>10} {:>10}", "Notation", "wir", "Zuege");
+    for ((noted, ours), n) in &check_matrix {
+        let mark = if noted == ours { "" } else { "   <- weicht ab" };
+        println!("  {noted:>10} {ours:>10} {n:>10}{mark}");
+    }
+
+    let agree = |m: &BTreeMap<(usize, usize), usize>| -> (usize, usize) {
+        let mut ok = 0; let mut bad = 0;
+        for ((a, b), n) in m { if a == b { ok += n } else { bad += n } }
+        (ok, bad)
+    };
+    let (a1, b1) = agree(&check_matrix);
+    let (a2, b2) = agree(&fresh_matrix);
+    println!("\nNotation gegen Zustand nach dem Zug : {a1} gleich, {b1} abweichend");
+    println!("Notation gegen neu gegebene Schachs: {a2} gleich, {b2} abweichend");
+    println!("  {:>10} {:>10} {:>10}", "Notation", "neu", "Zuege");
+    for ((noted, fresh), n) in &fresh_matrix {
+        let mark = if noted == fresh { "" } else { "   <- weicht ab" };
+        println!("  {noted:>10} {fresh:>10} {n:>10}{mark}");
+    }
+
+    println!("\nEndstands-Varianten, exakte Treffer von {ok}:");
+    for (i, name) in ["A: 3/Koenig", "B: 1/Koenig", "C: 3/Koenig + 2/Ueberlebender", "D: 1/Koenig + 2/Ueberlebender"].iter().enumerate() {
+        println!("  {name:<30} {:>6}  ({:.1} %)", variant_hits[i],
+                 variant_hits[i] as f64 * 100.0 / ok as f64);
     }
 
     println!("\nMuster \"+2 fuer jeden Ueberlebenden, sonst 0\" nach Zahl der Ueberlebenden:");

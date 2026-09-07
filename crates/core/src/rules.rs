@@ -11,6 +11,9 @@ use crate::board::{bit, Board, Move};
 use crate::movegen::MoveGen;
 use crate::piece::{Color, PieceKind};
 
+/// Punkte je Überlebendem, wenn die Partie an der Zugobergrenze endet.
+const SURVIVOR_BONUS: i32 = 2;
+
 /// Stateless rule-checker.
 pub struct Rules;
 
@@ -30,29 +33,44 @@ impl Rules {
     /// Apply `mv` and return the new board with all rule effects resolved.
     pub fn apply_with_effects(board: &Board, mv: Move) -> Board {
         let mut next = board.apply_move(mv);
-        Self::apply_check_bonus(&mut next, mv.mover);
+        Self::apply_check_bonus(board, &mut next, mv.mover);
         next
     }
 
     // ─── Check bonus ──────────────────────────────────────────────────────────
     //
-    // After a move, count how many active opponents' kings are attacked
-    // by the mover's pieces.
-    //   1 king attacked → no bonus (single check)
-    //   2 kings attacked → +1 (double check)
-    //   3 kings attacked → +5 (triple check)
+    // Der Zug muss das Mehrfachschach *geben*:
+    //   2 Könige im Schach, vorher weniger → +1 (Doppelschach)
+    //   3 Könige im Schach, vorher weniger → +5 (Dreifachschach)
     //
-    // "Attacked" means the mover has at least one legal move to the king's square.
+    // "Im Schach" heißt: der Ziehende hat mindestens einen Zug auf das Feld
+    // des Königs.
+    //
+    // Der Vergleich mit dem Zustand *vor* dem Zug ist der Kern der Regel und
+    // nicht bloß eine Feinheit. Ohne ihn kassiert ein Spieler den Punkt in
+    // jedem weiteren Zug erneut, solange die Lage bestehen bleibt — auch für
+    // einen Zug am anderen Ende des Bretts, der mit dem Schach nichts zu tun
+    // hat. In Partie 100021895 vergab die Engine so zwei Boni, chess.com nur
+    // einen: nur `Rd9-i9++` trägt dort das Doppelkreuz, der Königszug
+    // `Kj6-k5` bei Halbzug 94 nicht — dort standen schon vorher zwei Könige
+    // im Schach.
 
-    fn apply_check_bonus(board: &mut Board, mover: Color) {
-        let attacked_kings = Self::count_attacked_kings(board, mover);
-        let bonus = match attacked_kings {
+    fn apply_check_bonus(before: &Board, next: &mut Board, mover: Color) {
+        let after_count = Self::count_attacked_kings(next, mover);
+        if after_count < 2 { return; }
+
+        // Vor dem Zug in derselben Zählweise: nur aktive Gegner. Wer gerade
+        // seinen König verloren hat, zählt hinterher nicht mehr mit, und ein
+        // geschlagener König ist kein gegebenes Schach.
+        if after_count <= Self::count_attacked_kings(before, mover) { return; }
+
+        let bonus = match after_count {
             2 => 1,
             3 => 5,
             _ => 0,
         };
         if bonus > 0 {
-            board.scores.add(mover, bonus);
+            next.scores.add(mover, bonus);
         }
     }
 
@@ -103,16 +121,32 @@ impl Rules {
 
     // ─── Endstand ─────────────────────────────────────────────────────────────
 
-    /// Der Punktestand am Partieende, einschließlich der Könige, die nie
-    /// geschlagen wurden.
+    /// Der Punktestand am Partieende.
     ///
-    /// Bleibt genau ein Spieler übrig, bekommt er für jeden noch stehenden
-    /// König eines Ausgeschiedenen 3 Punkte. Stehen bleiben können nur Könige
-    /// von Spielern, die aufgegeben haben — ein geschlagener König ist vom
-    /// Brett und wurde bereits verrechnet.
+    /// Zwei Zuschläge, die sich gegenseitig ausschließen:
     ///
-    /// An 1000 echten Partien gemessen: ohne diesen Zuschlag stimmten 352
-    /// Endstände mit chess.com überein, mit ihm 927.
+    /// * **Genau ein Überlebender** — die Partie endete durch Ausscheiden der
+    ///   anderen. Er bekommt 3 Punkte für jeden noch stehenden König eines
+    ///   Ausgeschiedenen. Stehen bleiben können nur Könige von Spielern, die
+    ///   aufgegeben haben oder in die Zeit gelaufen sind; ein geschlagener
+    ///   König ist vom Brett und schon verrechnet.
+    /// * **Mehrere Überlebende** — dann endete die Partie an der Zugobergrenze,
+    ///   denn durch Ausscheiden bliebe nur einer übrig. Jeder Überlebende
+    ///   bekommt 2 Punkte.
+    ///
+    /// Die Zahl der Überlebenden ist hier also nicht bloß ein Kriterium,
+    /// sondern verrät den Grund des Endes — deshalb braucht die Funktion
+    /// keinen zusätzlichen Parameter dafür.
+    ///
+    /// Beides an allen 11.558 Partien aus `game_data/` gemessen. Der Anteil
+    /// exakt getroffener Endstände:
+    ///
+    /// | Regel                          | Treffer |
+    /// |--------------------------------|---------|
+    /// | ohne beide Zuschläge           |  30,6 % |
+    /// | nur 3 je König                 |  92,7 % |
+    /// | 1 statt 3 je König             |  35,9 % |
+    /// | 3 je König + 2 je Überlebendem |  96,5 % |
     pub fn final_scores(board: &Board) -> [i32; 4] {
         let mut scores = board.scores.as_array();
 
@@ -121,13 +155,20 @@ impl Rules {
             .filter(|c| board.active[c.idx()])
             .collect();
 
-        if let [winner] = survivors[..] {
-            let standing_kings = Color::ALL
-                .iter()
-                .filter(|&&c| !board.active[c.idx()])
-                .filter(|&&c| board.pieces(c, PieceKind::King) != 0)
-                .count() as i32;
-            scores[winner.idx()] += standing_kings * PieceKind::King.capture_value();
+        match survivors[..] {
+            [winner] => {
+                let standing_kings = Color::ALL
+                    .iter()
+                    .filter(|&&c| !board.active[c.idx()])
+                    .filter(|&&c| board.pieces(c, PieceKind::King) != 0)
+                    .count() as i32;
+                scores[winner.idx()] += standing_kings * PieceKind::King.capture_value();
+            }
+            _ => {
+                for c in &survivors {
+                    scores[c.idx()] += SURVIVOR_BONUS;
+                }
+            }
         }
 
         scores
@@ -226,15 +267,33 @@ mod tests {
         assert_eq!(scores[Color::Blue.idx()], 0);
     }
 
-    /// Solange mehr als einer aktiv ist, gibt es den Zuschlag nicht — sonst
-    /// bekäme eine im Ply-Limit abgebrochene Selbstspiel-Partie Punkte
-    /// geschenkt.
+    /// Endet die Partie an der Zugobergrenze, bekommt jeder Überlebende 2
+    /// Punkte. Mehr als ein Überlebender heißt genau das: durch Ausscheiden
+    /// bliebe nur einer übrig.
     #[test]
-    fn no_survivor_bonus_while_game_runs() {
+    fn move_limit_end_gives_two_per_survivor() {
         let mut b = Board::default();
         b.active = [true, true, false, false];
         b.scores.add(Color::Red, 7);
-        assert_eq!(Rules::final_scores(&b), b.scores.as_array());
+
+        let scores = Rules::final_scores(&b);
+        assert_eq!(scores[Color::Red.idx()],   7 + 2);
+        assert_eq!(scores[Color::Blue.idx()],  2);
+        assert_eq!(scores[Color::Yellow.idx()], 0, "Ausgeschiedene bekommen nichts");
+        assert_eq!(scores[Color::Green.idx()],  0);
+    }
+
+    /// Die beiden Zuschläge schließen sich aus: bei einem Überlebenden zählen
+    /// die Könige, nicht die 2 Punkte.
+    #[test]
+    fn survivor_bonus_and_king_bonus_are_exclusive() {
+        let mut b = Board::empty();
+        b.bb[Color::Red.idx()][PieceKind::King.idx()]  = bit(sq(0, 0));
+        b.bb[Color::Blue.idx()][PieceKind::King.idx()] = bit(sq(7, 7));
+        b.active = [true, false, false, false];
+
+        let scores = Rules::final_scores(&b);
+        assert_eq!(scores[Color::Red.idx()], 3, "ein stehender König, keine 2 Punkte obendrauf");
     }
 
     // ─── Doppel- und Dreifachschach ───────────────────────────────────────────
@@ -320,6 +379,35 @@ mod tests {
         // Ein roter Bauer stellt die Datei zwischen Boot und blauem König zu.
         b.bb[Color::Red.idx()][PieceKind::Pawn.idx()] = bit(sq(3, 5));
         assert_eq!(score_after_boat_step(&b), 0, "nur noch Gelb im Angriff = einfaches Schach");
+    }
+
+    /// Der Zug muss das Doppelschach *geben*. Bleibt die Lage nur bestehen,
+    /// gibt es nichts — sonst kassierte ein Spieler den Punkt in jedem
+    /// weiteren Zug erneut, auch für einen Zug am anderen Ende des Bretts.
+    #[test]
+    fn standing_double_check_is_not_paid_again() {
+        let mut b = Board::empty();
+        // Boot steht bereits auf d4 und greift zwei Könige an.
+        b.bb[Color::Red.idx()][PieceKind::Boat.idx()] = bit(sq(3, 3));
+        b.bb[Color::Red.idx()][PieceKind::King.idx()] = bit(sq(0, 0));
+        b.bb[Color::Red.idx()][PieceKind::Pawn.idx()] = bit(sq(6, 0));
+        b.bb[Color::Blue.idx()][PieceKind::King.idx()]   = bit(sq(3, 7)); // Datei 3
+        b.bb[Color::Yellow.idx()][PieceKind::King.idx()] = bit(sq(7, 3)); // Rang 3
+        b.bb[Color::Green.idx()][PieceKind::King.idx()]  = bit(sq(0, 6)); // abseits
+        b.to_move = Color::Red;
+
+        assert_eq!(Rules::count_attacked_kings(&b, Color::Red), 2,
+                   "das Doppelschach steht schon vor dem Zug");
+
+        // Ein Bauernzug am anderen Ende des Bretts ändert daran nichts.
+        let mv = Rules::legal_moves(&b)
+            .into_iter()
+            .find(|m| m.from == sq(6, 0) && m.to == sq(6, 1))
+            .expect("Bauer muss ziehen können");
+        let after = Rules::apply_with_effects(&b, mv);
+
+        assert_eq!(Rules::count_attacked_kings(&after, Color::Red), 2, "Lage unverändert");
+        assert_eq!(after.scores.get(Color::Red), 0, "kein neues Schach, kein Punkt");
     }
 
     /// Der Bonus richtet sich nach der Zahl der Könige, nicht nach der Zahl
