@@ -1,0 +1,208 @@
+name: NNUE-Training
+
+# Startet mehrere Trainingsrunden hintereinander.
+#
+# Warum Runden statt eines langen Jobs: GitHub bricht jeden Job nach 6 Stunden
+# hart ab, und ein hart abgebrochener Job lädt nichts mehr hoch. Eine Runde ist
+# deshalb so geschnitten, dass sie sicher darunter bleibt; der Zustand geht über
+# das Release `nnue-state` in die nächste.
+#
+# Der Durchsatz kommt nicht aus schnelleren Kernen — ein GitHub-Runner ist pro
+# Kern eher langsamer als ein Notebook — sondern aus `shards` × 4 vCPU, die
+# gleichzeitig spielen.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: 'Runden in diesem Lauf (1–8)'
+        type: number
+        default: 4
+      games:
+        description: 'Partien je Runde (über alle Shards zusammen)'
+        type: number
+        default: 6400
+      shards:
+        description: 'Parallele Erzeuger (Kontingent: 20 gleichzeitige Jobs)'
+        type: number
+        default: 16
+      depth:
+        description: 'Suchtiefe im Self-Play'
+        type: number
+        default: 4
+      beam_width:
+        description: 'Beam-Breite an inneren Knoten (0 = alle)'
+        type: number
+        default: 6
+      max_moves:
+        description: 'Halbzüge je Partie'
+        type: number
+        default: 150
+      lambda:
+        description: 'TD-Lambda'
+        type: string
+        default: '0.7'
+      lr:
+        description: 'Basis-Lernrate (vor dem Zerfall)'
+        type: string
+        default: '0.0013'
+      lr_decay:
+        description: 'Lernraten-Zerfall je save_every Partien'
+        type: string
+        default: '0.99'
+      save_every:
+        description: 'Partien je Lernraten-Schritt'
+        type: number
+        default: 200
+      max_seconds:
+        description: 'Zeitbudget je Erzeuger in Sekunden (Notbremse, nicht Sollwert)'
+        type: number
+        default: 2700
+      use_book:
+        description: 'Eröffnungsbuch verwenden (muss im Release liegen)'
+        type: boolean
+        default: true
+
+# Zwei gleichzeitige Läufe würden sich gegenseitig die Gewichte im Release
+# überschreiben. Nicht abbrechen, sondern anstellen.
+concurrency:
+  group: nnue-training
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  round-1:
+    uses: ./.github/workflows/nnue-round.yml
+    with:
+      games:       ${{ inputs.games }}
+      shards:      ${{ inputs.shards }}
+      depth:       ${{ inputs.depth }}
+      beam_width:  ${{ inputs.beam_width }}
+      max_moves:   ${{ inputs.max_moves }}
+      lambda:      ${{ inputs.lambda }}
+      lr:          ${{ inputs.lr }}
+      lr_decay:    ${{ inputs.lr_decay }}
+      save_every:  ${{ inputs.save_every }}
+      max_seconds: ${{ inputs.max_seconds }}
+      use_book:    ${{ inputs.use_book }}
+
+  round-2:
+    needs: round-1
+    if: ${{ inputs.rounds >= 2 }}
+    uses: ./.github/workflows/nnue-round.yml
+    with:
+      games:       ${{ inputs.games }}
+      shards:      ${{ inputs.shards }}
+      depth:       ${{ inputs.depth }}
+      beam_width:  ${{ inputs.beam_width }}
+      max_moves:   ${{ inputs.max_moves }}
+      lambda:      ${{ inputs.lambda }}
+      lr:          ${{ inputs.lr }}
+      lr_decay:    ${{ inputs.lr_decay }}
+      save_every:  ${{ inputs.save_every }}
+      max_seconds: ${{ inputs.max_seconds }}
+      use_book:    ${{ inputs.use_book }}
+
+  round-3:
+    needs: round-2
+    if: ${{ inputs.rounds >= 3 }}
+    uses: ./.github/workflows/nnue-round.yml
+    with:
+      games:       ${{ inputs.games }}
+      shards:      ${{ inputs.shards }}
+      depth:       ${{ inputs.depth }}
+      beam_width:  ${{ inputs.beam_width }}
+      max_moves:   ${{ inputs.max_moves }}
+      lambda:      ${{ inputs.lambda }}
+      lr:          ${{ inputs.lr }}
+      lr_decay:    ${{ inputs.lr_decay }}
+      save_every:  ${{ inputs.save_every }}
+      max_seconds: ${{ inputs.max_seconds }}
+      use_book:    ${{ inputs.use_book }}
+
+  round-4:
+    needs: round-3
+    if: ${{ inputs.rounds >= 4 }}
+    uses: ./.github/workflows/nnue-round.yml
+    with:
+      games:       ${{ inputs.games }}
+      shards:      ${{ inputs.shards }}
+      depth:       ${{ inputs.depth }}
+      beam_width:  ${{ inputs.beam_width }}
+      max_moves:   ${{ inputs.max_moves }}
+      lambda:      ${{ inputs.lambda }}
+      lr:          ${{ inputs.lr }}
+      lr_decay:    ${{ inputs.lr_decay }}
+      save_every:  ${{ inputs.save_every }}
+      max_seconds: ${{ inputs.max_seconds }}
+      use_book:    ${{ inputs.use_book }}
+
+  round-5:
+    needs: round-4
+    if: ${{ inputs.rounds >= 5 }}
+    uses: ./.github/workflows/nnue-round.yml
+    with:
+      games:       ${{ inputs.games }}
+      shards:      ${{ inputs.shards }}
+      depth:       ${{ inputs.depth }}
+      beam_width:  ${{ inputs.beam_width }}
+      max_moves:   ${{ inputs.max_moves }}
+      lambda:      ${{ inputs.lambda }}
+      lr:          ${{ inputs.lr }}
+      lr_decay:    ${{ inputs.lr_decay }}
+      save_every:  ${{ inputs.save_every }}
+      max_seconds: ${{ inputs.max_seconds }}
+      use_book:    ${{ inputs.use_book }}
+
+  round-6:
+    needs: round-5
+    if: ${{ inputs.rounds >= 6 }}
+    uses: ./.github/workflows/nnue-round.yml
+    with:
+      games:       ${{ inputs.games }}
+      shards:      ${{ inputs.shards }}
+      depth:       ${{ inputs.depth }}
+      beam_width:  ${{ inputs.beam_width }}
+      max_moves:   ${{ inputs.max_moves }}
+      lambda:      ${{ inputs.lambda }}
+      lr:          ${{ inputs.lr }}
+      lr_decay:    ${{ inputs.lr_decay }}
+      save_every:  ${{ inputs.save_every }}
+      max_seconds: ${{ inputs.max_seconds }}
+      use_book:    ${{ inputs.use_book }}
+
+  round-7:
+    needs: round-6
+    if: ${{ inputs.rounds >= 7 }}
+    uses: ./.github/workflows/nnue-round.yml
+    with:
+      games:       ${{ inputs.games }}
+      shards:      ${{ inputs.shards }}
+      depth:       ${{ inputs.depth }}
+      beam_width:  ${{ inputs.beam_width }}
+      max_moves:   ${{ inputs.max_moves }}
+      lambda:      ${{ inputs.lambda }}
+      lr:          ${{ inputs.lr }}
+      lr_decay:    ${{ inputs.lr_decay }}
+      save_every:  ${{ inputs.save_every }}
+      max_seconds: ${{ inputs.max_seconds }}
+      use_book:    ${{ inputs.use_book }}
+
+  round-8:
+    needs: round-7
+    if: ${{ inputs.rounds >= 8 }}
+    uses: ./.github/workflows/nnue-round.yml
+    with:
+      games:       ${{ inputs.games }}
+      shards:      ${{ inputs.shards }}
+      depth:       ${{ inputs.depth }}
+      beam_width:  ${{ inputs.beam_width }}
+      max_moves:   ${{ inputs.max_moves }}
+      lambda:      ${{ inputs.lambda }}
+      lr:          ${{ inputs.lr }}
+      lr_decay:    ${{ inputs.lr_decay }}
+      save_every:  ${{ inputs.save_every }}
+      max_seconds: ${{ inputs.max_seconds }}
+      use_book:    ${{ inputs.use_book }}

@@ -1,0 +1,240 @@
+name: NNUE-Runde
+
+# Eine Trainingsrunde: N Runner spielen parallel Partien gegen dieselben,
+# eingefrorenen Gewichte, ein Lern-Job wendet daraus die TD(λ)-Updates an.
+#
+# Wird von nnue-train.yml mehrfach hintereinander aufgerufen. Der Zustand
+# (Gewichte, Adam-Momente, Fortschritt) liegt zwischen den Runden im Release
+# `nnue-state` — nicht im Git-Verlauf, der sonst je Runde um 7 MB wüchse.
+
+on:
+  workflow_call:
+    inputs:
+      games:        { type: number, required: true }
+      shards:       { type: number, required: true }
+      depth:        { type: number, required: true }
+      beam_width:   { type: number, required: true }
+      max_moves:    { type: number, required: true }
+      lambda:       { type: string, required: true }
+      lr:           { type: string, required: true }
+      lr_decay:     { type: string, required: true }
+      save_every:   { type: number, required: true }
+      max_seconds:  { type: number, required: true }
+      use_book:     { type: boolean, required: true }
+
+env:
+  STATE_TAG: nnue-state
+  CARGO_TERM_COLOR: always
+  # `gh` liest das Repository sonst aus dem Git-Remote — den gibt es im
+  # Lern-Job nicht, der ohne Checkout auskommt.
+  GH_REPO: ${{ github.repository }}
+
+permissions:
+  contents: write        # für das Release, in dem der Trainingszustand liegt
+
+jobs:
+  # ── Einmal bauen, einmal Zustand holen ─────────────────────────────────────
+  #
+  # Die Erzeuger-Jobs bekommen fertige Binary und Gewichte als Artefakt. Jeden
+  # Shard selbst kompilieren zu lassen kostet bei `lto = "fat"` mehrere Minuten
+  # mal Shard-Zahl — bei 16 Shards mehr als eine Stunde Rechenzeit für nichts.
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.shards.outputs.matrix }}
+      round:  ${{ steps.state.outputs.round }}
+      games_done: ${{ steps.state.outputs.games_done }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cargo-Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Trainer bauen
+        run: cargo build --release -p chaturaji-nnue --bin train_nnue
+
+      - name: Trainingszustand aus Release holen
+        id: state
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p state
+          if gh release view "$STATE_TAG" >/dev/null 2>&1; then
+            gh release download "$STATE_TAG" --dir state --clobber
+          else
+            echo "Release '$STATE_TAG' existiert noch nicht."
+          fi
+
+          if [ ! -f state/weights.json ]; then
+            echo "::error::Kein weights.json im Release '$STATE_TAG'."
+            echo "::error::Einmalig anlegen: Release '$STATE_TAG' erstellen und weights.json,"
+            echo "::error::progress.json und (falls gewünscht) opening_book.json anhängen."
+            exit 1
+          fi
+          if [ ! -f state/progress.json ]; then
+            echo "::warning::Kein progress.json — der Lauf startet bei Runde 0, Partie 0."
+          fi
+          if [ "${{ inputs.use_book }}" = "true" ] && [ ! -f state/opening_book.json ]; then
+            echo "::error::use_book ist an, aber im Release liegt kein opening_book.json."
+            echo "::error::Ohne Buch trainiert das Netz auf anderen Eröffnungen als lokal."
+            exit 1
+          fi
+
+          round=$(jq -r '.round // 0'      state/progress.json 2>/dev/null || echo 0)
+          done=$(jq  -r '.games_done // 0' state/progress.json 2>/dev/null || echo 0)
+          echo "round=$round"      >> "$GITHUB_OUTPUT"
+          echo "games_done=$done"  >> "$GITHUB_OUTPUT"
+          echo "Runde $round, bisher $done Partien."
+
+      - name: Shard-Liste bauen
+        id: shards
+        run: |
+          set -euo pipefail
+          matrix=$(seq 0 $(( ${{ inputs.shards }} - 1 )) | jq -R . | jq -s -c .)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "Shards: $matrix"
+
+      # Artefaktnamen müssen innerhalb eines Workflow-Laufs eindeutig sein, und
+      # ein Lauf enthält bis zu acht Runden — deshalb überall die Rundennummer.
+      - name: Binary und Zustand weiterreichen
+        uses: actions/upload-artifact@v4
+        with:
+          name: nnue-run-input-${{ steps.state.outputs.round }}
+          retention-days: 3
+          path: |
+            target/release/train_nnue
+            state/weights.json
+            state/progress.json
+            state/opening_book.json
+          if-no-files-found: error
+
+  # ── Partien erzeugen (parallel) ────────────────────────────────────────────
+  generate:
+    needs: prepare
+    runs-on: ubuntu-latest
+    # Läuft in den 6-Stunden-Deckel von GitHub Actions; `--max-seconds` sorgt
+    # dafür, dass der Job vorher selbst aufhört und seine Partien noch hochlädt.
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false        # ein ausgefallener Shard darf die Runde nicht kippen
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: nnue-run-input-${{ needs.prepare.outputs.round }}
+
+      - name: Partien spielen
+        run: |
+          set -euo pipefail
+          chmod +x target/release/train_nnue
+          BOOK_ARGS="--no-book"
+          if [ "${{ inputs.use_book }}" = "true" ]; then
+            BOOK_ARGS="--book state/opening_book.json"
+          fi
+          mkdir -p out
+          ./target/release/train_nnue \
+            --generate "out/shard-$(printf '%03d' ${{ matrix.shard }}).jsonl" \
+            --weights  state/weights.json \
+            --progress state/progress.json \
+            --shards ${{ inputs.shards }} \
+            --shard  ${{ matrix.shard }} \
+            --games  ${{ inputs.games }} \
+            --depth  ${{ inputs.depth }} \
+            --beam-width ${{ inputs.beam_width }} \
+            --max-moves  ${{ inputs.max_moves }} \
+            --max-seconds ${{ inputs.max_seconds }} \
+            $BOOK_ARGS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nnue-games-${{ needs.prepare.outputs.round }}-${{ matrix.shard }}
+          path: out/*.jsonl
+          retention-days: 3
+          if-no-files-found: error
+
+  # ── Lernen (sequentiell, ein Job) ──────────────────────────────────────────
+  learn:
+    needs: [prepare, generate]
+    if: always() && needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: nnue-run-input-${{ needs.prepare.outputs.round }}
+
+      - name: Alle Shards einsammeln
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nnue-games-${{ needs.prepare.outputs.round }}-*
+          merge-multiple: true
+          path: games
+
+      - name: Optimizer-Zustand holen
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release download "$STATE_TAG" --pattern 'opt_state.bin' --dir state --clobber \
+            || echo "::warning::Kein opt_state.bin im Release — Adam-Momente starten bei 0."
+        # Der Optimizer-Zustand ist ~2,8 MB und wird nur hier gebraucht; die
+        # Erzeuger-Shards müssen ihn nicht mitschleppen.
+
+      - name: TD-Updates anwenden
+        run: |
+          set -euo pipefail
+          chmod +x target/release/train_nnue
+          ls -la games/
+          ./target/release/train_nnue \
+            --learn games \
+            --weights     state/weights.json \
+            --weights-out state/weights.json \
+            --opt-state   state/opt_state.bin \
+            --progress    state/progress.json \
+            --lambda     ${{ inputs.lambda }} \
+            --lr         ${{ inputs.lr }} \
+            --lr-decay   ${{ inputs.lr_decay }} \
+            --save-every ${{ inputs.save_every }} \
+            | tee learn.log
+
+      - name: Zustand zurückschreiben
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload "$STATE_TAG" \
+            state/weights.json state/progress.json state/opt_state.bin --clobber
+
+      - name: Zusammenfassung
+        if: always()
+        run: |
+          {
+            echo "### NNUE-Runde"
+            echo
+            echo '```'
+            tail -5 learn.log 2>/dev/null || echo "(kein Log)"
+            echo '```'
+            echo
+            echo "Fortschritt:"
+            echo '```json'
+            cat state/progress.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Gewichte als Artefakt sichern
+        uses: actions/upload-artifact@v4
+        with:
+          name: nnue-weights-round-${{ needs.prepare.outputs.round }}
+          path: |
+            state/weights.json
+            state/progress.json
+          retention-days: 30
