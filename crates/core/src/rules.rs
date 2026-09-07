@@ -39,40 +39,46 @@ impl Rules {
 
     // ─── Check bonus ──────────────────────────────────────────────────────────
     //
-    // Ein Zug bringt den Bonus, wenn danach zwei (+1) oder drei (+5) fremde
-    // Könige im Schach des Ziehenden stehen, die es vorher nicht taten.
+    // Ein Zug bringt den Bonus, wenn er zwei (+1) oder drei (+5) fremde Könige
+    // NEU bedroht.
     //
-    // "Im Schach" heißt: der Ziehende hat einen Zug auf das Feld des Königs.
+    // Neu bedroht heißt: der König wird von einem Feld aus angegriffen, von
+    // dem aus er vorher nicht angegriffen wurde. Zwei Dinge sind damit nicht
+    // verlangt:
     //
-    // Zwei Dinge sind dabei nicht verlangt. Erstens muss es nicht dieselbe
-    // Figur sein — ein Abzugsschach zählt genauso wie ein Angriff der
-    // gezogenen Figur. Zweitens zählt nicht der Zustand, sondern die
-    // Veränderung: ein schon bestehendes Schach bringt nichts mehr.
+    //   * Es muss nicht dieselbe Figur sein. Ein Abzugsschach zählt so gut wie
+    //     ein Angriff der gezogenen Figur.
+    //   * Der König muss vorher nicht schachfrei gewesen sein. Stand er schon
+    //     im Schach und kommt ein zweiter Angreifer hinzu, ist das eine neue
+    //     Bedrohung.
     //
-    // Beides an echten Partien belegt:
+    // Der zweite Punkt ist der Unterschied zwischen "neue Bedrohung" und
+    // "neues Schach", und er ist groß: über alle 11.558 Partien aus
+    // `game_data/` steigen die exakt getroffenen Endstände von 11.274 auf
+    // 11.444.
+    //
+    // An echten Partien belegt:
     //
     //   Partie 100010111, Zug 23, Rot: `g7-g8++` (Bauer d4-d5) gibt Blau auf
     //     e6 Schach — mehr kann der Bauer nicht, er erreicht nur dieses Feld.
-    //     Das zweite Schach kommt aus der freigelegten Linie. chess.com zahlt.
-    //   Partie 100058474, Zug 28, Grün: `Rk10-e10+` (Boot h7-b7) setzt Gelb
-    //     auf b3 ins Schach, während Rot auf b1 schon vom Läufer auf f5
-    //     bedroht wird. Zwei Könige im Schach, aber nur eines neu — ein `+`
-    //     in der Notation, kein Punkt.
+    //     Das zweite Schach kommt aus der Linie, die er freigibt.
+    //   Partie 100058474, Zug 28, Grün: `Rk10-e10+` (Boot h7-b7) bedroht Gelb
+    //     auf b3 neu, während Rots König auf b1 schon vom Läufer auf f5
+    //     angegriffen wird — unverändert derselbe Angriff. Eine neue
+    //     Bedrohung, ein `+` in der Notation, kein Punkt.
     //
-    // Über alle 11.558 Partien aus `game_data/` gemessen (exakte Endstände):
+    // Gemessene Lesarten (exakte Endstände von 11.558):
     //
-    //   neu im Schach des Ziehenden       11.274   97,5 %   ← diese Regel
+    //   neu bedrohte Könige               11.444   99,0 %   <- diese Regel
+    //   Könige neu im Schach des Ziehers  11.274   97,5 %
     //   die gezogene Figur allein         11.276   97,6 %
     //   neu im Schach, von wem auch immer 10.813   93,6 %
     //   alle Könige im Schach              5.095   44,1 %
     //
-    // Die ersten beiden liegen zwei Partien auseinander und sind damit nicht
-    // unterscheidbar; den Ausschlag gab Partie 100010111, die nur mit dieser
-    // Lesart aufgeht. Der verbleibende Fehler ist einseitig — wir zahlen nur
-    // noch zu wenig, nie zu viel.
+    // Der verbleibende Fehler ist einseitig: wir zahlen nur noch zu wenig.
 
     fn apply_check_bonus(before: &Board, next: &mut Board, mover: Color) {
-        let bonus = match Self::newly_checked_by_mover(before, next, mover) {
+        let bonus = match Self::newly_threatened_kings(before, next, mover) {
             2 => 1,
             3 => 5,
             _ => 0,
@@ -90,6 +96,45 @@ impl Rules {
             d != c && board.active[d.idx()]
                 && Self::attacked_squares(board, d) & king != 0
         })
+    }
+
+    /// Wie viele fremde Könige bedroht der Ziehende nach dem Zug **neu**?
+    ///
+    /// Neu heißt: der König wird von einem Feld aus angegriffen, von dem aus
+    /// er vorher nicht angegriffen wurde. Das trifft die gezogene Figur auf
+    /// ihrem neuen Feld genauso wie eine Figur, deren Linie der Zug erst
+    /// freigelegt hat.
+    ///
+    /// Der Unterschied zum Zustand des Königs: stand er schon im Schach und
+    /// kommt eine zweite Figur hinzu, ist das eine neue Bedrohung, aber kein
+    /// neues Schach.
+    fn newly_threatened_kings(before: &Board, after: &Board, mover: Color) -> usize {
+        // Je Brett ein Durchgang durch die Zuggenerierung, danach nur noch
+        // Bitmasken — die Königsfelder ändern sich durch einen fremden Zug
+        // nicht.
+        let mut tmp_before = before.clone();
+        tmp_before.to_move = mover;
+        let mut tmp_after = after.clone();
+        tmp_after.to_move = mover;
+        let moves_before = MoveGen::generate(&tmp_before);
+        let moves_after  = MoveGen::generate(&tmp_after);
+
+        let attackers = |moves: &[Move], target: u8| -> u64 {
+            moves.iter()
+                .filter(|m| m.to == target)
+                .fold(0u64, |acc, m| acc | bit(m.from))
+        };
+
+        Color::ALL
+            .iter()
+            .filter(|&&c| c != mover && after.active[c.idx()])
+            .filter(|&&c| {
+                let king = after.pieces(c, PieceKind::King);
+                if king == 0 { return false; }
+                let ksq = king.trailing_zeros() as u8;
+                attackers(&moves_after, ksq) & !attackers(&moves_before, ksq) != 0
+            })
+            .count()
     }
 
     /// Wie viele fremde Könige stehen nach dem Zug im Schach *des Ziehenden*,
@@ -500,6 +545,37 @@ mod tests {
 
         assert_eq!(Rules::count_attacked_kings(&after, Color::Red), 2, "Lage unverändert");
         assert_eq!(after.scores.get(Color::Red), 0, "kein neues Schach, kein Punkt");
+    }
+
+    /// Ein zweiter Angreifer auf einen bereits bedrohten König zählt als neue
+    /// Bedrohung. Genau hier gehen "neue Bedrohung" und "neues Schach"
+    /// auseinander.
+    ///
+    /// Aufbau: der Läufer auf a1 greift Blaus König auf d4 schon vor dem Zug
+    /// an. Das Boot zieht c1→c4 und bedroht von dort beide — Blau zusätzlich
+    /// über Reihe 4, Gelb auf a4 zum ersten Mal.
+    #[test]
+    fn a_second_attacker_counts_as_a_new_threat() {
+        let mut b = Board::empty();
+        b.bb[Color::Red.idx()][PieceKind::Bishop.idx()] = bit(sq(0, 0)); // a1
+        b.bb[Color::Red.idx()][PieceKind::Boat.idx()]   = bit(sq(2, 0)); // c1
+        b.bb[Color::Red.idx()][PieceKind::King.idx()]   = bit(sq(7, 0)); // h1
+        b.bb[Color::Blue.idx()][PieceKind::King.idx()]   = bit(sq(3, 3)); // d4
+        b.bb[Color::Yellow.idx()][PieceKind::King.idx()] = bit(sq(0, 3)); // a4
+        b.bb[Color::Green.idx()][PieceKind::King.idx()]  = bit(sq(7, 7)); // h8
+        b.to_move = Color::Red;
+
+        assert_eq!(Rules::count_attacked_kings(&b, Color::Red), 1,
+                   "Blau steht schon vor dem Zug im Schach des Läufers");
+
+        let mv = Rules::legal_moves(&b)
+            .into_iter()
+            .find(|m| m.from == sq(2, 0) && m.to == sq(2, 3))
+            .expect("Boot muss c1→c4 ziehen können");
+        let after = Rules::apply_with_effects(&b, mv);
+
+        assert_eq!(after.scores.get(Color::Red), 1,
+                   "Blau kommt ein Angreifer hinzu, Gelb ist neu bedroht");
     }
 
     /// Zwei Könige im Schach, aber von zwei verschiedenen Figuren — kein
