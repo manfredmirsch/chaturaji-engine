@@ -17,12 +17,12 @@
 //! (`chaturaji_engine::utility`), und Netz- und Handbewertung sind an einem
 //! Blattknoten direkt vergleichbar.
 
-/// Platzwertung: Platz 1 → 1, Platz 2 → ½, Platz 3 → −½, Platz 4 → −1.
+/// Platzwertung: Platz 1 → 1, Platz 2 → ⅓, Platz 3 → −⅓, Platz 4 → −1.
+/// Summe 0, gleicher Abstand zwischen benachbarten Plätzen.
 ///
-/// Die Abstände sind bewusst ungleich. Maßgeblich ist, was das Spiel
-/// tatsächlich belohnt, und das ist die Glicko-Wertung: Platz 1 und 2 gewinnen
-/// Rating, Platz 3 und 4 verlieren es. An allen 1.977 Partien aus `game_data/`
-/// gemessen:
+/// Die Vorzeichen bilden ab, was das Spiel belohnt: Platz 1 und 2 gewinnen
+/// Glicko-Rating, Platz 3 und 4 verlieren es. An allen 1.977 Partien aus
+/// `game_data/` gemessen:
 ///
 /// | Platz | Ø Rating-Änderung | Median | Anteil positiv |
 /// |-------|-------------------|--------|----------------|
@@ -31,14 +31,21 @@
 /// |   3   |            −1,97  |  −5,4  |          38 %  |
 /// |   4   |            −6,83  | −11,2  |          32 %  |
 ///
-/// Auf ±1 normiert ergibt der Median [1, 0,52, −0,49, −1] — daher die Halben.
-/// Der Mittelwert spräche für ⅓, aber Glicko-Änderungen hängen an Gegnerstärke
-/// und Rating-Unsicherheit, und einzelne Ausreißer ziehen ihn nach außen; der
-/// Median beschreibt den typischen Fall besser.
+/// Auf ±1 normiert ergibt der Mittelwert [1, 0,37, −0,30, −1], der Median
+/// [1, 0,52, −0,49, −1]. Die Vorzeichen stimmen in beiden Fällen mit den
+/// gleichen Abständen überein.
 ///
-/// Die Summe bleibt 0, das Netz sagt also weiterhin eine Verteilung ohne
-/// Ablage vorher.
-pub const PLACE_VALUE: [f32; 4] = [1.0, 0.5, -0.5, -1.0];
+/// Der Median wurde ausprobiert — `[1, ½, −½, −1]` — und in der Arena
+/// verworfen: zwei sonst gleiche Netze, nur mit dieser Zielgröße vortrainiert,
+/// über drei Seeds gemessen mit −0,31 / −0,48 / −0,44 Platzwert für die
+/// halbierte Fassung (|t| = 2,4 bis 6,2).
+///
+/// Die naheliegende Erklärung: gleiche Abstände heißen, dass ein Platz besser
+/// überall gleich viel wert ist. Mit ½ wäre die Lücke zwischen Platz 2 und 3
+/// doppelt so groß wie die zwischen 1 und 2 — das Netz optimierte dann auf
+/// „in der oberen Hälfte landen" statt auf Gewinnen, und die Suche verlöre den
+/// Anreiz, aus dem zweiten Platz den ersten zu machen.
+pub const PLACE_VALUE: [f32; 4] = [1.0, 1.0 / 3.0, -1.0 / 3.0, -1.0];
 
 /// Endpunkte → Platzwertung je Spieler.
 ///
