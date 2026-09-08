@@ -129,6 +129,9 @@ impl NnueNetwork {
     ///
     /// L1 wird sparse über die Bitboards aus `cache.bb` aktualisiert.
     pub fn backward_into_traces(&self, cache: &ForwardCache, traces: &mut Traces, lambda: f32) {
+        traces.step += 1;
+        traces.ensure_pow(lambda, traces.step);
+
         // L3: d/d(tanh) = 1 - tanh². Zeile i gehört zur Ausgabe i, hier ist
         // die Trennung schon durch die Form der Schicht gegeben.
         let d_tanh: Vec<f32> = cache.a3.iter().map(|&a| 1.0 - a * a).collect();
@@ -178,22 +181,38 @@ impl NnueNetwork {
                 let g: f32 = (0..H2).map(|i| self.l2.w[i][j] * delta2[i]).sum();
                 delta1[j] = g * if cache.z1[j] > 0.0 { 1.0 } else { 0.0 };
             }
+            // Der gespeicherte Wert gilt für `l1_last[feat]`; bis jetzt sind
+            // `step - l1_last` Halbzüge vergangen, die nachzuholen sind. Der
+            // Faktor hängt nur von der Spalte ab und steht deshalb vor der
+            // Schleife über die Neuronen.
+            let step = traces.step;
             for_each_feature(&cache.bb, |feat| {
+                let f = traces.lambda_pow[(step - traces.l1_last[feat]) as usize];
                 for i in 0..H1 {
-                    traces.l1w[o][i][feat] = lambda * traces.l1w[o][i][feat] + delta1[i];
+                    traces.l1w[o][i][feat] = f * traces.l1w[o][i][feat] + delta1[i];
                 }
             });
             // Dichter Block: derselbe Trace, nur mit dem Eingabewert skaliert.
             for (k, &x) in cache.dense.iter().enumerate() {
                 if x == 0.0 { continue; }
                 let col = PIECE_FEATURES + k;
+                let f = traces.lambda_pow[(step - traces.l1_last[col]) as usize];
                 for i in 0..H1 {
-                    traces.l1w[o][i][col] = lambda * traces.l1w[o][i][col] + delta1[i] * x;
+                    traces.l1w[o][i][col] = f * traces.l1w[o][i][col] + delta1[i] * x;
                 }
             }
             for i in 0..H1 {
                 traces.l1b[o][i] = lambda * traces.l1b[o][i] + delta1[i];
             }
+        }
+
+        // Erst wenn alle vier Ausgaben nachgezogen sind, gilt der neue Stand —
+        // sonst rechnete die zweite Ausgabe mit einem bereits fortgeschriebenen
+        // Zeitstempel und ließe den Zerfall aus.
+        let step = traces.step;
+        for_each_feature(&cache.bb, |feat| { traces.l1_last[feat] = step; });
+        for (k, &x) in cache.dense.iter().enumerate() {
+            if x != 0.0 { traces.l1_last[PIECE_FEATURES + k] = step; }
         }
     }
 
@@ -245,8 +264,11 @@ impl NnueNetwork {
         // L1 (H1 × INPUT_SIZE) – nur gesehene Features
         for i in 0..H1 {
             for &j in &traces.l1_seen_list {
+                // Spalten, die seit ihrer letzten Berührung untätig waren,
+                // haben ihren Zerfall noch vor sich.
+                let f = traces.decay_of(j);
                 let g: f32 = (0..OUTPUT)
-                    .map(|o| td_error[o] * traces.l1w[o][i][j])
+                    .map(|o| td_error[o] * traces.l1w[o][i][j] * f)
                     .sum();
                 adam_step!(self.l1.mw[i][j], self.l1.vw[i][j], self.l1.w[i][j], g);
             }
@@ -481,6 +503,19 @@ pub struct Traces {
     pub l1b: [Vec<f32>; OUTPUT],       // [OUTPUT][H1]
     pub l1_seen: Vec<bool>,      // O(1)-Lookup welche Features gesehen wurden
     pub l1_seen_list: Vec<usize>,// Liste für schnelle Iteration
+    /// Je Spalte der Schritt, in dem sie zuletzt berührt wurde.
+    ///
+    /// TD(λ) verlangt, dass *jede* Komponente in jedem Schritt zerfällt. Alle
+    /// gesehenen Spalten je Halbzug durchzumultiplizieren wäre bei 1293
+    /// Spalten × 256 Neuronen × 4 Ausgaben zu teuer, deshalb der Zerfall auf
+    /// Vorrat: gespeichert wird der Wert zum Zeitpunkt `l1_last`, und wer ihn
+    /// liest, multipliziert λ^(step − l1_last) dazu.
+    pub l1_last: Vec<u32>,
+    /// Halbzug innerhalb der laufenden Partie.
+    pub step: u32,
+    /// λ^k, bei Bedarf verlängert. `lambda_of` merkt sich, für welches λ.
+    lambda_pow: Vec<f32>,
+    lambda_of:  f32,
     // L2: dense, ebenfalls je Ausgabe
     pub l2w: [Vec<Vec<f32>>; OUTPUT],  // [OUTPUT][H2][H1]
     pub l2b: [Vec<f32>; OUTPUT],
@@ -496,11 +531,39 @@ impl Traces {
             l1b:          std::array::from_fn(|_| vec![0.0; H1]),
             l1_seen:      vec![false; INPUT_SIZE],
             l1_seen_list: Vec::with_capacity(256),
+            l1_last:      vec![0; INPUT_SIZE],
+            step:         0,
+            lambda_pow:   vec![1.0],
+            lambda_of:    f32::NAN,
             l2w:          std::array::from_fn(|_| vec![vec![0.0; H1]; H2]),
             l2b:          std::array::from_fn(|_| vec![0.0; H2]),
             l3w:          vec![vec![0.0; H2]; OUTPUT],
             l3b:          vec![0.0; OUTPUT],
         }
+    }
+
+    /// Tabelle für λ^k bis `k_max` bereitstellen.
+    fn ensure_pow(&mut self, lambda: f32, k_max: u32) {
+        if self.lambda_of != lambda {
+            self.lambda_pow.clear();
+            self.lambda_pow.push(1.0);
+            self.lambda_of = lambda;
+        }
+        while self.lambda_pow.len() <= k_max as usize {
+            let next = self.lambda_pow.last().unwrap() * lambda;
+            self.lambda_pow.push(next);
+        }
+    }
+
+    /// Der Zerfallsfaktor für Spalte `j` zum aktuellen Schritt.
+    #[inline]
+    fn decay_of(&self, j: usize) -> f32 {
+        self.lambda_pow[(self.step - self.l1_last[j]) as usize]
+    }
+
+    /// Der tatsächliche Trace-Wert einer L1-Spalte, Zerfall eingerechnet.
+    pub fn l1_effective(&self, o: usize, i: usize, j: usize) -> f32 {
+        self.l1w[o][i][j] * self.decay_of(j)
     }
 
     /// Zurücksetzen zwischen zwei Partien.
@@ -517,8 +580,12 @@ impl Traces {
             for row in &mut self.l2w[o] { row.fill(0.0); }
             self.l2b[o].fill(0.0);
         }
-        for &j in &self.l1_seen_list { self.l1_seen[j] = false; }
+        for &j in &self.l1_seen_list {
+            self.l1_seen[j] = false;
+            self.l1_last[j] = 0;
+        }
         self.l1_seen_list.clear();
+        self.step = 0;
         for row in &mut self.l3w { row.fill(0.0); }
         self.l3b.fill(0.0);
     }
@@ -529,7 +596,8 @@ impl Traces {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chaturaji_core::board::Board;
+    use chaturaji_core::board::{bit, Board};
+    use chaturaji_core::piece::{Color, PieceKind};
 
     #[test]
     fn forward_output_in_tanh_range() {
@@ -616,6 +684,46 @@ mod tests {
         assert!(geprueft >= 10, "zu wenige aussagekräftige Proben: {geprueft}");
         assert_eq!(falsch, 0,
                    "{falsch} von {geprueft} Schritten zeigen gegen den Gradienten");
+    }
+
+    /// Ein Feature, das seit Halbzügen nicht mehr auf dem Brett steht, muss
+    /// seinen Trace verloren haben — sonst fließt es mit vollem Gewicht in
+    /// jedes weitere Update der Partie ein.
+    ///
+    /// Genau das tat die frühere Fassung: sie multiplizierte nur die gerade
+    /// aktiven Spalten mit λ. Nach zehn Halbzügen stand ein untätiger Trace
+    /// noch bei 1,0 statt bei 0,7^10 ≈ 0,028.
+    #[test]
+    fn inactive_features_decay() {
+        let net = NnueNetwork::new(0.001, 0.9);
+        let lambda = 0.7f32;
+        let mut traces = Traces::new();
+
+        // Erster Halbzug: Startstellung, alle Startfelder werden gesehen.
+        let start = Board::default();
+        net.backward_into_traces(&net.forward_full(&start), &mut traces, lambda);
+
+        // Eine Spalte, die in der Startstellung aktiv war …
+        let feat = traces.l1_seen_list[0];
+        let nach_erstem: Vec<f32> = (0..OUTPUT).map(|o| traces.l1_effective(o, 0, feat)).collect();
+
+        // … und die in der Folgestellung fehlt: leeres Brett, nur zwei Könige.
+        let mut leer = Board::empty();
+        leer.bb[Color::Red.idx()][PieceKind::King.idx()]  = bit(0);
+        leer.bb[Color::Blue.idx()][PieceKind::King.idx()] = bit(63);
+        for _ in 0..10 {
+            net.backward_into_traces(&net.forward_full(&leer), &mut traces, lambda);
+        }
+
+        let erwartet = lambda.powi(10);
+        for o in 0..OUTPUT {
+            let jetzt = traces.l1_effective(o, 0, feat);
+            if nach_erstem[o].abs() < 1e-9 { continue; }
+            let verhaeltnis = jetzt / nach_erstem[o];
+            assert!((verhaeltnis - erwartet).abs() < 1e-4,
+                    "Ausgabe {o}: Trace steht bei {verhaeltnis:.4} des Ausgangswerts, \
+                     erwartet {erwartet:.4}");
+        }
     }
 
     /// Die vier Traces müssen sich unterscheiden — sonst wäre die Trennung
