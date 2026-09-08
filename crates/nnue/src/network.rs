@@ -115,8 +115,22 @@ impl NnueNetwork {
 
     /// Backpropagation → akkumuliert Eligibility Traces.
     /// L1 wird sparse über die Bitboards aus `cache.bb` aktualisiert.
+    /// Backpropagation → akkumuliert Eligibility Traces, je Ausgabe getrennt.
+    ///
+    /// Für jede Ausgabe `o` wird der Gradient von V_o nach den Gewichten
+    /// gebildet und mit λ in den zugehörigen Trace gemischt. Erst
+    /// `apply_td_update` verrechnet sie mit den vier Fehlerkomponenten.
+    ///
+    /// Vorher lief das anders: ein einziger Trace über die *Summe* der
+    /// Ausgaben, den der Update dann mit `td_error[i % OUTPUT]` skalierte —
+    /// verstecktes Neuron `i` bekam also die Fehlerkomponente `i mod 4`
+    /// zugeteilt. Das ist nicht die Kettenregel, sondern eine Zuordnung ohne
+    /// Bezug zur Netzstruktur.
+    ///
+    /// L1 wird sparse über die Bitboards aus `cache.bb` aktualisiert.
     pub fn backward_into_traces(&self, cache: &ForwardCache, traces: &mut Traces, lambda: f32) {
-        // L3: d/d(tanh) = 1 - tanh²
+        // L3: d/d(tanh) = 1 - tanh². Zeile i gehört zur Ausgabe i, hier ist
+        // die Trennung schon durch die Form der Schicht gegeben.
         let d_tanh: Vec<f32> = cache.a3.iter().map(|&a| 1.0 - a * a).collect();
         for i in 0..OUTPUT {
             let d = d_tanh[i];
@@ -126,35 +140,13 @@ impl NnueNetwork {
             traces.l3b[i] = lambda * traces.l3b[i] + d;
         }
 
-        // L2
-        let mut delta2 = vec![0.0f32; H2];
-        for j in 0..H2 {
-            let g: f32 = (0..OUTPUT).map(|i| self.l3.w[i][j] * d_tanh[i]).sum();
-            delta2[j] = g * if cache.z2[j] > 0.0 { 1.0 } else { 0.0 };
-        }
-        for i in 0..H2 {
-            for j in 0..H1 {
-                traces.l2w[i][j] = lambda * traces.l2w[i][j] + delta2[i] * cache.a1[j];
-            }
-            traces.l2b[i] = lambda * traces.l2b[i] + delta2[i];
-        }
-
-        // L1: sparse über Bitboards — kein Vec<usize> nötig
-        let mut delta1 = vec![0.0f32; H1];
-        for j in 0..H1 {
-            let g: f32 = (0..H2).map(|i| self.l2.w[i][j] * delta2[i]).sum();
-            delta1[j] = g * if cache.z1[j] > 0.0 { 1.0 } else { 0.0 };
-        }
+        // Die gesehenen Feature-Spalten hängen nicht von der Ausgabe ab.
         for_each_feature(&cache.bb, |feat| {
             if !traces.l1_seen[feat] {
                 traces.l1_seen[feat] = true;
                 traces.l1_seen_list.push(feat);
             }
-            for i in 0..H1 {
-                traces.l1w[i][feat] = lambda * traces.l1w[i][feat] + delta1[i];
-            }
         });
-        // Dichter Block: derselbe Trace, nur mit dem Eingabewert skaliert.
         for (k, &x) in cache.dense.iter().enumerate() {
             if x == 0.0 { continue; }
             let col = PIECE_FEATURES + k;
@@ -162,16 +154,55 @@ impl NnueNetwork {
                 traces.l1_seen[col] = true;
                 traces.l1_seen_list.push(col);
             }
-            for i in 0..H1 {
-                traces.l1w[i][col] = lambda * traces.l1w[i][col] + delta1[i] * x;
-            }
         }
-        for i in 0..H1 {
-            traces.l1b[i] = lambda * traces.l1b[i] + delta1[i];
+
+        let mut delta2 = vec![0.0f32; H2];
+        let mut delta1 = vec![0.0f32; H1];
+
+        for o in 0..OUTPUT {
+            // L2: nur der Pfad über Ausgabe o, nicht die Summe über alle.
+            for j in 0..H2 {
+                delta2[j] = self.l3.w[o][j] * d_tanh[o]
+                          * if cache.z2[j] > 0.0 { 1.0 } else { 0.0 };
+            }
+            for i in 0..H2 {
+                let (row, a1) = (&mut traces.l2w[o][i], &cache.a1);
+                for j in 0..H1 {
+                    row[j] = lambda * row[j] + delta2[i] * a1[j];
+                }
+                traces.l2b[o][i] = lambda * traces.l2b[o][i] + delta2[i];
+            }
+
+            // L1
+            for j in 0..H1 {
+                let g: f32 = (0..H2).map(|i| self.l2.w[i][j] * delta2[i]).sum();
+                delta1[j] = g * if cache.z1[j] > 0.0 { 1.0 } else { 0.0 };
+            }
+            for_each_feature(&cache.bb, |feat| {
+                for i in 0..H1 {
+                    traces.l1w[o][i][feat] = lambda * traces.l1w[o][i][feat] + delta1[i];
+                }
+            });
+            // Dichter Block: derselbe Trace, nur mit dem Eingabewert skaliert.
+            for (k, &x) in cache.dense.iter().enumerate() {
+                if x == 0.0 { continue; }
+                let col = PIECE_FEATURES + k;
+                for i in 0..H1 {
+                    traces.l1w[o][i][col] = lambda * traces.l1w[o][i][col] + delta1[i] * x;
+                }
+            }
+            for i in 0..H1 {
+                traces.l1b[o][i] = lambda * traces.l1b[o][i] + delta1[i];
+            }
         }
     }
 
-    /// Adam-Update mit TD-Fehler-Skalierung.
+    /// Adam-Update: Δw = α · Σ_o e_o(w) · td_error[o].
+    ///
+    /// Die vier Traces werden hier zu einem Gradienten verrechnet, bevor ein
+    /// einziger Adam-Schritt je Gewicht läuft. Die teure Hälfte — die beiden
+    /// gleitenden Mittel, Wurzel und Division — fällt damit weiterhin nur
+    /// einmal an; vervierfacht hat sich nur das Zusammensetzen des Gradienten.
     pub fn apply_td_update(&mut self, traces: &Traces, td_error: &[f32; 4]) {
         let lr  = self.lr;
         let t   = (self.steps + 1) as f32;
@@ -197,25 +228,29 @@ impl NnueNetwork {
             adam_step!(self.l3.mb[i], self.l3.vb[i], self.l3.b[i], gb);
         }
 
-        // L2 (H2 × H1)
+        // L2 (H2 × H1): Σ_o err_o · e_o — die Kettenregel über alle vier
+        // Ausgaben. Der Adam-Schritt bleibt einer je Gewicht; nur der Gradient
+        // wird aus vier Traces zusammengesetzt.
         for i in 0..H2 {
-            let err = td_error[i % OUTPUT];
             for j in 0..H1 {
-                let g = err * traces.l2w[i][j];
+                let g: f32 = (0..OUTPUT)
+                    .map(|o| td_error[o] * traces.l2w[o][i][j])
+                    .sum();
                 adam_step!(self.l2.mw[i][j], self.l2.vw[i][j], self.l2.w[i][j], g);
             }
-            let gb = err * traces.l2b[i];
+            let gb: f32 = (0..OUTPUT).map(|o| td_error[o] * traces.l2b[o][i]).sum();
             adam_step!(self.l2.mb[i], self.l2.vb[i], self.l2.b[i], gb);
         }
 
         // L1 (H1 × INPUT_SIZE) – nur gesehene Features
         for i in 0..H1 {
-            let err = td_error[i % OUTPUT];
             for &j in &traces.l1_seen_list {
-                let g = err * traces.l1w[i][j];
+                let g: f32 = (0..OUTPUT)
+                    .map(|o| td_error[o] * traces.l1w[o][i][j])
+                    .sum();
                 adam_step!(self.l1.mw[i][j], self.l1.vw[i][j], self.l1.w[i][j], g);
             }
-            let gb = err * traces.l1b[i];
+            let gb: f32 = (0..OUTPUT).map(|o| td_error[o] * traces.l1b[o][i]).sum();
             adam_step!(self.l1.mb[i], self.l1.vb[i], self.l1.b[i], gb);
         }
 
@@ -426,15 +461,30 @@ pub struct ForwardCache {
     pub z3: Vec<f32>, pub a3: Vec<f32>,
 }
 
+/// Eligibility Traces — je Ausgabe getrennt.
+///
+/// Das Netz hat vier Ausgaben, und TD(λ) braucht für jede einen eigenen Trace:
+/// der Update lautet Δw = α · Σ_o e_o(w) · td_error[o]. Ein einzelner Trace
+/// über die Summe der Ausgaben lässt sich hinterher nicht mehr auf die
+/// einzelnen Fehlerkomponenten verteilen.
+///
+/// Der Unterschied ist hier besonders folgenreich, weil die vier Platzwerte
+/// gegenläufig sind — sie summieren sich zu null. Die Fehlerkomponenten haben
+/// also typischerweise entgegengesetzte Vorzeichen, und eine falsche Zuordnung
+/// zieht dieselben geteilten Merkmale gleichzeitig in beide Richtungen.
+///
+/// L3 braucht die Trennung nicht: Zeile `o` der Ausgabeschicht gehört
+/// ausschließlich zur Ausgabe `o`.
 pub struct Traces {
     // L1: sparse – nur gesehene Feature-Spalten werden benutzt
-    pub l1w: Vec<Vec<f32>>,      // [H1][INPUT_SIZE]
-    pub l1b: Vec<f32>,           // [H1]
+    pub l1w: [Vec<Vec<f32>>; OUTPUT],  // [OUTPUT][H1][INPUT_SIZE]
+    pub l1b: [Vec<f32>; OUTPUT],       // [OUTPUT][H1]
     pub l1_seen: Vec<bool>,      // O(1)-Lookup welche Features gesehen wurden
-    pub l1_seen_list: Vec<usize>,// sortierte Liste für schnelle Iteration
-    // L2 + L3: dense (klein)
-    pub l2w: Vec<Vec<f32>>,      // [H2][H1]
-    pub l2b: Vec<f32>,
+    pub l1_seen_list: Vec<usize>,// Liste für schnelle Iteration
+    // L2: dense, ebenfalls je Ausgabe
+    pub l2w: [Vec<Vec<f32>>; OUTPUT],  // [OUTPUT][H2][H1]
+    pub l2b: [Vec<f32>; OUTPUT],
+    // L3: Zeile o gehört zu Ausgabe o, keine Trennung nötig
     pub l3w: Vec<Vec<f32>>,      // [OUTPUT][H2]
     pub l3b: Vec<f32>,
 }
@@ -442,28 +492,33 @@ pub struct Traces {
 impl Traces {
     pub fn new() -> Self {
         Self {
-            l1w:          vec![vec![0.0; INPUT_SIZE]; H1],
-            l1b:          vec![0.0; H1],
+            l1w:          std::array::from_fn(|_| vec![vec![0.0; INPUT_SIZE]; H1]),
+            l1b:          std::array::from_fn(|_| vec![0.0; H1]),
             l1_seen:      vec![false; INPUT_SIZE],
             l1_seen_list: Vec::with_capacity(256),
-            l2w:          vec![vec![0.0; H1]; H2],
-            l2b:          vec![0.0; H2],
+            l2w:          std::array::from_fn(|_| vec![vec![0.0; H1]; H2]),
+            l2b:          std::array::from_fn(|_| vec![0.0; H2]),
             l3w:          vec![vec![0.0; H2]; OUTPUT],
             l3b:          vec![0.0; OUTPUT],
         }
     }
 
+    /// Zurücksetzen zwischen zwei Partien.
+    ///
+    /// L1 wird nur an den gesehenen Spalten geleert — das ist der Grund, warum
+    /// die Trace-Struktur über Partien hinweg wiederverwendet werden kann,
+    /// statt je Partie 5 MB neu zu belegen und zu nullen.
     pub fn reset(&mut self) {
-        // L1: nur gesehene Einträge zurücksetzen
-        for &j in &self.l1_seen_list {
-            for i in 0..H1 { self.l1w[i][j] = 0.0; }
-            self.l1_seen[j] = false;
+        for o in 0..OUTPUT {
+            for &j in &self.l1_seen_list {
+                for i in 0..H1 { self.l1w[o][i][j] = 0.0; }
+            }
+            self.l1b[o].fill(0.0);
+            for row in &mut self.l2w[o] { row.fill(0.0); }
+            self.l2b[o].fill(0.0);
         }
+        for &j in &self.l1_seen_list { self.l1_seen[j] = false; }
         self.l1_seen_list.clear();
-        self.l1b.fill(0.0);
-        // L2 + L3
-        for row in &mut self.l2w { row.fill(0.0); }
-        self.l2b.fill(0.0);
         for row in &mut self.l3w { row.fill(0.0); }
         self.l3b.fill(0.0);
     }
@@ -490,14 +545,102 @@ mod tests {
         assert_eq!(net.param_count(), expected);
     }
 
+    /// Der TD-Update muss dem Gradienten von J = Σ_o err_o · V_o folgen.
+    ///
+    /// Geprüft gegen numerische Ableitungen, also ohne sich auf eine zweite
+    /// Implementierung zu verlassen. Ausgewertet wird das Vorzeichen: Adam
+    /// normiert die Schrittweite, das Vorzeichen des Schritts ist aber das des
+    /// Gradienten, solange die Momente bei null starten.
+    ///
+    /// Mit dem früheren `td_error[i % OUTPUT]` bekam verstecktes Neuron `i`
+    /// die Fehlerkomponente `i mod 4` zugeteilt — bei gegenläufigen
+    /// Platzwerten zeigte der Schritt dann regelmäßig in die falsche Richtung.
+    #[test]
+    fn td_update_follows_the_true_gradient() {
+        let board = Board::default();
+        let error = [0.7f32, -0.3, 0.2, -0.6];
+
+        let ziel = |net: &NnueNetwork| -> f32 {
+            let v = net.forward(&board);
+            (0..OUTPUT).map(|o| error[o] * v[o]).sum()
+        };
+
+        let mut base = NnueNetwork::new(0.01, 0.9);
+        base.init_momentum();
+
+        // Ein TD-Schritt mit λ = 0: der Trace ist dann genau der Gradient.
+        let mut td = base.clone();
+        let cache = td.forward_full(&board);
+        let mut traces = Traces::new();
+        td.backward_into_traces(&cache, &mut traces, 0.0);
+        td.apply_td_update(&traces, &error);
+
+        let h = 1e-3f32;
+        let mut geprueft = 0;
+        let mut falsch = 0;
+
+        // Breit abtasten: bei zufälliger Initialisierung sind viele
+        // ReLU-Neuronen tot, dort ist der Gradient exakt null und das
+        // Vorzeichen nichtssagend.
+        let mut proben: Vec<(usize, usize, bool)> = Vec::new();
+        for i in 0..H2 {
+            for j in (0..H1).step_by(37) { proben.push((i, j, false)); }
+        }
+        for (n, i) in (0..H1).step_by(3).enumerate() {
+            let j = traces.l1_seen_list[n % traces.l1_seen_list.len()];
+            proben.push((i, j, true));
+        }
+
+        for (i, j, ist_l1) in proben {
+            if geprueft >= 60 { break; }
+            let mut plus  = base.clone();
+            let mut minus = base.clone();
+            if ist_l1 {
+                plus.l1.w[i][j]  += h;
+                minus.l1.w[i][j] -= h;
+            } else {
+                plus.l2.w[i][j]  += h;
+                minus.l2.w[i][j] -= h;
+            }
+            let num = (ziel(&plus) - ziel(&minus)) / (2.0 * h);
+            if num.abs() < 1e-4 { continue; }   // zu flach für ein Vorzeichen
+
+            let schritt = if ist_l1 { td.l1.w[i][j] - base.l1.w[i][j] }
+                          else      { td.l2.w[i][j] - base.l2.w[i][j] };
+            if schritt.abs() < 1e-9 { continue; }
+
+            geprueft += 1;
+            if num.signum() != schritt.signum() { falsch += 1; }
+        }
+
+        assert!(geprueft >= 10, "zu wenige aussagekräftige Proben: {geprueft}");
+        assert_eq!(falsch, 0,
+                   "{falsch} von {geprueft} Schritten zeigen gegen den Gradienten");
+    }
+
+    /// Die vier Traces müssen sich unterscheiden — sonst wäre die Trennung
+    /// nach Ausgaben nur Fassade.
+    #[test]
+    fn traces_differ_per_output() {
+        let net = NnueNetwork::new(0.001, 0.9);
+        let cache = net.forward_full(&Board::default());
+        let mut traces = Traces::new();
+        net.backward_into_traces(&cache, &mut traces, 0.7);
+
+        let feat = traces.l1_seen_list[0];
+        let werte: Vec<f32> = (0..OUTPUT).map(|o| traces.l1w[o][0][feat]).collect();
+        assert!(werte.windows(2).any(|w| (w[0] - w[1]).abs() > 1e-12),
+                "alle vier Traces gleich: {werte:?}");
+    }
+
     #[test]
     fn traces_reset_clears_state() {
         let mut t = Traces::new();
-        t.l1w[0][5] = 3.14;
+        for o in 0..OUTPUT { t.l1w[o][0][5] = 3.14; }
         t.l1_seen[5] = true;
         t.l1_seen_list.push(5);
         t.reset();
-        assert_eq!(t.l1w[0][5], 0.0);
+        for o in 0..OUTPUT { assert_eq!(t.l1w[o][0][5], 0.0, "Ausgabe {o}"); }
         assert!(!t.l1_seen[5]);
         assert!(t.l1_seen_list.is_empty());
     }

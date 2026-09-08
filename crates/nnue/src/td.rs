@@ -76,6 +76,10 @@ pub fn run(cfg: TrainConfig) {
     let mut epsilon = cfg.selfplay.epsilon_start;
     let zkeys       = ZobristKeys::new();
 
+    // Einmal anlegen statt je Partie: die Traces belegen mit vier
+    // Ausgaben rund 5 MB, und `reset` leert nur die gesehenen Spalten.
+    let mut traces = Traces::new();
+
     let mut acc_loss  = 0.0f32;
     let mut acc_moves = 0u32;
     let mut acc_games = 0u32;
@@ -86,7 +90,7 @@ pub fn run(cfg: TrainConfig) {
         let final_target = final_targets(&result.final_board);
         let n_steps = result.steps.len();
 
-        let mut traces    = Traces::new();
+        traces.reset();
         let mut game_loss = 0.0f32;
 
         for t in (0..n_steps).rev() {

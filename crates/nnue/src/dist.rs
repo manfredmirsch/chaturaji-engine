@@ -467,6 +467,10 @@ pub fn learn(cfg: LearnConfig) -> io::Result<LearnStats> {
     games.sort_by_key(|g| g.index);
     println!("{} Partien aus {} Dateien geladen.", games.len(), files.len());
 
+    // Einmal anlegen statt je Partie: die Traces belegen mit vier
+    // Ausgaben rund 5 MB, und `reset` leert nur die gesehenen Spalten.
+    let mut traces = Traces::new();
+
     let mut acc_loss  = 0.0f32;
     let mut acc_plies = 0u64;
     let mut learned   = 0u64;
@@ -503,7 +507,7 @@ pub fn learn(cfg: LearnConfig) -> io::Result<LearnStats> {
         let final_target = final_targets(&final_board);
         let n_steps = boards.len();
 
-        let mut traces    = Traces::new();
+        traces.reset();
         let mut game_loss = 0.0f32;
 
         for t in (0..n_steps).rev() {
