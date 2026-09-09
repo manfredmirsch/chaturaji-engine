@@ -81,8 +81,7 @@ das Repository je Runde um 7 MB.
    ```
 
    `games_done: 15037` ist die Partienzahl des bisherigen Laufs. Sie hält ε auf
-   dem Boden (0,05) und setzt den Lernraten-Zerfall fort: bei `--lr 0.0013`
-   ergibt das die zuletzt genutzten ≈ 0,00061.
+   dem Boden (0,05) und setzt den Lernraten-Zerfall fort.
 
 ## Starten
 
@@ -94,7 +93,7 @@ das Repository je Runde um 7 MB.
 | `games` | 6400 | Partien je Runde, über alle Shards zusammen |
 | `shards` | 16 | parallele Erzeuger (Kontingent: 20 gleichzeitige Jobs) |
 | `depth` / `beam_width` | 4 / 6 | Suchtiefe im Self-Play |
-| `lr` | 0,0013 | Basis-Lernrate *vor* dem Zerfall, nicht die effektive |
+| `lr` | 0,0001 | Basis-Lernrate *vor* dem Zerfall, nicht die effektive |
 | `max_seconds` | 2700 | Notbremse je Erzeuger, kein Sollwert |
 
 Gemessen (lokal, 4 Threads, `depth 4 --beam-width 6`): **20 Partien/min**,
@@ -102,6 +101,30 @@ Gemessen (lokal, 4 Threads, `depth 4 --beam-width 6`): **20 Partien/min**,
 der Lern-Job für 6400 Partien etwa 7 (er schafft rund 16 Partien/s). Ein Lauf
 mit 4 Runden liegt bei ~3,5 Stunden und 25.600 Partien — zum Vergleich: der
 bisherige lokale Lauf brauchte 13,5 Stunden für 10.000 Partien bei Tiefe 1.
+
+### Die Lernrate ist gemessen, nicht geraten
+
+Der Standard 0,0001 sieht klein aus, und der Vorgänger 0,0013 war es nicht
+etwa aus Übermut: er stammt aus der Zeit **vor** den beiden Korrekturen am
+TD-Update (echter Gradient statt `td_error[i % OUTPUT]`, Zerfall der
+Eligibility Traces auch für ruhende Features). Der falsche Gradient hatte die
+effektive Schrittweite gedämpft. Nach der Korrektur war derselbe Wert zu groß,
+und das Selbstspiel machte das Netz zuverlässig **schlechter** — was lange wie
+ein Fehler im TD-Ziel aussah.
+
+Eine Runde (6400 Partien, Tiefe 4, Beam 6, λ 0,7), gegen den vortrainierten
+Ausgangsstand in der Arena gemessen, nur `lr` verändert:
+
+| `lr` | Differenz A−B | t |
+|---|---|---|
+| 0,0013 | −0,61 | deutlich negativ |
+| 0,0001 | +0,6510 ± 0,0313 (Seed 1) | +20,78 |
+| 0,0001 | +0,6782 ± 0,0274 (Seed 42) | +24,79 |
+
+Wer künftig am Gradienten oder an den Traces etwas ändert, muss die Lernrate
+neu kalibrieren, bevor er ein negatives Arena-Ergebnis der Zielfunktion
+anlastet. Der ∅ Loss aus dem Lern-Job taugt dafür nicht — er misst nur, wie
+konsistent aufeinanderfolgende Bewertungen sind, nicht die Spielstärke.
 
 `max_seconds` greift nur, wenn ein Runner deutlich langsamer ist als erwartet.
 Dann bricht der Shard sauber ab und lädt hoch, was er hat; die Runde lernt
@@ -208,10 +231,8 @@ Drei Schritte, keiner davon Handarbeit an Dateien:
    Die bisherigen Gewichte gehen nicht verloren: sie werden vorher als
    `weights-legacy.json` ins Release gesichert.
 
-3. *Actions → NNUE-Training → Run workflow* wie gewohnt. Bei `lr` jetzt den
-   vollen Startwert nehmen (`0.001`), nicht die 0,0013 aus der Fortsetzung des
-   alten Laufs — die waren nur dazu da, den bereits gelaufenen
-   Lernraten-Zerfall auszugleichen.
+3. *Actions → NNUE-Training → Run workflow* wie gewohnt, `lr` auf dem
+   Standard `0.0001` lassen.
 
 Das Eröffnungsbuch muss nicht neu gebaut werden. Es liest nur die ersten 12–16
 Halbzüge, und in keiner der 11.558 Partien gibt es dort eine Aufgabe oder
@@ -257,5 +278,5 @@ train_nnue --generate games/s0.jsonl --weights w.json --progress p.json \
            --shards 2 --shard 0 --games 8 --depth 4 --beam-width 6
 train_nnue --generate games/s1.jsonl --weights w.json --progress p.json \
            --shards 2 --shard 1 --games 8 --depth 4 --beam-width 6
-train_nnue --learn games --weights w.json --progress p.json --lr 0.0013
+train_nnue --learn games --weights w.json --progress p.json --lr 0.0001
 ```

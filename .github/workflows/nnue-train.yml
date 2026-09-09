@@ -43,9 +43,14 @@ on:
         type: string
         default: '0.7'
       lr:
+        # 0,0001 ist gemessen, nicht geraten: dieselbe Runde mit 0,0013 machte
+        # das Netz um 0,61 Plätze schlechter, mit 0,0001 um 0,65 besser
+        # (zwei Seeds, +0,6510 und +0,6782). Der alte Wert stammte aus der Zeit
+        # vor den Gradientenkorrekturen — der falsche Gradient hatte die
+        # effektive Schrittweite gedämpft, danach war 0,0013 zu groß.
         description: 'Basis-Lernrate (vor dem Zerfall)'
         type: string
-        default: '0.0013'
+        default: '0.0001'
       lr_decay:
         description: 'Lernraten-Zerfall je save_every Partien'
         type: string
