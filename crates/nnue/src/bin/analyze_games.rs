@@ -306,7 +306,10 @@ fn analyze_game(
 
     for (token, full_nr) in move_tokens(pgn4) {
         if token == "--" { out.push(None); continue; }
-        if token == "T"  { forfeit(&mut board); out.push(None); continue; }
+        // `T` Zeitüberschreitung, `R` Aufgabe: beides beendet die Teilnahme.
+        // Der König bleibt stehen und wird oft noch geschlagen — deshalb nur
+        // `active` löschen, nichts vom Brett nehmen.
+        if token == "T" || token == "R" { forfeit(&mut board); out.push(None); continue; }
 
         let (from, to) = match parse_move_token(token) {
             Some(x) => x,
@@ -349,7 +352,7 @@ fn analyze_game(
     Ok(out)
 }
 
-/// `T` heißt: der Spieler am Zug hat seine Zeit überschritten und scheidet aus.
+/// Ausscheiden ohne Zug: `T` (Zeit überschritten) und `R` (aufgegeben).
 fn forfeit(board: &mut Board) {
     let c = board.to_move;
     if !board.active[c.idx()] { return; }
