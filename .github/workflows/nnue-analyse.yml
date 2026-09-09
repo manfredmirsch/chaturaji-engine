@@ -17,11 +17,11 @@ on:
       depth:
         description: 'Suchtiefe (3 ist ~20x billiger als 4)'
         type: number
-        default: 4
+        default: 3
       shards:
         description: 'Parallele Runner (20 laufen gleichzeitig, der Rest wird angestellt)'
         type: number
-        default: 32
+        default: 4
       weights:
         description: 'Netz für die Suche (Asset im Release nnue-state, leer = Handbewertung)'
         type: string
