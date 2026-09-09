@@ -1,0 +1,213 @@
+name: NNUE-Analyse
+
+# Alle Partien aus dem Datensatz mit der Engine durchrechnen und die
+# Auffälligkeiten annotieren.
+#
+# Warum in der Cloud: Tiefe 4 mit dem echten NNUE kostet rund 220 Rechenstunden.
+# Auf vier Kernen sind das gut 60 Stunden am Stück; auf 32 Shards à 4 vCPU
+# knapp drei Stunden je Job, und die laufen zwanzig gleichzeitig.
+#
+# Die Analyse ist zustandslos: keine Zufallszahlen, keine Reihenfolge über
+# Partien hinweg. Jeder Shard nimmt jede n-te Datei der sortierten Liste, und
+# ein Wiederholungslauf liefert dasselbe Ergebnis.
+
+on:
+  workflow_dispatch:
+    inputs:
+      depth:
+        description: 'Suchtiefe (3 ist ~20x billiger als 4)'
+        type: number
+        default: 4
+      shards:
+        description: 'Parallele Runner (20 laufen gleichzeitig, der Rest wird angestellt)'
+        type: number
+        default: 32
+      weights:
+        description: 'Netz für die Suche (Asset im Release nnue-state, leer = Handbewertung)'
+        type: string
+        default: 'weights.json'
+      data_asset:
+        description: 'Partiendatensatz (Asset im Release nnue-state)'
+        type: string
+        default: 'game_data.tar.gz'
+      threshold:
+        description: 'Score-Schwelle für Annotationen in Prozent'
+        type: number
+        default: 89
+      release_tag:
+        description: 'Release, an das das Ergebnis gehängt wird'
+        type: string
+        default: 'game-analysis'
+
+env:
+  STATE_TAG: nnue-state
+  CARGO_TERM_COLOR: always
+  GH_REPO: ${{ github.repository }}
+
+permissions:
+  contents: write
+
+# Zwei gleichzeitige Läufe würden dasselbe Release-Asset überschreiben.
+concurrency:
+  group: nnue-analyse
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.shards.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cargo-Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Analysator bauen
+        run: cargo build --release -p chaturaji-nnue --bin analyze_games
+
+      - name: Partien und Netz holen
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p input
+          for asset in '${{ inputs.data_asset }}' '${{ inputs.weights }}'; do
+            [ -z "$asset" ] && continue
+            if ! gh release download "$STATE_TAG" --pattern "$asset" --dir input --clobber; then
+              echo "::error::'$asset' liegt nicht am Release '$STATE_TAG'."
+              gh release view "$STATE_TAG" --json assets --jq '.assets[].name' \
+                | sed 's/^/::error::  vorhanden: /'
+              exit 1
+            fi
+          done
+          ls -la input/
+
+      - name: Shard-Liste
+        id: shards
+        run: |
+          set -euo pipefail
+          echo "matrix=$(seq 0 $(( ${{ inputs.shards }} - 1 )) | jq -R . | jq -s -c .)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: analyse-input
+          retention-days: 2
+          path: |
+            target/release/analyze_games
+            input/
+          if-no-files-found: error
+
+  analyse:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: analyse-input
+
+      - name: Partien auspacken
+        run: |
+          set -euo pipefail
+          mkdir -p games out
+          # --strip-components=1: im Archiv liegt alles unter game_data/
+          tar xf input/'${{ inputs.data_asset }}' -C games --strip-components=1
+          n=$(find games -name '*.json' | wc -l)
+          echo "$n Partien entpackt."
+          [ "$n" -gt 0 ] || { echo "::error::Archiv enthält keine .json-Dateien."; exit 1; }
+
+      - name: Analysieren
+        run: |
+          set -euo pipefail
+          chmod +x target/release/analyze_games
+          WEIGHTS=""
+          [ -n '${{ inputs.weights }}' ] && WEIGHTS="--weights input/${{ inputs.weights }}"
+          ./target/release/analyze_games \
+            --in  games \
+            --out out \
+            --depth     ${{ inputs.depth }} \
+            --threshold ${{ inputs.threshold }} \
+            --shard  ${{ matrix.shard }} \
+            --shards ${{ inputs.shards }} \
+            --force \
+            $WEIGHTS
+
+      - name: Ergebnis packen
+        run: tar czf shard-$(printf '%03d' ${{ matrix.shard }}).tar.gz -C out .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: analyse-result-${{ matrix.shard }}
+          path: shard-*.tar.gz
+          retention-days: 2
+          if-no-files-found: error
+
+  sammeln:
+    needs: analyse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: analyse-result-*
+          merge-multiple: true
+          path: shards
+
+      - name: Zusammenlegen
+        id: pack
+        run: |
+          set -euo pipefail
+          mkdir -p game_analysis
+          for f in shards/*.tar.gz; do tar xf "$f" -C game_analysis; done
+          n=$(find game_analysis -name '*.json' | wc -l)
+          tar czf game_analysis.tar.gz -C game_analysis .
+          {
+            echo "n=$n"
+            echo "size=$(du -h game_analysis.tar.gz | cut -f1)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Zusammenfassung
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import glob, json, collections
+          n = ann = plies = 0
+          stufen = collections.Counter()
+          for f in glob.glob('game_analysis/*.json'):
+              d = json.load(open(f))
+              n += 1
+              plies += sum(1 for e in d.get('evals', []) if e)
+              for a in d.get('annotations', []):
+                  ann += 1
+                  stufen[a['message'].split()[0]] += 1
+          print(f"## Analyse fertig\n")
+          print(f"| | |\n|---|---|")
+          print(f"| Partien | {n:,} |")
+          print(f"| Halbzüge | {plies:,} |")
+          print(f"| Annotationen | {ann:,} |")
+          for k, v in stufen.most_common():
+              print(f"| {k} | {v:,} |")
+          PY
+
+      - name: Ans Release hängen
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG='${{ inputs.release_tag }}'
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "Partieanalysen" --notes \
+              "Analysen aller Partien aus \`${{ inputs.data_asset }}\`. Wird von der NNUE-Analyse überschrieben."
+          gh release upload "$TAG" game_analysis.tar.gz --clobber
+          echo "${{ steps.pack.outputs.n }} Analysen (${{ steps.pack.outputs.size }}) an Release '$TAG' gehängt." \
+            >> "$GITHUB_STEP_SUMMARY"
