@@ -22,40 +22,39 @@ pub struct ParsedGame {
     pub outcome:   [f32; 4],
 }
 
-/// Lädt alle `.pgn`-Dateien aus `dir` und gibt geparste Partien zurück.
+/// Der `.pgn`-Weg ist stillgelegt und liefert nichts.
+///
+/// Er las den Ausgang aus dem `[Result "…"]`-Tag und nahm an, dessen vier
+/// Punktzahlen stünden in Sitzreihenfolge Rot, Blau, Gelb, Grün. Gegen
+/// `points1..4` derselben Partien geprüft, ist die Reihenfolge in 2.151 von
+/// 6.296 Fällen (34 %) vertauscht — der Tag folgt der Sitzbelegung der Partie.
+/// Aus dem PGN-Text allein ist die Zuordnung nicht zu retten; sie steht nur im
+/// JSON. Deshalb wird hier nicht geraten, sondern abgelehnt.
 pub fn load_games_from_dir(dir: &str) -> Vec<ParsedGame> {
-    let mut games   = Vec::new();
-    let mut ok      = 0usize;
-    let mut skipped = 0usize;
-
-    let entries = match std::fs::read_dir(Path::new(dir)) {
-        Ok(e)  => e,
-        Err(e) => { eprintln!("Verzeichnis '{}' nicht lesbar: {}", dir, e); return games; }
+    let found = match std::fs::read_dir(Path::new(dir)) {
+        Ok(e) => e.flatten()
+            .filter(|x| x.path().extension().and_then(|s| s.to_str()) == Some("pgn"))
+            .count(),
+        Err(_) => 0,
     };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("pgn") { continue; }
-
-        let text = match std::fs::read_to_string(&path) {
-            Ok(t)  => t,
-            Err(_) => { skipped += 1; continue; }
-        };
-
-        for game_text in split_games(&text) {
-            match parse_game(game_text) {
-                Some(g) => { games.push(g); ok += 1; }
-                None    => { skipped += 1; }
-            }
-        }
+    if found > 0 {
+        eprintln!(
+            "PGN: {found} .pgn-Datei(en) in '{dir}' werden übergangen — der \
+             [Result]-Tag nennt die Sitzreihenfolge nicht. Bitte die \
+             JSON-Exporte verwenden."
+        );
     }
-
-    println!("PGN: {} Partien geladen, {} übersprungen.", ok, skipped);
-    games
+    Vec::new()
 }
 
-/// Lädt alle `.json`-Dateien aus `dir`.  Verwendet `standings` als Trainings-Label:
-///   Rang 1 → +1.0,  Rang 2 → +1/3,  Rang 3 → −1/3,  Rang 4 → −1.0
+/// Lädt alle `.json`-Dateien aus `dir`. Trainings-Label ist die Platzwertung
+/// des Endstandes: Platz 1 → +1,0, Platz 2 → +1/3, Platz 3 → −1/3, Platz 4 → −1,0.
+///
+/// Gelesen werden `points1..4` — sie stehen in Sitzreihenfolge (Rot, Blau,
+/// Gelb, Grün) und machen Gleichstände sichtbar, die dann gemittelt werden
+/// statt den willkürlichen chess.com-Tiebreak als Ziel zu lernen. `standings`
+/// ist nur der Notnagel, wenn die Punkte fehlen — und wird dabei als das
+/// gelesen, was es ist: eine Ergebnisliste, siehe [`outcome_from_finish_order`].
 pub fn load_games_from_json_dir(dir: &str) -> Vec<ParsedGame> {
     let mut games   = Vec::new();
     let mut ok      = 0usize;
@@ -86,22 +85,30 @@ pub fn load_games_from_json_dir(dir: &str) -> Vec<ParsedGame> {
             None    => { skipped += 1; continue; }
         };
 
-        // standings[0..4] als u8 extrahieren
-        let sa = &json["standings"];
-        let s: Option<[u8; 4]> = (|| {
-            Some([
-                sa[0].as_u64()? as u8,
-                sa[1].as_u64()? as u8,
-                sa[2].as_u64()? as u8,
-                sa[3].as_u64()? as u8,
-            ])
-        })();
-        let standings = match s {
-            Some(v) => v,
-            None    => { skipped += 1; continue; }
+        let points: Option<[i32; 4]> = (|| Some([
+            json["points1"].as_i64()? as i32,
+            json["points2"].as_i64()? as i32,
+            json["points3"].as_i64()? as i32,
+            json["points4"].as_i64()? as i32,
+        ]))();
+
+        let outcome = match points {
+            Some(p) => points_to_outcome(p),
+            None => {
+                let sa = &json["standings"];
+                let finish: Option<[u8; 4]> = (|| Some([
+                    sa[0].as_u64()? as u8,
+                    sa[1].as_u64()? as u8,
+                    sa[2].as_u64()? as u8,
+                    sa[3].as_u64()? as u8,
+                ]))();
+                match finish.and_then(outcome_from_finish_order) {
+                    Some(o) => o,
+                    None    => { skipped += 1; continue; }
+                }
+            }
         };
 
-        let outcome   = standings_to_outcome(standings);
         let positions = match parse_positions_from_pgn(pgn4) {
             Some(p) if !p.is_empty() => p,
             _                        => { skipped += 1; continue; }
@@ -116,45 +123,6 @@ pub fn load_games_from_json_dir(dir: &str) -> Vec<ParsedGame> {
 }
 
 // ─── Internes Parsing ─────────────────────────────────────────────────────────
-
-/// Teilt einen Text mit mehreren Partien (getrennt durch Leerzeilen + '['-Tags).
-fn split_games(text: &str) -> Vec<&str> {
-    // Einfach: jede Datei enthält eine Partie.
-    // Mehrere Partien pro Datei werden durch Suche nach "[GameNr" getrennt.
-    let mut starts: Vec<usize> = text.match_indices("[GameNr").map(|(i, _)| i).collect();
-    if starts.is_empty() {
-        return vec![text];
-    }
-    starts.push(text.len());
-    starts.windows(2).map(|w| &text[w[0]..w[1]]).collect()
-}
-
-fn parse_game(text: &str) -> Option<ParsedGame> {
-    let mut outcome_opt: Option<[f32; 4]> = None;
-
-    let mut in_header = false;
-    for line in text.lines() {
-        let line = line.trim();
-        if in_header {
-            if line.ends_with(']') { in_header = false; }
-            continue;
-        }
-        if line.starts_with('[') {
-            if line.starts_with("[Result ") {
-                if let Some(val) = extract_tag_value(line) {
-                    outcome_opt = parse_result_tag(&val);
-                }
-            }
-            if !line.ends_with(']') { in_header = true; }
-            continue;
-        }
-    }
-
-    let outcome   = outcome_opt?;
-    let positions = parse_positions_from_pgn(text)?;
-    if positions.is_empty() { return None; }
-    Some(ParsedGame { positions, outcome })
-}
 
 /// Parst alle Halbzüge aus einem PGN-Text und gibt den Feature-Vektor jeder
 /// Stellung vor dem Zug zurück.  Gibt `None` zurück wenn ein Zug nicht in der
@@ -214,25 +182,35 @@ fn parse_positions_from_pgn(text: &str) -> Option<Vec<Vec<f32>>> {
     Some(positions)
 }
 
-/// Konvertiert ein Standings-Array in normalisierte Trainings-Labels.
-///   Rang 1 → +1.0,  Rang 2 → +1/3,  Rang 3 → −1/3,  Rang 4 → −1.0
-fn standings_to_outcome(standings: [u8; 4]) -> [f32; 4] {
-    std::array::from_fn(|i| match standings[i] {
-        1 => 1.0,
-        2 => 1.0 / 3.0,
-        3 => -1.0 / 3.0,
-        4 => -1.0,
-        _ => 0.0,
+/// Platzwertung aus dem Endstand. Punktgleiche Spieler teilen sich den
+/// Mittelwert der Plätze, die sie gemeinsam belegen — der chess.com-Tiebreak
+/// ist keine Funktion der Stellung und taugt nicht als Lernziel.
+fn points_to_outcome(points: [i32; 4]) -> [f32; 4] {
+    const PLACE_VALUE: [f32; 4] = [1.0, 1.0 / 3.0, -1.0 / 3.0, -1.0];
+    std::array::from_fn(|i| {
+        let better = (0..4).filter(|&j| points[j] > points[i]).count();
+        let tied   = (0..4).filter(|&j| points[j] == points[i]).count();
+        (better..better + tied).map(|r| PLACE_VALUE[r]).sum::<f32>() / tied as f32
     })
 }
 
-/// Tokenisiert den Zugtext: Zugnummern ("1.", "16.") und Separatoren ("..") entfernen.
-fn tokenize_moves(text: &str) -> Vec<&str> {
-    text.split_whitespace()
-        .filter(|t| !t.ends_with('.'))  // Zugnummern wie "1.", "16."
-        .filter(|t| *t != "..")          // Spieler-Separatoren
-        .filter(|t| *t != "*")           // Ergebnismarker
-        .collect()
+/// Platzwertung aus dem `standings`-Feld der chess.com-Exporte.
+///
+/// Das Feld ist eine **Ergebnisliste, keine Platzliste**: an Position r steht
+/// die Spielernummer (1-basiert, in Sitzreihenfolge), die Platz r+1 belegt hat.
+/// `[2, 3, 1, 4]` heißt „Blau wurde Erster", nicht „Rot wurde Zweiter". Die
+/// umgekehrte Lesart vertauscht die Zielwerte zwischen den Sitzen; sie steckte
+/// bis 2026-09-09 hier und im Eröffnungsbuch. `None`, wenn das Feld keine
+/// Permutation von 1..4 ist.
+fn outcome_from_finish_order(finish_order: [u8; 4]) -> Option<[f32; 4]> {
+    const PLACE_VALUE: [f32; 4] = [1.0, 1.0 / 3.0, -1.0 / 3.0, -1.0];
+    let mut out = [f32::NAN; 4];
+    for (place, &seat) in finish_order.iter().enumerate() {
+        let seat = usize::from(seat).checked_sub(1)?;
+        if seat >= 4 || !out[seat].is_nan() { return None; }
+        out[seat] = PLACE_VALUE[place];
+    }
+    Some(out)
 }
 
 /// Wandelt externe chess.com-Koordinaten in einen internen Feldindex um.
@@ -295,29 +273,14 @@ pub fn parse_move_token(s: &str) -> Option<(u8, u8)> {
     Some((from_sq, to_sq))
 }
 
-/// Parst den `[Result "..."]`-Tag und normalisiert die 4 Punktestände auf [-1, 1].
-/// Erwartet Format: "Name1: 6 - Name2: 23 - Name3: 16 - Name4: 14"
-/// Reihenfolge entspricht Rot, Blau, Gelb, Grün.
-fn parse_result_tag(s: &str) -> Option<[f32; 4]> {
-    let scores: Vec<f32> = s.split(" - ")
-        .filter_map(|part| part.split(": ").nth(1)?.trim().parse::<f32>().ok())
-        .collect();
-
-    if scores.len() != 4 { return None; }
-
-    let max = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let min = scores.iter().cloned().fold(f32::INFINITY,     f32::min);
-    let range = (max - min).max(1.0);
-
-    Some(std::array::from_fn(|i| (2.0 * (scores[i] - min) / range) - 1.0))
+fn tokenize_moves(text: &str) -> Vec<&str> {
+    text.split_whitespace()
+        .filter(|t| !t.ends_with('.'))  // Zugnummern wie "1.", "16."
+        .filter(|t| *t != "..")          // Spieler-Separatoren
+        .filter(|t| *t != "*")           // Ergebnismarker
+        .collect()
 }
 
-fn extract_tag_value(line: &str) -> Option<String> {
-    let start = line.find('"')? + 1;
-    let end   = line.rfind('"')?;
-    if end <= start { return None; }
-    Some(line[start..end].to_string())
-}
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
@@ -365,14 +328,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_result_tag_normalizes() {
-        let t = parse_result_tag("A: 6 - B: 23 - C: 16 - D: 14").unwrap();
-        assert!((t[0] - (-1.0)).abs() < 1e-4); // min → -1
-        assert!((t[1] -   1.0 ).abs() < 1e-4); // max → +1
-        for v in t { assert!(v >= -1.0 && v <= 1.0); }
-    }
-
-    #[test]
     fn garbage_token_returns_none() {
         assert!(parse_move_token("R").is_none());
         assert!(parse_move_token("..").is_none());
@@ -380,11 +335,11 @@ mod tests {
     }
 
     /// Regression: chess.com-PGN hat einen mehrzeiligen `[StartFen4 "..."]`-
-    /// Header. Wenn `parse_game` nur die erste Zeile als Header erkennt,
+    /// Header. Wenn der Parser nur die erste Zeile als Header erkennt,
     /// rutschen die folgenden 14 FEN-Reihen als „Züge" durch und verbrauchen
     /// die Token-Quote, bevor die echten Halbzüge geparst werden.
     #[test]
-    fn parse_game_handles_multiline_startfen_header() {
+    fn multiline_startfen_header_is_skipped() {
         let pgn = "\
 [GameNr \"1\"]
 [Variant \"FFA\"]
@@ -406,20 +361,38 @@ x,x,x,x,x,x,x,x,x,x,x,x,x,x\"]
 1. f5-f6 .. e9-f9 .. h10-h9 .. j6-i6
 2. e5-e6 .. e10-f10 .. h9-h8 .. j5-i5
 ";
-        let g = parse_game(pgn).expect("multi-line header must not break parse_game");
+        let positions = parse_positions_from_pgn(pgn)
+            .expect("mehrzeiliger Header darf den Zugtext nicht verschlucken");
         // 8 Halbzüge im Text → 8 Stellungen aufgezeichnet
-        assert_eq!(g.positions.len(), 8,
+        assert_eq!(positions.len(), 8,
             "got {} positions, expected 8 — Header-Filter greift nicht durch?",
-            g.positions.len());
+            positions.len());
     }
 
     #[test]
-    fn standings_to_outcome_correct() {
-        let out = standings_to_outcome([1, 3, 2, 4]);
-        assert!((out[0] -  1.0      ).abs() < 1e-6); // Rang 1 → +1.0
-        assert!((out[1] - (-1.0/3.0)).abs() < 1e-6); // Rang 3 → −1/3
-        assert!((out[2] -  1.0/3.0  ).abs() < 1e-6); // Rang 2 → +1/3
-        assert!((out[3] - (-1.0)    ).abs() < 1e-6); // Rang 4 → −1.0
+    fn points_and_finish_order_agree() {
+        // points [15, 23, 19, 5]: Blau (23) gewinnt, dann Gelb (19), Rot (15),
+        // Grün (5) — als Ergebnisliste also [2, 3, 1, 4].
+        let by_points = points_to_outcome([15, 23, 19, 5]);
+        let by_finish = outcome_from_finish_order([2, 3, 1, 4]).unwrap();
+        for i in 0..4 { assert!((by_points[i] - by_finish[i]).abs() < 1e-6); }
+        assert!((by_points[1] -  1.0).abs() < 1e-6, "Blau muss Platz 1 sein");
+        assert!((by_points[3] - -1.0).abs() < 1e-6, "Grün muss Platz 4 sein");
+    }
+
+    #[test]
+    fn tied_points_share_the_average_place() {
+        // Zwei Zweite: beide bekommen den Mittelwert aus +1/3 und −1/3 = 0.
+        let out = points_to_outcome([25, 20, 20, 5]);
+        assert!((out[1]).abs() < 1e-6);
+        assert!((out[2]).abs() < 1e-6);
+        assert!((out.iter().sum::<f32>()).abs() < 1e-6, "Summe muss 0 bleiben");
+    }
+
+    #[test]
+    fn finish_order_rejects_non_permutations() {
+        assert!(outcome_from_finish_order([1, 1, 2, 3]).is_none());
+        assert!(outcome_from_finish_order([0, 2, 3, 4]).is_none());
     }
 
     /// JSON-pgn4 enthält `{ date=... clock=... }`-Annotationen.

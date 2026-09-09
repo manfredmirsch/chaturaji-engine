@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use chaturaji_core::board::Board;
 use chaturaji_core::rules::Rules;
 
-use crate::outcome::{place_values, place_values_from_standings};
+use crate::outcome::{place_values, place_values_from_finish_order};
 
 /// Dateien eines Verzeichnisses mit der gesuchten Endung, nach Namen sortiert.
 ///
@@ -43,28 +43,28 @@ pub struct ParsedGame {
     pub outcome:   [f32; 4],
 }
 
-/// Lädt alle `.pgn`-Dateien aus `dir`.
+/// Der `.pgn`-Weg ist stillgelegt und liefert nichts.
+///
+/// Er las den Ausgang aus dem `[Result "…"]`-Tag und nahm an, dessen vier
+/// Punktzahlen stünden in Sitzreihenfolge Rot, Blau, Gelb, Grün. Das stimmt
+/// nicht: gegen `points1..4` derselben Partien geprüft, ist die Reihenfolge in
+/// 2.151 von 6.296 Fällen (34 %) vertauscht — der Tag folgt der Sitzbelegung
+/// der Partie, nicht der Farbreihenfolge. Ein Drittel der Partien hätte den
+/// Ausgang also am falschen Sitz gelernt.
+///
+/// Aus dem PGN-Text allein ist die Zuordnung nicht zu retten; sie steht nur im
+/// JSON. Deshalb wird hier nicht geraten, sondern abgelehnt:
+/// [`load_games_from_json_dir`] ist der einzige verlässliche Weg.
 pub fn load_games_from_dir(dir: &str) -> Vec<ParsedGame> {
-    let mut games   = Vec::new();
-    let mut ok      = 0usize;
-    let mut skipped = 0usize;
-
-    for path in sorted_files(dir, "pgn") {
-        let text = match std::fs::read_to_string(&path) {
-            Ok(t)  => t,
-            Err(_) => { skipped += 1; continue; }
-        };
-
-        for game_text in split_games(&text) {
-            match parse_game(game_text) {
-                Some(g) => { games.push(g); ok += 1; }
-                None    => { skipped += 1; }
-            }
-        }
+    let found = sorted_files(dir, "pgn").len();
+    if found > 0 {
+        eprintln!(
+            "PGN: {found} .pgn-Datei(en) in '{dir}' werden übergangen — der \
+             [Result]-Tag nennt die Sitzreihenfolge nicht. Bitte die \
+             JSON-Exporte verwenden."
+        );
     }
-
-    println!("PGN: {} Partien geladen, {} übersprungen.", ok, skipped);
-    games
+    Vec::new()
 }
 
 /// Lädt alle `.json`-Dateien aus `dir` (chess.com Export-Format mit `pgn4` + `standings`).
@@ -102,6 +102,8 @@ pub fn load_games_from_json_dir(dir: &str) -> Vec<ParsedGame> {
         let outcome = match points {
             Some(p) => place_values(p),
             None => {
+                // `standings` ist die Ergebnisliste (Spielernummer je Platz),
+                // nicht der Platz je Sitz — siehe place_values_from_finish_order.
                 let sa = &json["standings"];
                 let standings: Option<[u8; 4]> = (|| Some([
                     sa[0].as_u64()? as u8,
@@ -109,8 +111,8 @@ pub fn load_games_from_json_dir(dir: &str) -> Vec<ParsedGame> {
                     sa[2].as_u64()? as u8,
                     sa[3].as_u64()? as u8,
                 ]))();
-                match standings {
-                    Some(v) => place_values_from_standings(v),
+                match standings.and_then(place_values_from_finish_order) {
+                    Some(o) => o,
                     None    => { skipped += 1; continue; }
                 }
             }
@@ -130,40 +132,6 @@ pub fn load_games_from_json_dir(dir: &str) -> Vec<ParsedGame> {
 }
 
 // ─── Internes Parsing ─────────────────────────────────────────────────────────
-
-fn split_games(text: &str) -> Vec<&str> {
-    let mut starts: Vec<usize> = text.match_indices("[GameNr").map(|(i, _)| i).collect();
-    if starts.is_empty() { return vec![text]; }
-    starts.push(text.len());
-    starts.windows(2).map(|w| &text[w[0]..w[1]]).collect()
-}
-
-fn parse_game(text: &str) -> Option<ParsedGame> {
-    let mut outcome_opt: Option<[f32; 4]> = None;
-    let mut in_header = false;
-
-    for line in text.lines() {
-        let line = line.trim();
-        if in_header {
-            if line.ends_with(']') { in_header = false; }
-            continue;
-        }
-        if line.starts_with('[') {
-            if line.starts_with("[Result ") {
-                if let Some(val) = extract_tag_value(line) {
-                    outcome_opt = parse_result_tag(&val);
-                }
-            }
-            if !line.ends_with(']') { in_header = true; }
-            continue;
-        }
-    }
-
-    let outcome   = outcome_opt?;
-    let positions = parse_positions_from_pgn(text)?;
-    if positions.is_empty() { return None; }
-    Some(ParsedGame { positions, outcome })
-}
 
 fn parse_positions_from_pgn(text: &str) -> Option<Vec<Board>> {
     let mut move_text = String::new();
@@ -259,23 +227,6 @@ pub fn parse_move_token(s: &str) -> Option<(u8, u8)> {
     Some((to_internal_sq(from_file, from_rank)?, to_internal_sq(to_file, to_rank)?))
 }
 
-/// Parst einen `Result`-Tag der Form `"NameA: 15 - NameB: 23 - …"` und macht
-/// daraus die Platzwertung.
-fn parse_result_tag(s: &str) -> Option<[f32; 4]> {
-    let points: Vec<i32> = s.split(" - ")
-        .filter_map(|part| part.split(": ").nth(1)?.trim().parse::<i32>().ok())
-        .collect();
-    if points.len() != 4 { return None; }
-    Some(place_values([points[0], points[1], points[2], points[3]]))
-}
-
-fn extract_tag_value(line: &str) -> Option<String> {
-    let start = line.find('"')? + 1;
-    let end   = line.rfind('"')?;
-    if end <= start { return None; }
-    Some(line[start..end].to_string())
-}
-
 fn tokenize_moves(text: &str) -> Vec<&str> {
     text.split_whitespace()
         .filter(|t| !t.ends_with('.'))
@@ -322,14 +273,13 @@ mod tests {
     fn positions_are_bitboards() {
         let pgn = "\
 [GameNr \"1\"]
-[Result \"A: 10 - B: 12 - C: 8 - D: 11\"]
 
 1. f5-f6 .. e9-f9 .. h10-h9 .. j6-i6
 ";
-        let g = parse_game(pgn).expect("Partie muss parsierbar sein");
-        assert_eq!(g.positions.len(), 4);
+        let positions = parse_positions_from_pgn(pgn).expect("Zugtext muss parsierbar sein");
+        assert_eq!(positions.len(), 4);
         // Startstellung hat 32 Figuren
-        let total_pieces: u32 = g.positions[0].bb.iter()
+        let total_pieces: u32 = positions[0].bb.iter()
             .flat_map(|row| row.iter())
             .map(|bb| bb.count_ones())
             .sum();

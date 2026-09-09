@@ -27,7 +27,10 @@ struct GameMeta {
     points:       [i32; 4],
     rating_diffs: [f64; 4],
     ratings:      [f64; 4],
-    standings:    [u32; 4],
+    /// Platz je Sitz (1 = bester), Index = Sitz in der Reihenfolge Rot, Blau,
+    /// Gelb, Grün. **Nicht** das rohe `standings`-Feld: das listet die
+    /// umgekehrte Zuordnung, siehe `parse_meta`.
+    ranks:        [u32; 4],
 }
 
 // ─── Loader ───────────────────────────────────────────────────────────────────
@@ -93,15 +96,25 @@ fn parse_meta(json: &serde_json::Value) -> Option<GameMeta> {
         pf("rating3").unwrap_or(0.0),
         pf("rating4").unwrap_or(0.0),
     ];
+    // `standings` ist die Ergebnisliste, nicht die Platzliste: an Position r
+    // steht die **Spielernummer** (1-basiert), die Platz r+1 belegt hat.
+    // Gebraucht wird die Umkehrung — der Platz je Sitz.
+    //
+    // Nachgeprüft an allen 4.921 Partien aus `game_data/` mit vier
+    // verschiedenen Punktzahlen: die so gewonnene Rangfolge stimmt ausnahmslos
+    // mit der Rangfolge nach Punkten überein. Bei Gleichstand vergibt
+    // chess.com trotzdem verschiedene Plätze; dieser Tiebreak wird hier
+    // übernommen, weil er im Datensatz der einzige verfügbare ist.
     let st = json.get("standings")?.as_array()?;
     if st.len() != 4 { return None; }
-    let standings = [
-        st[0].as_u64()? as u32,
-        st[1].as_u64()? as u32,
-        st[2].as_u64()? as u32,
-        st[3].as_u64()? as u32,
-    ];
-    Some(GameMeta { points, rating_diffs, ratings, standings })
+    let mut ranks = [0u32; 4];
+    for (place, seat) in st.iter().enumerate() {
+        let seat = seat.as_u64()? as usize;
+        if seat < 1 || seat > 4 { return None; }
+        ranks[seat - 1] = place as u32 + 1;
+    }
+    if ranks.contains(&0) { return None; }   // keine Permutation → Partie verwerfen
+    Some(GameMeta { points, rating_diffs, ratings, ranks })
 }
 
 fn record_game(
@@ -159,7 +172,7 @@ fn record_game(
             .entry(key).or_default();
         stats.count           += 1;
         stats.sum_points      += meta.points[mover_idx] as i64;
-        stats.sum_rank        += meta.standings[mover_idx];
+        stats.sum_rank        += meta.ranks[mover_idx];
         stats.sum_rating_diff += meta.rating_diffs[mover_idx];
         stats.sum_rating      += meta.ratings[mover_idx];
 
@@ -246,6 +259,40 @@ fn sq_name(s: u8) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `standings` ist die Ergebnisliste, nicht die Platzliste. Der Test hält
+    /// die Lesart fest, die an allen 4.921 eindeutigen Partien aus
+    /// `game_data/` gegen die Punkte geprüft wurde.
+    #[test]
+    fn standings_are_read_as_a_finish_order() {
+        let json: serde_json::Value = serde_json::from_str(r#"{
+            "points1": 15, "points2": 23, "points3": 19, "points4": 5,
+            "rating1": 2400, "rating2": 2500, "rating3": 2450, "rating4": 2350,
+            "ratingDiff1": -3.0, "ratingDiff2": 8.0, "ratingDiff3": 2.0, "ratingDiff4": -7.0,
+            "standings": [2, 3, 1, 4]
+        }"#).unwrap();
+
+        let meta = parse_meta(&json).expect("Metadaten müssen lesbar sein");
+        // Blau (23 Punkte) wurde Erster, Gelb (19) Zweiter, Rot (15) Dritter,
+        // Grün (5) Vierter — der Platz steht am Sitz, nicht am Listenplatz.
+        assert_eq!(meta.ranks, [3, 1, 2, 4]);
+
+        // Gegenprobe: die Rangfolge muss der nach Punkten entsprechen.
+        let mut by_points: Vec<usize> = (0..4).collect();
+        by_points.sort_by_key(|&i| -meta.points[i]);
+        for (place, seat) in by_points.into_iter().enumerate() {
+            assert_eq!(meta.ranks[seat], place as u32 + 1);
+        }
+    }
+
+    #[test]
+    fn standings_that_are_no_permutation_are_rejected() {
+        let json: serde_json::Value = serde_json::from_str(r#"{
+            "points1": 1, "points2": 2, "points3": 3, "points4": 4,
+            "standings": [1, 1, 2, 3]
+        }"#).unwrap();
+        assert!(parse_meta(&json).is_none());
+    }
 
     #[test]
     fn strip_braces_removes_clock_annotations() {

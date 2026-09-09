@@ -65,16 +65,32 @@ pub fn place_values(points: [i32; 4]) -> [f32; 4] {
     })
 }
 
-/// Wie [`place_values`], aber aus einer bereits fertigen Platzierung
-/// (1-basiert, wie das `standings`-Feld der chess.com-Exporte).
+/// Wie [`place_values`], aber aus dem `standings`-Feld der chess.com-Exporte.
+///
+/// Das Feld ist eine **Ergebnisliste, keine Platzliste**: an Position r steht
+/// die Spielernummer (1-basiert, in Sitzreihenfolge Rot, Blau, Gelb, Grün),
+/// die Platz r+1 belegt hat. `[2, 3, 1, 4]` heißt also „Blau wurde Erster,
+/// Gelb Zweiter, Rot Dritter, Grün Vierter" — und **nicht** „Rot wurde
+/// Zweiter". Die umgekehrte Lesart war bis 2026-09-09 im Buch-Bauer und hier
+/// verbaut; sie vertauscht die Zielwerte zwischen den Sitzen.
+///
+/// Nachgeprüft an allen 4.921 Partien aus `game_data/` mit vier verschiedenen
+/// Punktzahlen: die so gewonnene Rangfolge stimmt ausnahmslos mit der nach
+/// Punkten überein.
 ///
 /// Nur als Notnagel gedacht, wenn keine Punkte vorliegen — der Punkteweg ist
-/// vorzuziehen, weil er Gleichstände korrekt behandelt.
-pub fn place_values_from_standings(standings: [u8; 4]) -> [f32; 4] {
-    std::array::from_fn(|i| match standings[i] {
-        1..=4 => PLACE_VALUE[standings[i] as usize - 1],
-        _     => 0.0,
-    })
+/// vorzuziehen, weil er Gleichstände mitteln kann, statt den willkürlichen
+/// chess.com-Tiebreak als Ziel zu lernen. `None`, wenn das Feld keine
+/// Permutation von 1..4 ist: dann ist die Zuordnung geraten, und geratene
+/// Zielwerte sind schlimmer als eine übersprungene Partie.
+pub fn place_values_from_finish_order(finish_order: [u8; 4]) -> Option<[f32; 4]> {
+    let mut out = [f32::NAN; 4];
+    for (place, &seat) in finish_order.iter().enumerate() {
+        let seat = usize::from(seat).checked_sub(1)?;
+        if seat >= 4 || !out[seat].is_nan() { return None; }
+        out[seat] = PLACE_VALUE[place];
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -141,12 +157,20 @@ mod tests {
     }
 
     #[test]
-    fn standings_path_matches_the_points_path() {
+    fn finish_order_path_matches_the_points_path() {
         // Ohne Gleichstände müssen beide Wege dasselbe liefern.
-        // points [15, 23, 19, 5] → standings [3, 1, 2, 4].
+        // points [15, 23, 19, 5]: Blau (23) gewinnt, dann Gelb (19), Rot (15),
+        // Grün (5) — als Ergebnisliste also [2, 3, 1, 4].
         assert_eq!(
             place_values([15, 23, 19, 5]),
-            place_values_from_standings([3, 1, 2, 4]),
+            place_values_from_finish_order([2, 3, 1, 4]).unwrap(),
         );
+    }
+
+    #[test]
+    fn finish_order_rejects_non_permutations() {
+        assert!(place_values_from_finish_order([1, 1, 2, 3]).is_none());
+        assert!(place_values_from_finish_order([0, 2, 3, 4]).is_none());
+        assert!(place_values_from_finish_order([1, 2, 3, 5]).is_none());
     }
 }
