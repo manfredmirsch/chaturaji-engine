@@ -50,10 +50,10 @@ jobs:
       round:  ${{ steps.state.outputs.round }}
       games_done: ${{ steps.state.outputs.games_done }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cargo-Cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -110,7 +110,7 @@ jobs:
       # Artefaktnamen müssen innerhalb eines Workflow-Laufs eindeutig sein, und
       # ein Lauf enthält bis zu acht Runden — deshalb überall die Rundennummer.
       - name: Binary und Zustand weiterreichen
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nnue-run-input-${{ steps.state.outputs.round }}
           retention-days: 3
@@ -133,7 +133,7 @@ jobs:
       matrix:
         shard: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: nnue-run-input-${{ needs.prepare.outputs.round }}
 
@@ -159,7 +159,7 @@ jobs:
             --max-seconds ${{ inputs.max_seconds }} \
             $BOOK_ARGS
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: nnue-games-${{ needs.prepare.outputs.round }}-${{ matrix.shard }}
           path: out/*.jsonl
@@ -173,12 +173,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: nnue-run-input-${{ needs.prepare.outputs.round }}
 
       - name: Alle Shards einsammeln
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: nnue-games-${{ needs.prepare.outputs.round }}-*
           merge-multiple: true
@@ -236,7 +236,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Gewichte als Artefakt sichern
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nnue-weights-round-${{ needs.prepare.outputs.round }}
           path: |

@@ -56,10 +56,10 @@ jobs:
     outputs:
       matrix: ${{ steps.shards.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cargo-Cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -93,7 +93,7 @@ jobs:
           set -euo pipefail
           echo "matrix=$(seq 0 $(( ${{ inputs.shards }} - 1 )) | jq -R . | jq -s -c .)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: arena-input
           retention-days: 2
@@ -111,7 +111,7 @@ jobs:
       matrix:
         shard: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: arena-input
 
@@ -132,7 +132,7 @@ jobs:
             --seed ${{ inputs.seed }} \
             --out "out/shard-$(printf '%03d' ${{ matrix.shard }}).json"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: arena-result-${{ matrix.shard }}
           path: out/*.json
@@ -143,7 +143,7 @@ jobs:
     needs: match
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: arena-result-*
           merge-multiple: true

@@ -58,10 +58,10 @@ jobs:
     outputs:
       matrix: ${{ steps.shards.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cargo-Cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -96,7 +96,7 @@ jobs:
           set -euo pipefail
           echo "matrix=$(seq 0 $(( ${{ inputs.shards }} - 1 )) | jq -R . | jq -s -c .)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: analyse-input
           retention-days: 2
@@ -114,7 +114,7 @@ jobs:
       matrix:
         shard: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: analyse-input
 
@@ -147,7 +147,7 @@ jobs:
       - name: Ergebnis packen
         run: tar czf shard-$(printf '%03d' ${{ matrix.shard }}).tar.gz -C out .
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: analyse-result-${{ matrix.shard }}
           path: shard-*.tar.gz
@@ -158,7 +158,7 @@ jobs:
     needs: analyse
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: analyse-result-*
           merge-multiple: true
