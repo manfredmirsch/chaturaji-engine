@@ -2,10 +2,10 @@
 // Die gesamte Spiel-Logik (Zuggenerierung, Suche, Bewertung) liegt in Rust und
 // wird per wasm-bindgen exportiert. `engine` hält den einzigen globalen Spiel-
 // zustand; alles UI-seitige (Highlights, Animation, Chat) lebt in dieser Datei.
-import init, { WasmEngine } from './pkg/chaturaji_wasm.js?v=2609062056';
+import init, { WasmEngine } from './pkg/chaturaji_wasm.js?v=2609102328';
 import { initI18n, setLang, t, getLang, onLanguageChange, applyTranslations, SUPPORTED_LANGS } from './i18n.js';
 
-await init({ module_or_path: './pkg/chaturaji_wasm_bg.wasm?v=2609062056' });
+await init({ module_or_path: './pkg/chaturaji_wasm_bg.wasm?v=2609102328' });
 const engine = new WasmEngine();
 
 // Sprache (Default: en) frühestmöglich anwenden — vor dem ersten draw().
@@ -1292,17 +1292,34 @@ function applyPreview(t, row) {
   const capturePiece = state?.squares[toSq]   ?? null;
   const inReplay = replayMoves.length > 0 && replayIdx < replayMoves.length;
 
+  // Wann ist der Klick ein echter Zug und wann nur eine Vorschau?
+  //
+  //   geladene Partie, mittendrin  → echter Zug (Abzweig, `commitToReplay`)
+  //   freies Spiel, keine Partie   → echter Zug (die Vorschläge kommen aus dem
+  //                                  Buch, und damit spielt man)
+  //   geladene Partie, am Ende     → Vorschau der Analyse-Vorschläge
+  //
+  // Der mittlere Fall war früher ebenfalls Vorschau. Das ging so lange gut,
+  // wie das Buch für die Folgestellung wieder Züge kannte — `renderTopMoves`
+  // setzte `previewMv` beim Neuaufbau der Liste zurück und der Zug blieb
+  // stehen. Beim letzten Buchzug blieb `previewMv` dagegen gesetzt, und der
+  // nächste Klick aufs Brett nahm den Zug zurück, statt zu ziehen: das Spiel
+  // ließ sich am Ende des Buchs nicht mehr fortsetzen. Nebenbei landete im
+  // freien Spiel kein einziger Buchzug in der Zugliste.
+  const permanent = inReplay || replayMoves.length === 0;
+
   // Vorberechnete Top-Züge enthalten keinen Promotionssuffix; falls der reine
   // Zug abgelehnt wird, ist es vermutlich eine Bauernumwandlung — Retry mit
   // 'p' (Promotion zu Boat, einzige Promotion in Chaturaji).
-  if (inReplay) recordCaptureFromMove(toSq);
+  if (permanent) recordCaptureFromMove(toSq);
   let notation = null;
   if      (engine.apply_move(t.mv))       notation = t.mv;
   else if (engine.apply_move(t.mv + 'p')) notation = t.mv + 'p';
-  if (!notation) { if (inReplay) undoLastCapture(); return; }
+  if (!notation) { if (permanent) undoLastCapture(); return; }
 
-  if (inReplay) {
-    // Replay-Modus: Zug permanent einbuchen, nicht als Vorschau
+  if (permanent) {
+    // Zug permanent einbuchen, nicht als Vorschau. `commitToReplay` ist im
+    // freien Spiel ein No-Op, weil es keine Partie zum Fortschreiben gibt.
     appendMoveLog({ notation, captures: capturePiece !== null, promoted: notation.length > 4 });
     state = engine.get_state();
     renderCaptures();
@@ -1328,6 +1345,14 @@ function renderTopMoves() {
   const bookCb     = document.getElementById('use-opening-book');
   if (!panel || !list) return;
 
+  // Während einer Vorschau bleibt das Panel leer: der nächste Klick aufs Brett
+  // nimmt sie zurück, und Zeilen zur Vorschau-Stellung wären irreführend. Der
+  // Test muss vor der Buchabfrage stehen — sonst baut die Funktion die Liste
+  // neu auf und setzt dabei `previewMv` zurück, ohne den Zug rückgängig zu
+  // machen: die Vorschau würde stillschweigend zum Zug, ohne Eintrag in der
+  // Zugliste.
+  if (previewMv !== null) { panel.classList.add('hidden'); return; }
+
   const useBook = bookCb?.checked ?? false;
   let tops      = null;
   let fromBook  = false;
@@ -1342,7 +1367,6 @@ function renderTopMoves() {
   }
 
   if (!tops) {
-    if (previewMv !== null) { panel.classList.add('hidden'); return; }
     // Fallback: vorberechnete Analysedaten
     const evalEntry = replayEvals[replayIdx] ?? null;
     tops = evalEntry?.top ?? null;
