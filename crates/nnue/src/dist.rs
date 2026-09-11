@@ -221,6 +221,27 @@ pub struct GameLine {
     pub plies:  usize,
     pub scores: [i32; 4],
     pub winner: Option<String>,
+
+    /// Suchbewertung der Stellung vor jedem Halbzug, sofern gesucht wurde.
+    ///
+    /// Anders als die Zugfolge lässt sich das beim Nachspielen **nicht**
+    /// rekonstruieren — dazu müsste der Lern-Schritt die komplette Suche
+    /// wiederholen und wäre damit so teuer wie das Erzeugen. Deshalb reist es
+    /// mit. Auf vier Nachkommastellen gerundet; das kostet rund 3 KB je Partie
+    /// und ist genauer, als die Zielgröße je sein wird.
+    ///
+    /// Leer bei Partien aus älteren Läufen. Das Generationentraining kommt
+    /// damit zurecht und fällt dann auf das reine Endergebnis zurück.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub search_values: Vec<Option<[f32; 4]>>,
+}
+
+/// Auf vier Nachkommastellen runden, damit die JSONL-Zeile nicht von
+/// `0.123456789` aufgebläht wird. Die Zielgröße liegt in [−1, 1]; vier Stellen
+/// sind drei Größenordnungen feiner als jeder Unterschied, den die Arena je
+/// messen könnte.
+fn round4(v: [f32; 4]) -> [f32; 4] {
+    v.map(|x| (x * 10_000.0).round() / 10_000.0)
 }
 
 // ─── Erzeugen ─────────────────────────────────────────────────────────────────
@@ -303,6 +324,9 @@ pub fn generate(cfg: GenerateConfig) -> io::Result<GenerateStats> {
                 plies:  result.steps.len(),
                 scores: fb.scores.as_array(),
                 winner: result.winner.map(|c| c.name().to_string()),
+                search_values: result.steps.iter()
+                    .map(|s| s.search_value.map(round4))
+                    .collect(),
             };
             writeln!(out, "{}", serde_json::to_string(&line)?)?;
             plies += result.steps.len() as u64;
@@ -419,7 +443,7 @@ pub struct LearnStats {
 ///
 /// Das ist genau die Folge, die `selfplay::play_game` in `steps` sammelt: dort
 /// wird vor jedem Zug die aktuelle Stellung abgelegt.
-fn replay(moves: &str) -> Result<(Vec<Board>, Board), String> {
+pub(crate) fn replay(moves: &str) -> Result<(Vec<Board>, Board), String> {
     let mut board  = Board::default();
     let mut boards = Vec::new();
     for tok in moves.split_whitespace() {

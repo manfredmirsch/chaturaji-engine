@@ -10,6 +10,7 @@
 
 use chaturaji_nnue::db;
 use chaturaji_nnue::dist::{self, GenerateConfig, LearnConfig, PretrainConfig, Progress};
+use chaturaji_nnue::gen_train::{self, GenTrainConfig};
 use chaturaji_nnue::network::NnueNetwork;
 use chaturaji_nnue::pgn_import::{load_games_from_dir, load_games_from_json_dir};
 use chaturaji_nnue::supervised::run_supervised;
@@ -53,6 +54,10 @@ fn main() {
     let mut run_seed     = 42u64;
     let mut games_done   = 0u64;
     let mut epochs       = 1u32;
+    // Gewicht der Suchbewertung im Generationentraining. 0,10 ist der Wert aus
+    // flutteraji (`nnue/train.py --q-weight`); dort trägt der Partieausgang
+    // also neun Zehntel des Ziels.
+    let mut q_weight     = 0.10f32;
 
     let mut i = 1;
     while i < args.len() {
@@ -99,6 +104,12 @@ fn main() {
                 i += 1;
                 if i < args.len() { games_dir = args[i].clone(); }
             }
+            "--learn-gen"  => {
+                mode = Mode::LearnGen;
+                i += 1;
+                if i < args.len() { games_dir = args[i].clone(); }
+            }
+            "--q-weight"    => { i += 1; if i < args.len() { q_weight = args[i].parse().unwrap_or(q_weight); } }
             "--epochs"      => { i += 1; if i < args.len() { epochs = args[i].parse().unwrap_or(epochs); } }
             "--init-state" => { mode = Mode::InitState; }
             "--weights"     => { i += 1; if i < args.len() { weights_path  = args[i].clone(); } }
@@ -274,6 +285,38 @@ fn main() {
             }
         }
 
+        Mode::LearnGen => {
+            if games_dir.is_empty() {
+                eprintln!("Fehler: --learn-gen braucht ein Verzeichnis mit .jsonl-Dateien.");
+                return;
+            }
+            let cfg = GenTrainConfig {
+                weights_path: weights_path.clone(),
+                weights_out:  if weights_out.is_empty() { weights_path } else { weights_out },
+                opt_state_path: opt_state,
+                progress_path,
+                games_dir,
+                lr,
+                epochs,
+                q_weight,
+            };
+            match gen_train::learn_generational(cfg) {
+                Ok(s) => {
+                    if s.skipped > 0 {
+                        eprintln!("{} Partien übersprungen.", s.skipped);
+                    }
+                    if s.games == 0 {
+                        eprintln!("Keine Partie gelernt — Abbruch, damit die Runde nicht als erledigt gilt.");
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Generationentraining fehlgeschlagen: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
         Mode::Export => export_weights(&db_path, &export_path),
         Mode::Supervised => {
             if pgn_dir.is_empty() && json_dir.is_empty() {
@@ -324,7 +367,7 @@ fn main() {
     }
 }
 
-enum Mode { Train, Stats, Export, Supervised, Generate, Learn, InitState, Pretrain }
+enum Mode { Train, Stats, Export, Supervised, Generate, Learn, LearnGen, InitState, Pretrain }
 
 fn print_help() {
     println!("Chaturaji NNUE TD(λ) Trainer\n");
@@ -358,6 +401,9 @@ fn print_help() {
     println!("  --init-state         Startzustand aus --db (oder frisch) schreiben");
     println!("  --generate <datei>   Partien gegen eingefrorene Gewichte spielen → JSONL");
     println!("  --learn <verz>       JSONL-Partien nachspielen und TD-Updates anwenden");
+    println!("  --learn-gen <verz>   dieselben Partien überwacht lernen (Generationentraining):");
+    println!("                       Ziel = Partieausgang + Suchbewertung, gemischt, mehrere Epochen");
+    println!("  --q-weight <f>       Anteil der Suchbewertung am Ziel, 0..1  [Standard: 0.10]");
     println!("  --pretrain <verz>    Supervised Pre-Training aus echten Partien (dateibasiert)");
     println!("  --epochs <n>         Durchläufe über den Datensatz    [Standard: 1]");
     println!("  --weights <datei>    Gewichte (Ein-/Ausgabe)               [Standard: weights.json]");

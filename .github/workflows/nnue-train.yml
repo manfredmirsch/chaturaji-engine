@@ -67,6 +67,19 @@ on:
         description: 'Eröffnungsbuch verwenden (muss im Release liegen)'
         type: boolean
         default: true
+      learn_mode:
+        description: 'Lernverfahren: td (TD-Lambda) oder gen (Generationentraining)'
+        type: choice
+        options: ['td', 'gen']
+        default: 'td'
+      q_weight:
+        description: 'nur gen: Anteil der Suchbewertung am Ziel (0 = nur Partieausgang)'
+        type: string
+        default: '0.10'
+      epochs:
+        description: 'nur gen: Durchläufe über die Partien einer Runde'
+        type: string
+        default: '2'
 
 # Zwei gleichzeitige Läufe würden sich gegenseitig die Gewichte im Release
 # überschreiben. Nicht abbrechen, sondern anstellen.
@@ -92,6 +105,9 @@ jobs:
       save_every:  ${{ inputs.save_every }}
       max_seconds: ${{ inputs.max_seconds }}
       use_book:    ${{ inputs.use_book }}
+      learn_mode:  ${{ inputs.learn_mode }}
+      q_weight:    ${{ inputs.q_weight }}
+      epochs:      ${{ inputs.epochs }}
 
   round-2:
     needs: round-1
@@ -109,6 +125,9 @@ jobs:
       save_every:  ${{ inputs.save_every }}
       max_seconds: ${{ inputs.max_seconds }}
       use_book:    ${{ inputs.use_book }}
+      learn_mode:  ${{ inputs.learn_mode }}
+      q_weight:    ${{ inputs.q_weight }}
+      epochs:      ${{ inputs.epochs }}
 
   round-3:
     needs: round-2
@@ -126,6 +145,9 @@ jobs:
       save_every:  ${{ inputs.save_every }}
       max_seconds: ${{ inputs.max_seconds }}
       use_book:    ${{ inputs.use_book }}
+      learn_mode:  ${{ inputs.learn_mode }}
+      q_weight:    ${{ inputs.q_weight }}
+      epochs:      ${{ inputs.epochs }}
 
   round-4:
     needs: round-3
@@ -143,6 +165,9 @@ jobs:
       save_every:  ${{ inputs.save_every }}
       max_seconds: ${{ inputs.max_seconds }}
       use_book:    ${{ inputs.use_book }}
+      learn_mode:  ${{ inputs.learn_mode }}
+      q_weight:    ${{ inputs.q_weight }}
+      epochs:      ${{ inputs.epochs }}
 
   round-5:
     needs: round-4
@@ -160,6 +185,9 @@ jobs:
       save_every:  ${{ inputs.save_every }}
       max_seconds: ${{ inputs.max_seconds }}
       use_book:    ${{ inputs.use_book }}
+      learn_mode:  ${{ inputs.learn_mode }}
+      q_weight:    ${{ inputs.q_weight }}
+      epochs:      ${{ inputs.epochs }}
 
   round-6:
     needs: round-5
@@ -177,6 +205,9 @@ jobs:
       save_every:  ${{ inputs.save_every }}
       max_seconds: ${{ inputs.max_seconds }}
       use_book:    ${{ inputs.use_book }}
+      learn_mode:  ${{ inputs.learn_mode }}
+      q_weight:    ${{ inputs.q_weight }}
+      epochs:      ${{ inputs.epochs }}
 
   round-7:
     needs: round-6
@@ -194,6 +225,9 @@ jobs:
       save_every:  ${{ inputs.save_every }}
       max_seconds: ${{ inputs.max_seconds }}
       use_book:    ${{ inputs.use_book }}
+      learn_mode:  ${{ inputs.learn_mode }}
+      q_weight:    ${{ inputs.q_weight }}
+      epochs:      ${{ inputs.epochs }}
 
   round-8:
     needs: round-7
@@ -211,3 +245,6 @@ jobs:
       save_every:  ${{ inputs.save_every }}
       max_seconds: ${{ inputs.max_seconds }}
       use_book:    ${{ inputs.use_book }}
+      learn_mode:  ${{ inputs.learn_mode }}
+      q_weight:    ${{ inputs.q_weight }}
+      epochs:      ${{ inputs.epochs }}

@@ -26,6 +26,14 @@ on:
       save_every:   { type: string, required: true }
       max_seconds:  { type: string, required: true }
       use_book:     { type: boolean, required: true }
+      # Welches Lernverfahren die Runde anwendet. Beide sehen dieselben
+      # Partien; sie unterscheiden sich nur im Zielwert.
+      #   td  — TD(λ): Ziel ist die eigene Bewertung der Folgestellung
+      #   gen — Generationentraining: Ziel ist Partieausgang + Suchbewertung,
+      #         gemischt über die ganze Runde, mehrere Epochen
+      learn_mode:   { type: string, required: false, default: 'td' }
+      q_weight:     { type: string, required: false, default: '0.10' }
+      epochs:       { type: string, required: false, default: '1' }
 
 env:
   STATE_TAG: nnue-state
@@ -194,22 +202,45 @@ jobs:
         # Der Optimizer-Zustand ist ~2,8 MB und wird nur hier gebraucht; die
         # Erzeuger-Shards müssen ihn nicht mitschleppen.
 
-      - name: TD-Updates anwenden
+      - name: Updates anwenden
         run: |
           set -euo pipefail
           chmod +x target/release/train_nnue
           ls -la games/
-          ./target/release/train_nnue \
-            --learn games \
-            --weights     state/weights.json \
-            --weights-out state/weights.json \
-            --opt-state   state/opt_state.bin \
-            --progress    state/progress.json \
-            --lambda     ${{ inputs.lambda }} \
-            --lr         ${{ inputs.lr }} \
-            --lr-decay   ${{ inputs.lr_decay }} \
-            --save-every ${{ inputs.save_every }} \
-            | tee learn.log
+          case '${{ inputs.learn_mode }}' in
+            td)
+              ./target/release/train_nnue \
+                --learn games \
+                --weights     state/weights.json \
+                --weights-out state/weights.json \
+                --opt-state   state/opt_state.bin \
+                --progress    state/progress.json \
+                --lambda     ${{ inputs.lambda }} \
+                --lr         ${{ inputs.lr }} \
+                --lr-decay   ${{ inputs.lr_decay }} \
+                --save-every ${{ inputs.save_every }} \
+                | tee learn.log
+              ;;
+            gen)
+              # Kein --lr-decay: das Generationentraining hält die Lernrate
+              # über die Runde fest, weil derselbe Datenpunkt in mehreren
+              # Epochen vorkommt und sonst je nach Zeitpunkt anders zählte.
+              ./target/release/train_nnue \
+                --learn-gen games \
+                --weights     state/weights.json \
+                --weights-out state/weights.json \
+                --opt-state   state/opt_state.bin \
+                --progress    state/progress.json \
+                --lr       ${{ inputs.lr }} \
+                --epochs   ${{ inputs.epochs }} \
+                --q-weight ${{ inputs.q_weight }} \
+                | tee learn.log
+              ;;
+            *)
+              echo "::error::Unbekanntes learn_mode '${{ inputs.learn_mode }}' — erlaubt sind 'td' und 'gen'."
+              exit 1
+              ;;
+          esac
 
       - name: Zustand zurückschreiben
         env:
@@ -223,7 +254,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "### NNUE-Runde"
+            echo "### NNUE-Runde (${{ inputs.learn_mode }})"
             echo
             echo '```'
             tail -5 learn.log 2>/dev/null || echo "(kein Log)"

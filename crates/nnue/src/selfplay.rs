@@ -78,6 +78,19 @@ pub struct Step {
     /// auch Punktestand, Zugrecht und Spielphase (siehe `features::dense_features`).
     pub board: Board,
     pub value: [f32; 4],
+    /// Bewertung der Stellung *nach der Suche* — der Scorevektor des besten
+    /// Zuges aus `nnue_best_move_scored`.
+    ///
+    /// Das ist eine bessere Schätzung als `value`: dort steht die rohe Ausgabe
+    /// des Netzes für diese Stellung, hier das Ergebnis von `engine_depth`
+    /// Halbzügen Vorausschau mit demselben Netz an den Blättern. Die Suche
+    /// korrigiert das Netz — genau das macht sie ja — und diese Korrektur ist
+    /// ein Lernsignal, das im TD-Training bisher weggeworfen wurde.
+    ///
+    /// `None`, wenn keine Suche lief: bei einem Buchzug und bei einem
+    /// ε-Zufallszug. Beides wäre nachträglich nur mit einer zweiten Suche zu
+    /// füllen, und die kostet so viel wie die erste.
+    pub search_value: Option<[f32; 4]>,
 }
 
 pub struct GameResult {
@@ -171,18 +184,38 @@ pub fn nnue_best_move(
     keys:       &ZobristKeys,
     tt:         &mut HashMap<u64, (u8, [f32; 4])>,
 ) -> Move {
+    nnue_best_move_scored(net, board, moves, depth, beam_width, keys, tt).0
+}
+
+/// Wie [`nnue_best_move`], gibt aber zusätzlich den **vollen Scorevektor** des
+/// gewählten Zuges zurück — die Bewertung der Stellung nach der Suche.
+///
+/// Der Vektor ist der Rückgabewert von `nnue_maxn` für das Kind des besten
+/// Zuges, also die Einschätzung aller vier Spieler nach `depth` Halbzügen
+/// Vorausschau. Das Generationentraining benutzt ihn als Teil des Zielwerts
+/// (siehe [`crate::gen_train`]); `nnue_best_move` wirft ihn weg.
+pub fn nnue_best_move_scored(
+    net:        &NnueNetwork,
+    board:      &Board,
+    moves:      &[Move],
+    depth:      u8,
+    beam_width: usize,
+    keys:       &ZobristKeys,
+    tt:         &mut HashMap<u64, (u8, [f32; 4])>,
+) -> (Move, [f32; 4]) {
     let mover_idx = board.to_move.idx();
     let d1 = depth.saturating_sub(1);
 
     moves.iter().copied()
         .map(|mv| {
-            let child = Rules::apply_with_effects(board, mv);
-            let score = nnue_maxn(net, &child, d1, beam_width, tt, keys)[mover_idx];
-            (mv, score)
+            let child  = Rules::apply_with_effects(board, mv);
+            let scores = nnue_maxn(net, &child, d1, beam_width, tt, keys);
+            (mv, scores)
         })
-        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(mv, _)| mv)
-        .unwrap_or(moves[0])
+        .max_by(|a, b| {
+            a.1[mover_idx].partial_cmp(&b.1[mover_idx]).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or((moves[0], net.forward(board)))
 }
 
 // ─── play_game ────────────────────────────────────────────────────────────────
@@ -207,22 +240,27 @@ pub fn play_game(
         if moves.is_empty() { break; }
 
         let value = net.forward(&board);
-        steps.push(Step { board: board.clone(), value });
 
         let book_move = book
             .filter(|_| ply < cfg.book_max_plies)
             .and_then(|b| b.entries(&board, keys, cfg.book_min_count))
             .and_then(|entries| sample_book_move(&entries, &moves, rng));
 
+        let mut search_value = None;
         let chosen = if let Some(mv) = book_move {
             mv
         } else if rng.gen::<f32>() < epsilon {
             moves[rng.gen_range(0..moves.len())]
         } else {
             tt.clear();
-            nnue_best_move(net, &board, &moves, cfg.engine_depth, cfg.beam_width, keys, &mut tt)
+            let (mv, scores) = nnue_best_move_scored(
+                net, &board, &moves, cfg.engine_depth, cfg.beam_width, keys, &mut tt,
+            );
+            search_value = Some(scores);
+            mv
         };
 
+        steps.push(Step { board: board.clone(), value, search_value });
         move_log.push(move_to_str(&chosen));
         board = Rules::apply_with_effects(&board, chosen);
     }

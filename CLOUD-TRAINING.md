@@ -132,6 +132,84 @@ entsprechend weniger Partien und der Fortschrittszähler zählt nur die
 tatsächlich gelernten. Ohne das würde der 6-Stunden-Deckel von GitHub den Job
 hart abschießen — und ein hart abgeschossener Job lädt kein Artefakt hoch.
 
+## Zweites Lernverfahren: Generationentraining
+
+`learn_mode` wählt aus, **wie** aus den Partien einer Runde gelernt wird. Die
+Partien selbst sind in beiden Fällen dieselben; nur der Zielwert unterscheidet
+sich.
+
+| | `td` (Vorgabe) | `gen` |
+|---|---|---|
+| Ziel für Stellung *t* | V(s*ₜ₊₁*), die eigene Bewertung der Folgestellung | (1−q)·Partieausgang + q·Suchbewertung |
+| Reihenfolge | Partie rückwärts, Eligibility Traces | über die ganze Runde gemischt |
+| Durchläufe | einer | `epochs` |
+| Lernrate | zerfällt mit `lr_decay` | fest über die Runde |
+
+### Warum es das gibt
+
+Das TD-Training bleibt nach einer Runde stehen. Gegen denselben
+vortrainierten Ausgangsstand gemessen:
+
+| | Seed 1 | Seed 42 |
+|---|---|---|
+| nach Runde 1 | +0,6510 | +0,6782 |
+| nach Runde 4 | +0,5515 | +0,5694 |
+
+Zwei Eigenschaften des TD-Ziels erklären das. Erstens ist es **an sich selbst
+gebunden**: das Ziel ist die eigene Meinung des Netzes über die nächste
+Stellung, ein echter Ausgang steht nur ganz am Ende. Zweitens **kommt dieser
+Ausgang kaum an**: 80 % der Selbstspielpartien laufen ins Halbzug-Limit
+(ausgezählt an einem Shard aus Runde 4: 319 von 400, Median genau 150), und bei
+λ = 0,7 ist das Gewicht des Endergebnisses 50 Halbzüge vorher auf 0,7⁵⁰ ≈ 2·10⁻⁸
+gefallen. Die Eröffnung lernt vom Ausgang praktisch nichts.
+
+`gen` ersetzt beides durch feste Ziele. Der **Partieausgang** erreicht jede
+Stellung mit vollem Gewicht. Die **Suchbewertung** ist der Scorevektor, den
+Max^n an der Wurzel liefert — genauer als das, was das Netz ohne Suche sagt,
+und im Self-Play ohnehin schon berechnet. Das Netz lernt damit, die Suche
+einzuholen. Wo keine Suche lief (Buchzug, ε-Zufallszug), zählt nur der Ausgang;
+bei Tiefe 4 mit Buch sind das je nach ε rund ein Viertel der Stellungen.
+
+Das Verfahren stammt aus [`Foobork/flutteraji`](https://github.com/Foobork/flutteraji)
+(MIT, Copyright 2025 Patrick Davin), einem zweiten Chaturaji-Projekt mit
+demselben Plateau. Dort heißt der Mischfaktor `--q-weight` und steht auf 0,10.
+
+### Einstellungen
+
+| Eingabe | Standard | Bedeutung |
+|---|---|---|
+| `learn_mode` | `td` | `td` oder `gen` |
+| `q_weight` | 0,10 | Anteil der Suchbewertung; 0 = nur Partieausgang |
+| `epochs` | 2 | Durchläufe über die Partien einer Runde |
+
+`lambda`, `lr_decay` und `save_every` sind bei `gen` wirkungslos.
+
+Lokal:
+
+```bash
+train_nnue --learn-gen games --weights w.json --progress p.json \
+           --opt-state o.bin --lr 0.0001 --epochs 3 --q-weight 0.10
+```
+
+### Wie man es bewertet
+
+Nicht am Loss — der ist zwischen den beiden Verfahren gar nicht vergleichbar,
+weil er gegen verschiedene Ziele gerechnet wird. Nur die Arena zählt:
+`weights.json` nach der Runde gegen `weights-pretrained.json`, über mindestens
+zwei Seeds. Die Zahl, die es zu schlagen gilt, ist **+0,66** — der Wert einer
+einzelnen TD-Runde mit `lr 0.0001`.
+
+Eine Vorsichtsmaßnahme vorweg: `gen` überschreibt `weights.json` im Release wie
+jede andere Runde auch. Wer den TD-Stand behalten will, lädt ihn vorher unter
+eigenem Namen ans Release.
+
+### Speicherbedarf
+
+`gen` hält alle Stellungen einer Runde gleichzeitig im Speicher — anders ist
+das Mischen nicht zu haben. Ein `Board` ist rund 200 Byte; eine Runde mit 6.400
+Partien à ~140 Halbzügen kommt auf gut 200 MB. Auf einem GitHub-Runner (7 GB)
+ist das unkritisch, begrenzt aber, wie groß eine Runde werden darf.
+
 ## Ergebnis abholen
 
 Nach jeder Runde liegen die neuen Gewichte im Release `nnue-state`
