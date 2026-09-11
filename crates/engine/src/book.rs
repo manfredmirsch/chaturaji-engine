@@ -88,7 +88,16 @@ impl OpeningBook {
             })
             .collect();
         if out.is_empty() { return None; }
-        out.sort_by(|a, b| b.2.cmp(&a.2));
+        // Häufigkeit absteigend, bei Gleichstand nach Feldern. Der Tiebreak ist
+        // nicht Kosmetik: `stats` ist eine `HashMap`, deren Iterationsreihenfolge
+        // `RandomState` je Prozess neu würfelt. Ohne ihn stünden gleich häufige
+        // Züge mal so, mal so in der Liste — und `sample_book_move` läuft sie
+        // nach kumulierter Häufigkeit ab, wählt bei derselben Zufallszahl also
+        // einen anderen Zug. Self-Play war damit trotz festem Partie-Seed nicht
+        // zwischen zwei Läufen reproduzierbar; aufgefallen an drei Läufen über
+        // dieselben 6.400 Partien, die auf 114,47 / 114,73 / 114,76 ∅Halbzüge
+        // kamen statt auf denselben Wert.
+        out.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1)));
         Some(out)
     }
 }
@@ -164,5 +173,61 @@ mod tests {
         assert_eq!(mv.from, 11);
         assert_eq!(mv.to,   19);
         assert_eq!(mv.mover, Color::Red);
+    }
+
+    /// Gleich häufige Buchzüge müssen in stabiler Reihenfolge stehen.
+    ///
+    /// `entries` liest aus einer `HashMap`, deren Iterationsreihenfolge je
+    /// Prozess neu ausgewürfelt wird. Ohne Tiebreak hinter der Häufigkeit
+    /// wählte `sample_book_move` bei derselben Zufallszahl mal den einen, mal
+    /// den anderen Zug — Self-Play war zwischen zwei Läufen nicht
+    /// reproduzierbar, obwohl der Partie-Seed festliegt.
+    ///
+    /// Der Test baut die Map mehrfach neu auf: innerhalb eines Prozesses ist
+    /// die Reihenfolge zwar stabil, die Einfügereihenfolge aber nicht die
+    /// einzige Quelle — deshalb wird hier vor allem die Sortierung selbst
+    /// festgenagelt.
+    #[test]
+    fn entries_are_ordered_deterministically_when_counts_tie() {
+        let keys = ZobristKeys::new();
+        let b    = Board::default();
+        let hash = hash_board(&b, &keys);
+
+        let paare = [(11u8, 19u8), (9, 17), (10, 18), (12, 20)];
+
+        let baue = |reihenfolge: &[usize]| {
+            let mut moves = HashMap::new();
+            for &i in reihenfolge {
+                let (from, to) = paare[i];
+                moves.insert(format!("{from}-{to}"), dummy_stats(50, 100));
+            }
+            let mut book = OpeningBook::default();
+            book.positions.insert(hash, moves);
+            book.entries(&b, &keys, 5).expect("alle Züge über min_count")
+        };
+
+        let erwartet = vec![(9u8, 17u8, 50u32), (10, 18, 50), (11, 19, 50), (12, 20, 50)];
+        assert_eq!(baue(&[0, 1, 2, 3]), erwartet);
+        assert_eq!(baue(&[3, 2, 1, 0]), erwartet, "Einfügereihenfolge darf nichts ändern");
+        assert_eq!(baue(&[2, 0, 3, 1]), erwartet);
+    }
+
+    /// Die Häufigkeit bleibt das erste Kriterium — der Tiebreak greift erst
+    /// darunter und darf die Reihenfolge nicht umdrehen.
+    #[test]
+    fn count_still_outranks_the_tiebreak() {
+        let keys = ZobristKeys::new();
+        let b    = Board::default();
+        let hash = hash_board(&b, &keys);
+
+        let mut moves = HashMap::new();
+        moves.insert("9-17".to_string(),  dummy_stats(10, 20));   // kleines Feld, selten
+        moves.insert("12-20".to_string(), dummy_stats(99, 200));  // großes Feld, häufig
+        let mut book = OpeningBook::default();
+        book.positions.insert(hash, moves);
+
+        let out = book.entries(&b, &keys, 5).unwrap();
+        assert_eq!(out[0], (12, 20, 99), "der häufigste Zug steht vorn");
+        assert_eq!(out[1], (9, 17, 10));
     }
 }
