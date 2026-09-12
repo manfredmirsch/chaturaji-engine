@@ -19,7 +19,7 @@ use rand::{Rng, SeedableRng};
 use rand::rngs::SmallRng;
 use rayon::prelude::*;
 use chaturaji_core::board::{Board, Move};
-use chaturaji_core::piece::Color;
+use chaturaji_core::piece::{Color, PieceKind};
 use chaturaji_core::rules::Rules;
 use chaturaji_core::notation::move_to_str;
 use chaturaji_core::zobrist::{hash_board, ZobristKeys};
@@ -56,6 +56,8 @@ pub struct SelfPlayConfig {
     pub beam_width:      usize,
     pub book_max_plies:  usize,
     pub book_min_count:  u32,
+    /// Womit der Beam auswählt. Vorgabe: das gelernte Zugmodell.
+    pub beam_order:      BeamOrder,
 }
 
 impl Default for SelfPlayConfig {
@@ -70,6 +72,7 @@ impl Default for SelfPlayConfig {
             beam_width:     0,
             book_max_plies: 16,
             book_min_count: 2,
+            beam_order:     BeamOrder::Model,
         }
     }
 }
@@ -130,6 +133,70 @@ fn move_model() -> &'static MoveModel {
     MOVE_MODEL.get_or_init(MoveModel::default)
 }
 
+/// Womit der Beam seine Züge auswählt.
+///
+/// Die Variante ist ein Parameter und keine feste Entscheidung, damit die
+/// Arena beide Seiten unterschiedlich spielen lassen kann. Ohne das ließe sich
+/// eine Sortierung nicht gegen die andere messen: die Arena baut beide Seiten
+/// aus demselben Quellstand, und ein Vergleich zweier *Netze* sagt über die
+/// Sortierung nichts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BeamOrder {
+    /// Das gelernte Zugmodell aus echten Partien.
+    #[default]
+    Model,
+    /// Die Handheuristik von vor 2026-09-12: Schlagwert plus 20 für eine
+    /// Umwandlung. Nur noch zum Vergleichen da.
+    Legacy,
+}
+
+impl BeamOrder {
+    /// Aus einem CLI-Wort. Unbekanntes ergibt `None`, damit der Aufrufer
+    /// meckern kann, statt still die Vorgabe zu nehmen.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "model"  | "modell" => Some(Self::Model),
+            "legacy" | "alt"    => Some(Self::Legacy),
+            _ => None,
+        }
+    }
+}
+
+/// Die alte Handheuristik: Schlagwert plus Umwandlungsbonus.
+#[inline]
+fn legacy_move_priority(mv: Move) -> i32 {
+    let capture = match mv.captured.map(|p| p.kind) {
+        Some(PieceKind::King)   => 100,
+        Some(PieceKind::Boat)   => 50,
+        Some(PieceKind::Knight) => 30,
+        Some(PieceKind::Bishop) => 30,
+        Some(PieceKind::Pawn)   => 10,
+        None                    => 0,
+    };
+    capture + if mv.promoted { 20 } else { 0 }
+}
+
+/// Kürzt `moves` auf die besten `beam_width` nach der gewählten Sortierung.
+fn apply_beam(board: &Board, moves: &mut Vec<Move>, beam_width: usize, order: BeamOrder) {
+    if beam_width == 0 || moves.len() <= beam_width { return; }
+    match order {
+        BeamOrder::Legacy => {
+            moves.sort_by_key(|&mv| std::cmp::Reverse(legacy_move_priority(mv)));
+            moves.truncate(beam_width);
+        }
+        BeamOrder::Model => {
+            // Der Kontext (vier Angriffskarten) einmal je Stellung — nicht je Zug.
+            let model = move_model();
+            let ctx   = MoveFeatureContext::new(board);
+            let mut bewertet: Vec<(Move, f32)> = moves.iter()
+                .map(|mv| (*mv, model.score_features(&fast_features(board, mv, &ctx))))
+                .collect();
+            bewertet.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            *moves = bewertet.into_iter().take(beam_width).map(|(mv, _)| mv).collect();
+        }
+    }
+}
+
 // ─── NNUE Max^n mit Transpositionstabelle ────────────────────────────────────
 
 /// Rekursiver Max^n mit NNUE-Blattbewertung und optionalem Beam.
@@ -145,6 +212,7 @@ fn nnue_maxn(
     board:      &Board,
     depth:      u8,
     beam_width: usize,
+    order:      BeamOrder,
     tt:         &mut HashMap<u64, (u8, [f32; 4])>,
     keys:       &ZobristKeys,
 ) -> [f32; 4] {
@@ -164,25 +232,14 @@ fn nnue_maxn(
 
     let mover_idx = board.to_move.idx();
 
-    // Beam: nach dem gelernten Modell sortieren, dann auf beam_width kürzen.
-    // Der Kontext (vier Angriffskarten) wird einmal je Stellung gebaut — das
-    // lohnt sich nur, wenn überhaupt gekürzt wird, deshalb die Abfrage davor.
-    if beam_width > 0 && all_moves.len() > beam_width {
-        let model = move_model();
-        let ctx   = MoveFeatureContext::new(board);
-        let mut bewertet: Vec<(Move, f32)> = all_moves.iter()
-            .map(|mv| (*mv, model.score_features(&fast_features(board, mv, &ctx))))
-            .collect();
-        bewertet.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        all_moves = bewertet.into_iter().take(beam_width).map(|(mv, _)| mv).collect();
-    }
+    apply_beam(board, &mut all_moves, beam_width, order);
     let moves = all_moves;
 
     let mut best = [f32::NEG_INFINITY; 4];
 
     for mv in moves {
         let child  = Rules::apply_with_effects(board, mv);
-        let scores = nnue_maxn(net, &child, depth - 1, beam_width, tt, keys);
+        let scores = nnue_maxn(net, &child, depth - 1, beam_width, order, tt, keys);
         if scores[mover_idx] > best[mover_idx] {
             best = scores;
         }
@@ -201,10 +258,11 @@ pub fn nnue_best_move(
     moves:      &[Move],
     depth:      u8,
     beam_width: usize,
+    order:      BeamOrder,
     keys:       &ZobristKeys,
     tt:         &mut HashMap<u64, (u8, [f32; 4])>,
 ) -> Move {
-    nnue_best_move_scored(net, board, moves, depth, beam_width, keys, tt).0
+    nnue_best_move_scored(net, board, moves, depth, beam_width, order, keys, tt).0
 }
 
 /// Wie [`nnue_best_move`], gibt aber zusätzlich den **vollen Scorevektor** des
@@ -220,6 +278,7 @@ pub fn nnue_best_move_scored(
     moves:      &[Move],
     depth:      u8,
     beam_width: usize,
+    order:      BeamOrder,
     keys:       &ZobristKeys,
     tt:         &mut HashMap<u64, (u8, [f32; 4])>,
 ) -> (Move, [f32; 4]) {
@@ -229,7 +288,7 @@ pub fn nnue_best_move_scored(
     moves.iter().copied()
         .map(|mv| {
             let child  = Rules::apply_with_effects(board, mv);
-            let scores = nnue_maxn(net, &child, d1, beam_width, tt, keys);
+            let scores = nnue_maxn(net, &child, d1, beam_width, order, tt, keys);
             (mv, scores)
         })
         .max_by(|a, b| {
@@ -274,7 +333,8 @@ pub fn play_game(
         } else {
             tt.clear();
             let (mv, scores) = nnue_best_move_scored(
-                net, &board, &moves, cfg.engine_depth, cfg.beam_width, keys, &mut tt,
+                net, &board, &moves, cfg.engine_depth, cfg.beam_width, cfg.beam_order,
+                keys, &mut tt,
             );
             search_value = Some(scores);
             mv
@@ -392,7 +452,7 @@ mod tests {
         let moves = Rules::legal_moves(&board);
         let keys  = ZobristKeys::new();
         let mut tt = HashMap::new();
-        let mv = nnue_best_move(&net, &board, &moves, 1, 0, &keys, &mut tt);
+        let mv = nnue_best_move(&net, &board, &moves, 1, 0, BeamOrder::Model, &keys, &mut tt);
         assert!(moves.contains(&mv));
     }
 
@@ -403,7 +463,7 @@ mod tests {
         let moves = Rules::legal_moves(&board);
         let keys  = ZobristKeys::new();
         let mut tt = HashMap::new();
-        let mv = nnue_best_move(&net, &board, &moves, 2, 0, &keys, &mut tt);
+        let mv = nnue_best_move(&net, &board, &moves, 2, 0, BeamOrder::Model, &keys, &mut tt);
         assert!(moves.contains(&mv));
     }
 
@@ -414,7 +474,7 @@ mod tests {
         let moves = Rules::legal_moves(&board);
         let keys  = ZobristKeys::new();
         let mut tt = HashMap::new();
-        let mv = nnue_best_move(&net, &board, &moves, 4, 6, &keys, &mut tt);
+        let mv = nnue_best_move(&net, &board, &moves, 4, 6, BeamOrder::Model, &keys, &mut tt);
         assert!(moves.contains(&mv));
     }
 

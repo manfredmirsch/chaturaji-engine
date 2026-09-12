@@ -42,7 +42,7 @@ use chaturaji_core::rules::Rules;
 use chaturaji_core::zobrist::ZobristKeys;
 use chaturaji_nnue::network::NnueNetwork;
 use chaturaji_nnue::outcome::place_values;
-use chaturaji_nnue::selfplay::nnue_best_move;
+use chaturaji_nnue::selfplay::{nnue_best_move, BeamOrder};
 
 /// Die sechs Aufteilungen von vier Sitzen auf 2+2. Der Eintrag nennt die Sitze,
 /// die Netz A besetzt; die beiden anderen gehören B.
@@ -60,6 +60,13 @@ struct Args {
     shards: usize,
     shard: usize,
     out: String,
+    /// Zugsortierung im Beam, je Seite getrennt.
+    ///
+    /// Damit lässt sich die Sortierung selbst messen und nicht nur das Netz:
+    /// `--a weights.json --b weights.json --a-beam model --b-beam legacy`
+    /// spielt dasselbe Netz gegen sich, einmal so und einmal so sortiert.
+    a_beam: BeamOrder,
+    b_beam: BeamOrder,
 }
 
 fn parse_args() -> Args {
@@ -76,6 +83,8 @@ fn parse_args() -> Args {
         shards: 1,
         shard: 0,
         out: String::new(),
+        a_beam: BeamOrder::Model,
+        b_beam: BeamOrder::Model,
     };
     let mut i = 1;
     while i < v.len() {
@@ -92,11 +101,23 @@ fn parse_args() -> Args {
             "--shards"        => a.shards = next(&mut i).parse().unwrap_or(a.shards),
             "--shard"         => a.shard = next(&mut i).parse().unwrap_or(a.shard),
             "--out"           => a.out = next(&mut i),
+            "--a-beam"        => a.a_beam = beam_order(&next(&mut i)),
+            "--b-beam"        => a.b_beam = beam_order(&next(&mut i)),
             _ => {}
         }
         i += 1;
     }
     a
+}
+
+/// Kein stilles Zurückfallen auf die Vorgabe: ein vertippter Wert würde sonst
+/// als „beide Seiten gleich" durchgehen, und der Lauf misst dann nichts,
+/// sieht aber aus wie ein Ergebnis.
+fn beam_order(s: &str) -> BeamOrder {
+    BeamOrder::from_str(s).unwrap_or_else(|| {
+        eprintln!("Unbekannte Beam-Sortierung '{s}' — erlaubt sind 'model' und 'legacy'.");
+        std::process::exit(2);
+    })
 }
 
 fn load(path: &str) -> NnueNetwork {
@@ -124,9 +145,11 @@ fn opening(plies: usize, seed: u64) -> Board {
 
 /// Spielt eine Partie aus der gegebenen Stellung. `a_seats` sind die Sitze von
 /// Netz A. Rückgabe: Platzwerte je Sitz und die Zahl der gespielten Halbzüge.
+#[allow(clippy::too_many_arguments)]
 fn play(
     start: &Board, a_seats: [usize; 2],
     net_a: &NnueNetwork, net_b: &NnueNetwork,
+    a_beam: BeamOrder, b_beam: BeamOrder,
     depth: u8, beam: usize, max_moves: usize, keys: &ZobristKeys,
 ) -> ([f32; 4], usize) {
     let mut board = start.clone();
@@ -136,9 +159,15 @@ fn play(
     while plies < max_moves && !Rules::is_game_over(&board) {
         let moves = Rules::legal_moves(&board);
         if moves.is_empty() { break; }
-        let net = if a_seats.contains(&board.to_move.idx()) { net_a } else { net_b };
+        let ist_a = a_seats.contains(&board.to_move.idx());
+        let net   = if ist_a { net_a } else { net_b };
+        let order = if ist_a { a_beam } else { b_beam };
+        // Die TT speichert Scorevektoren, die von der Beam-Auswahl abhängen.
+        // Bei zwei verschiedenen Sortierungen in einer Partie dürfen sich die
+        // Seiten die Einträge deshalb nicht teilen — sonst läse A Ergebnisse,
+        // die B mit anderer Auswahl erzeugt hat.
         tt.clear();
-        let mv = nnue_best_move(net, &board, &moves, depth, beam, keys, &mut tt);
+        let mv = nnue_best_move(net, &board, &moves, depth, beam, order, keys, &mut tt);
         board = Rules::apply_with_effects(&board, mv);
         plies += 1;
     }
@@ -162,6 +191,9 @@ fn main() {
     println!("B: {}  ({} Schritte)", args.b, net_b.steps);
     println!("{} Gruppen à 6 Partien | Tiefe {} Beam {} | Seed {}",
              groups.len(), args.depth, args.beam, args.seed);
+    if args.a_beam != args.b_beam {
+        println!("Beam-Sortierung: A {:?}, B {:?}", args.a_beam, args.b_beam);
+    }
     println!("{}", "-".repeat(64));
 
     // Je Gruppe die gepaarte Differenz A−B über die sechs Sitzaufteilungen.
@@ -172,6 +204,7 @@ fn main() {
             let (mut sa, mut sb, mut plies) = (0.0f64, 0.0f64, 0.0f64);
             for split in SPLITS {
                 let (vals, p) = play(&start, split, &net_a, &net_b,
+                                     args.a_beam, args.b_beam,
                                      args.depth, args.beam, args.max_moves, &keys);
                 for seat in 0..4 {
                     if split.contains(&seat) { sa += vals[seat] as f64; }
