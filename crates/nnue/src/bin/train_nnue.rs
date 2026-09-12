@@ -11,6 +11,7 @@
 use chaturaji_nnue::db;
 use chaturaji_nnue::dist::{self, GenerateConfig, LearnConfig, PretrainConfig, Progress};
 use chaturaji_nnue::gen_train::{self, GenTrainConfig};
+use chaturaji_nnue::features::FeatureSet;
 use chaturaji_nnue::network::NnueNetwork;
 use chaturaji_nnue::pgn_import::{load_games_from_dir, load_games_from_json_dir};
 use chaturaji_nnue::supervised::run_supervised;
@@ -58,6 +59,10 @@ fn main() {
     // flutteraji (`nnue/train.py --q-weight`); dort trägt der Partieausgang
     // also neun Zehntel des Ziels.
     let mut q_weight     = 0.10f32;
+    // Merkmalssatz eines *neuen* Netzes. Bestehende Netze bringen ihren
+    // eigenen mit; der Schalter kann sie nicht umdeuten, das wäre auch
+    // sinnlos — die Gewichtsmatrix hätte die falsche Breite.
+    let mut feature_set  = FeatureSet::Legacy;
 
     let mut i = 1;
     while i < args.len() {
@@ -110,6 +115,18 @@ fn main() {
                 if i < args.len() { games_dir = args[i].clone(); }
             }
             "--q-weight"    => { i += 1; if i < args.len() { q_weight = args[i].parse().unwrap_or(q_weight); } }
+            "--features"    => {
+                i += 1;
+                if i < args.len() {
+                    match FeatureSet::from_str(&args[i]) {
+                        Some(f) => feature_set = f,
+                        None => {
+                            eprintln!("Unbekannter Merkmalssatz '{}' — erlaubt sind 'legacy' und 'king'.", args[i]);
+                            std::process::exit(2);
+                        }
+                    }
+                }
+            }
             "--epochs"      => { i += 1; if i < args.len() { epochs = args[i].parse().unwrap_or(epochs); } }
             "--init-state" => { mode = Mode::InitState; }
             "--weights"     => { i += 1; if i < args.len() { weights_path  = args[i].clone(); } }
@@ -168,8 +185,9 @@ fn main() {
                     n
                 }
                 None => {
-                    println!("Keine DB gefunden — neues NNUE.");
-                    let mut n = NnueNetwork::new(lr, 0.9);
+                    println!("Keine DB gefunden — neues NNUE, Merkmalssatz '{}' ({} Eingaben).",
+                             feature_set.name(), feature_set.input_size());
+                    let mut n = NnueNetwork::with_features(feature_set, lr, 0.9);
                     n.init_momentum();
                     n
                 }
@@ -404,6 +422,8 @@ fn print_help() {
     println!("  --learn-gen <verz>   dieselben Partien überwacht lernen (Generationentraining):");
     println!("                       Ziel = Partieausgang + Suchbewertung, gemischt, mehrere Epochen");
     println!("  --q-weight <f>       Anteil der Suchbewertung am Ziel, 0..1  [Standard: 0.10]");
+    println!("  --features <satz>    Merkmalssatz eines NEUEN Netzes: legacy | king  [Standard: legacy]");
+    println!("                       king ergänzt 240 König-Bezugs-Merkmale (1533 statt 1293 Eingaben)");
     println!("  --pretrain <verz>    Supervised Pre-Training aus echten Partien (dateibasiert)");
     println!("  --epochs <n>         Durchläufe über den Datensatz    [Standard: 1]");
     println!("  --weights <datei>    Gewichte (Ein-/Ausgabe)               [Standard: weights.json]");

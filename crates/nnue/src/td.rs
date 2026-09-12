@@ -78,7 +78,7 @@ pub fn run(cfg: TrainConfig) {
 
     // Einmal anlegen statt je Partie: die Traces belegen mit vier
     // Ausgaben rund 5 MB, und `reset` leert nur die gesehenen Spalten.
-    let mut traces = Traces::new();
+    let mut traces = Traces::for_size(net.input_size());
 
     let mut acc_loss  = 0.0f32;
     let mut acc_moves = 0u32;

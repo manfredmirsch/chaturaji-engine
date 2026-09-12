@@ -18,9 +18,7 @@
 
 use chaturaji_core::board::Board;
 
-use crate::features::{
-    dense_features, for_each_feature, DENSE_FEATURES, INPUT_SIZE, PIECE_FEATURES,
-};
+use crate::features::{dense_features, FeatureSet, DENSE_FEATURES, INPUT_SIZE};
 use rand::SeedableRng;
 use rand_distr::{Distribution, Normal};
 use serde::{Deserialize, Serialize};
@@ -71,6 +69,13 @@ pub struct NnueNetwork {
     pub l1: Layer,
     pub l2: Layer,
     pub l3: Layer,
+    /// Welche binären Merkmale dieses Netz erwartet.
+    ///
+    /// Steht in der Gewichtsdatei; ältere Dateien haben das Feld nicht und
+    /// werden als `Legacy` gelesen. Damit bleiben alle vorhandenen Netze
+    /// lesbar, und ein altes und ein neues können nebeneinander spielen.
+    #[serde(default)]
+    pub features: FeatureSet,
     pub lr: f32,
     #[serde(default = "default_beta1")]
     pub momentum: f32,
@@ -80,16 +85,30 @@ pub struct NnueNetwork {
 fn default_beta1() -> f32 { BETA1 }
 
 impl NnueNetwork {
-    pub fn new(lr: f32, _momentum: f32) -> Self {
+    pub fn new(lr: f32, momentum: f32) -> Self {
+        Self::with_features(FeatureSet::Legacy, lr, momentum)
+    }
+
+    /// Frisches Netz für einen bestimmten Merkmalssatz.
+    pub fn with_features(features: FeatureSet, lr: f32, _momentum: f32) -> Self {
         Self {
-            l1: Layer::new_he(INPUT_SIZE, H1, 0xDEAD_BEEF_1234_5678),
+            l1: Layer::new_he(features.input_size(), H1, 0xDEAD_BEEF_1234_5678),
             l2: Layer::new_he(H1, H2,         0xCAFE_BABE_ABCD_EF01),
             l3: Layer::new_he(H2, OUTPUT,      0x1234_5678_9ABC_DEF0),
+            features,
             lr,
             momentum: BETA1,
             steps: 0,
         }
     }
+
+    /// Eingabebreite dieses Netzes.
+    #[inline]
+    pub fn input_size(&self) -> usize { self.features.input_size() }
+
+    /// Versatz des dichten Blocks in der Eingabe.
+    #[inline]
+    fn dense_offset(&self) -> usize { self.features.binary_features() }
 
     /// Forward-Pass aus einer Stellung.
     ///
@@ -144,7 +163,7 @@ impl NnueNetwork {
         }
 
         // Die gesehenen Feature-Spalten hängen nicht von der Ausgabe ab.
-        for_each_feature(&cache.bb, |feat| {
+        self.features.for_each(&cache.bb, |feat| {
             if !traces.l1_seen[feat] {
                 traces.l1_seen[feat] = true;
                 traces.l1_seen_list.push(feat);
@@ -152,7 +171,7 @@ impl NnueNetwork {
         });
         for (k, &x) in cache.dense.iter().enumerate() {
             if x == 0.0 { continue; }
-            let col = PIECE_FEATURES + k;
+            let col = self.dense_offset() + k;
             if !traces.l1_seen[col] {
                 traces.l1_seen[col] = true;
                 traces.l1_seen_list.push(col);
@@ -186,7 +205,7 @@ impl NnueNetwork {
             // Faktor hängt nur von der Spalte ab und steht deshalb vor der
             // Schleife über die Neuronen.
             let step = traces.step;
-            for_each_feature(&cache.bb, |feat| {
+            self.features.for_each(&cache.bb, |feat| {
                 let f = traces.lambda_pow[(step - traces.l1_last[feat]) as usize];
                 for i in 0..H1 {
                     traces.l1w[o][i][feat] = f * traces.l1w[o][i][feat] + delta1[i];
@@ -195,7 +214,7 @@ impl NnueNetwork {
             // Dichter Block: derselbe Trace, nur mit dem Eingabewert skaliert.
             for (k, &x) in cache.dense.iter().enumerate() {
                 if x == 0.0 { continue; }
-                let col = PIECE_FEATURES + k;
+                let col = self.dense_offset() + k;
                 let f = traces.lambda_pow[(step - traces.l1_last[col]) as usize];
                 for i in 0..H1 {
                     traces.l1w[o][i][col] = f * traces.l1w[o][i][col] + delta1[i] * x;
@@ -210,9 +229,9 @@ impl NnueNetwork {
         // sonst rechnete die zweite Ausgabe mit einem bereits fortgeschriebenen
         // Zeitstempel und ließe den Zerfall aus.
         let step = traces.step;
-        for_each_feature(&cache.bb, |feat| { traces.l1_last[feat] = step; });
+        self.features.for_each(&cache.bb, |feat| { traces.l1_last[feat] = step; });
         for (k, &x) in cache.dense.iter().enumerate() {
-            if x != 0.0 { traces.l1_last[PIECE_FEATURES + k] = step; }
+            if x != 0.0 { traces.l1_last[self.dense_offset() + k] = step; }
         }
     }
 
@@ -287,9 +306,10 @@ impl NnueNetwork {
     /// tragen zunächst nichts bei und werden erst beim Weitertrainieren
     /// gelernt. Ohne das wäre jeder gespeicherte Checkpoint wertlos.
     pub fn ensure_input_size(&mut self) {
+        let n = self.input_size();
         for row in &mut self.l1.w {
-            if row.len() < INPUT_SIZE {
-                row.resize(INPUT_SIZE, 0.0);
+            if row.len() < n {
+                row.resize(n, 0.0);
             }
         }
     }
@@ -303,13 +323,14 @@ impl NnueNetwork {
             if layer.vw.is_empty() { layer.vw = vec![vec![0.0f32; inp]; out]; }
             if layer.vb.is_empty() { layer.vb = vec![0.0f32; out]; }
         };
-        init(&mut self.l1, H1, INPUT_SIZE);
+        let n = self.input_size();
+        init(&mut self.l1, H1, n);
         init(&mut self.l2, H2, H1);
         init(&mut self.l3, OUTPUT, H2);
     }
 
     pub fn param_count(&self) -> usize {
-        INPUT_SIZE * H1 + H1 + H1 * H2 + H2 + H2 * OUTPUT + OUTPUT
+        self.input_size() * H1 + H1 + H1 * H2 + H2 + H2 * OUTPUT + OUTPUT
     }
 
     /// Standard-Backpropagation für Supervised Learning.
@@ -372,17 +393,20 @@ impl NnueNetwork {
         }
 
         // L1, binärer Block: grad(l1.w[k][feat]) = delta1[k], weil das Feature 1 ist.
-        for_each_feature(&cache.bb, |feat| {
+        // `self` ist hier ausgeliehen, deshalb erst sammeln und dann rechnen.
+        let mut aktiv: Vec<usize> = Vec::with_capacity(128);
+        self.features.for_each(&cache.bb, |feat| aktiv.push(feat));
+        for feat in aktiv {
             for k in 0..H1 {
                 if delta1[k] == 0.0 { continue; }
                 adam_step!(self.l1.mw[k][feat], self.l1.vw[k][feat], self.l1.w[k][feat], delta1[k]);
             }
-        });
+        }
 
         // L1, dichter Block: grad = delta1[k] × Eingabewert.
         for (d, &x) in cache.dense.iter().enumerate() {
             if x == 0.0 { continue; }
-            let col = PIECE_FEATURES + d;
+            let col = self.dense_offset() + d;
             for k in 0..H1 {
                 if delta1[k] == 0.0 { continue; }
                 let g = delta1[k] * x;
@@ -405,12 +429,13 @@ impl NnueNetwork {
 
 fn l1_preactivations(
     layer: &Layer,
+    features: FeatureSet,
     bb: &[[u64; 5]; 4],
     dense: &[f32; DENSE_FEATURES],
 ) -> Vec<f32> {
     let mut pre = layer.b.clone();
     // Binärer Block: Gewicht zählt einfach, weil das Feature 1 ist.
-    for_each_feature(bb, |feat| {
+    features.for_each(bb, |feat| {
         for i in 0..H1 {
             pre[i] += layer.w[i][feat];
         }
@@ -418,7 +443,7 @@ fn l1_preactivations(
     // Dichter Block: Gewicht × Wert.
     for (k, &x) in dense.iter().enumerate() {
         if x == 0.0 { continue; }
-        let col = PIECE_FEATURES + k;
+        let col = features.binary_features() + k;
         for i in 0..H1 {
             pre[i] += layer.w[i][col] * x;
         }
@@ -428,7 +453,7 @@ fn l1_preactivations(
 
 impl NnueNetwork {
     fn l1_activations(&self, bb: &[[u64; 5]; 4], dense: &[f32; DENSE_FEATURES]) -> Vec<f32> {
-        l1_preactivations(&self.l1, bb, dense)
+        l1_preactivations(&self.l1, self.features, bb, dense)
             .iter()
             .map(|&z| z.max(0.0))
             .collect()
@@ -439,7 +464,7 @@ impl NnueNetwork {
         bb: &[[u64; 5]; 4],
         dense: &[f32; DENSE_FEATURES],
     ) -> (Vec<f32>, Vec<f32>) {
-        let pre = l1_preactivations(&self.l1, bb, dense);
+        let pre = l1_preactivations(&self.l1, self.features, bb, dense);
         let act = pre.iter().map(|&z| z.max(0.0)).collect();
         (pre, act)
     }
@@ -525,13 +550,20 @@ pub struct Traces {
 }
 
 impl Traces {
-    pub fn new() -> Self {
+    /// Traces für den alten Merkmalssatz. Bequemlichkeit für Tests.
+    pub fn new() -> Self { Self::for_size(INPUT_SIZE) }
+
+    /// Traces passend zur Eingabebreite eines Netzes.
+    ///
+    /// Die Breite muss stimmen: ein zu kurzer `l1_seen` würde beim ersten
+    /// König-Merkmal über den Rand greifen.
+    pub fn for_size(input_size: usize) -> Self {
         Self {
-            l1w:          std::array::from_fn(|_| vec![vec![0.0; INPUT_SIZE]; H1]),
+            l1w:          std::array::from_fn(|_| vec![vec![0.0; input_size]; H1]),
             l1b:          std::array::from_fn(|_| vec![0.0; H1]),
-            l1_seen:      vec![false; INPUT_SIZE],
+            l1_seen:      vec![false; input_size],
             l1_seen_list: Vec::with_capacity(256),
-            l1_last:      vec![0; INPUT_SIZE],
+            l1_last:      vec![0; input_size],
             step:         0,
             lambda_pow:   vec![1.0],
             lambda_of:    f32::NAN,
@@ -596,6 +628,7 @@ impl Traces {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::PIECE_FEATURES;
     use chaturaji_core::board::{bit, Board};
     use chaturaji_core::piece::{Color, PieceKind};
 
