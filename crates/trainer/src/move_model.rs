@@ -55,6 +55,10 @@ use chaturaji_engine::move_features::{
 };
 
 use crate::opening_book::{move_tokens, parse_meta};
+
+/// Merkmale, die [`chaturaji_engine::move_features::fast_features`] weglässt.
+/// Zum Messen, was die Abkürzung in der Suche an Vorhersagekraft kostet.
+pub const SLOW_FEATURES: [usize; 2] = [7, 8];
 use crate::pgn_import::parse_move_token;
 
 /// Eine beobachtete Entscheidung: die Merkmale aller legalen Züge, der Index
@@ -335,6 +339,23 @@ pub fn accuracy(data: &[Decision], score: impl Fn(&[f32; N_FEATURES]) -> f32 + S
 /// normierten Merkmale nachgebildet: Schlagwert zählt unabhängig davon, ob das
 /// Zielfeld gedeckt ist — genau das ist der blinde Fleck, den das gelernte
 /// Modell füllen soll.
+/// Kopie der Entscheidungen, in der die teuren Merkmale auf null stehen.
+///
+/// Ein konstant-null gesetztes Merkmal trägt keine Information, sein Gradient
+/// ist null, und die Deadzone hält sein Gewicht bei null — das neu geschätzte
+/// Modell ist also genau das, was die Suche mit `fast_features` rechnen kann.
+pub fn without_slow_features(data: &[Decision]) -> Vec<Decision> {
+    data.iter().map(|d| Decision {
+        feats: d.feats.iter().map(|f| {
+            let mut g = *f;
+            for k in SLOW_FEATURES { g[k] = 0.0; }
+            g
+        }).collect(),
+        chosen: d.chosen,
+        weight: d.weight,
+    }).collect()
+}
+
 pub fn heuristik_move_priority(f: &[f32; N_FEATURES]) -> f32 {
     let schlag = (f[4] + f[5]) * 5.0;   // zurück auf die 1..5-Skala
     let wert = if f[6] > 0.0 { 100.0 } else {

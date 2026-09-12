@@ -10,6 +10,7 @@
 use chaturaji_engine::move_features::{MoveModel, N_FEATURES};
 use chaturaji_trainer::move_model::{
     accuracy, collect, compare_table, fit, heuristik_move_priority, print_accuracy,
+    without_slow_features,
 };
 
 fn main() {
@@ -63,6 +64,11 @@ fn main() {
     println!("\n─── ungewichtet ───");
     let ung = fit(&train, false, epochs, lr);
 
+    // Was die Suche tatsächlich rechnen kann: ohne die beiden Merkmale, die je
+    // Zug eine frische Angriffskarte brauchen.
+    println!("\n─── ungewichtet, ohne die teuren Merkmale ───");
+    let schnell = fit(&without_slow_features(&train), false, epochs, lr);
+
     let m_gew = MoveModel::new(gew.w.clone(), "erfolgsgewichtet, Platz 1..4 = 1.0..0.25");
     let m_ung = MoveModel::new(ung.w.clone(), "ungewichtet");
 
@@ -80,11 +86,18 @@ fn main() {
     print_accuracy("move_priority (heute)", &accuracy(&test, heuristik_move_priority));
     print_accuracy("gelernt, gewichtet",    &accuracy(&test, |f| dot(&gew.w, f)));
     print_accuracy("gelernt, ungewichtet",  &accuracy(&test, |f| dot(&ung.w, f)));
+    let test_schnell = without_slow_features(&test);
+    print_accuracy("gelernt, suchtauglich", &accuracy(&test_schnell, |f| dot(&schnell.w, f)));
 
     match m_gew.save(&out) {
         Ok(()) => println!("\nGewichte (erfolgsgewichtet) geschrieben: {out}"),
         Err(e) => eprintln!("\nSchreiben fehlgeschlagen: {e}"),
     }
+    let m_schnell = MoveModel::new(schnell.w.clone(), "ungewichtet, ohne teure Merkmale (für die Suche)");
+    let out_schnell = out.replace(".json", "-suchtauglich.json");
+    if let Err(e) = m_schnell.save(&out_schnell) { eprintln!("Schreiben fehlgeschlagen: {e}"); }
+    else { println!("Gewichte (suchtauglich) geschrieben: {out_schnell}"); }
+
     let out_ung = out.replace(".json", "-ungewichtet.json");
     if let Err(e) = m_ung.save(&out_ung) { eprintln!("Schreiben fehlgeschlagen: {e}"); }
     else { println!("Gewichte (ungewichtet) geschrieben: {out_ung}"); }

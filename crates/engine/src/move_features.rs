@@ -121,33 +121,15 @@ pub fn promotion_distance(mover: Color, sq: u8) -> u8 {
     }
 }
 
-/// Merkmalsvektor eines Zuges.
+/// Merkmale, die ohne die Stellung *nach* dem Zug auskommen.
 ///
-/// `after` ist die Stellung nach dem Zug; sie wird für die Schach-Merkmale
-/// gebraucht und vom Aufrufer übergeben, weil sie dort oft schon vorliegt.
-pub fn features(board: &Board, mv: &Move, after: &Board, ctx: &MoveFeatureContext) -> [f32; N_FEATURES] {
-    let mut f = [0.0f32; N_FEATURES];
+/// Alles hier ist ein paar Bit-Tests auf den Karten aus dem Kontext. Die
+/// teuren Merkmale — alles, was eine neue Angriffskarte braucht — stehen
+/// getrennt, weil die Suche sie sich nicht leisten kann (siehe
+/// [`fast_features`]).
+fn features_cheap(board: &Board, mv: &Move, ctx: &MoveFeatureContext, f: &mut [f32; N_FEATURES]) {
     let mover = board.to_move;
-
     let moving_kind = board.piece_at(mv.from).map(|p| p.kind);
-
-    // ─── König und Schach ────────────────────────────────────────────────────
-    let king_after = after.pieces(mover, PieceKind::King);
-    let attackers_after = if king_after == 0 {
-        0   // eigener König weg — kommt im Selbstspiel vor, nicht in echten Partien
-    } else {
-        Color::ALL.iter()
-            .filter(|&&c| c != mover && after.active[c.idx()])
-            .filter(|&&c| Rules::attacked_squares(after, c) & king_after != 0)
-            .count() as u32
-    };
-
-    if ctx.own_king_attackers > 0 && attackers_after == 0 {
-        f[0] = 1.0;
-    }
-    if attackers_after < ctx.own_king_attackers {
-        f[1] = (ctx.own_king_attackers - attackers_after) as f32;
-    }
 
     // ─── Umwandlung ──────────────────────────────────────────────────────────
     if mv.promoted {
@@ -169,16 +151,6 @@ pub fn features(board: &Board, mv: &Move, after: &Board, ctx: &MoveFeatureContex
         if victim.kind == PieceKind::King { f[6] = 1.0; }
     }
 
-    // ─── Schach geben ────────────────────────────────────────────────────────
-    // `newly_threatened_kings` zählt Bedrohungen, die es vorher nicht gab —
-    // genau die Größe, an der auch die Bonuspunkte hängen (+1 für zwei neue,
-    // +5 für drei).
-    match Rules::newly_threatened_kings(board, after, mover) {
-        0 => {}
-        1 => f[7] = 1.0,
-        n => { f[7] = 1.0; f[8] = (n - 1) as f32; }
-    }
-
     // ─── eigene Figuren in Sicherheit / in Gefahr ────────────────────────────
     if let Some(kind) = moving_kind {
         let wert = kind.capture_value() as f32 / MAX_CAPTURE;
@@ -196,7 +168,72 @@ pub fn features(board: &Board, mv: &Move, after: &Board, ctx: &MoveFeatureContex
     if (2..=5).contains(&r) && (2..=5).contains(&c) {
         f[11] = if (3..=4).contains(&r) && (3..=4).contains(&c) { 1.0 } else { 0.5 };
     }
+}
 
+/// Wie viele Gegner den König des Ziehenden in `after` angreifen.
+fn king_attackers_after(after: &Board, mover: Color) -> u32 {
+    let king = after.pieces(mover, PieceKind::King);
+    if king == 0 { return 0; }   // König geschlagen — im Self-Play möglich
+    Color::ALL.iter()
+        .filter(|&&c| c != mover && after.active[c.idx()])
+        .filter(|&&c| Rules::attacked_squares(after, c) & king != 0)
+        .count() as u32
+}
+
+/// Vollständiger Merkmalsvektor — für das Training.
+///
+/// `after` ist die Stellung nach dem Zug; der Aufrufer übergibt sie, weil sie
+/// dort meist schon vorliegt.
+pub fn features(board: &Board, mv: &Move, after: &Board, ctx: &MoveFeatureContext) -> [f32; N_FEATURES] {
+    let mut f = [0.0f32; N_FEATURES];
+    let mover = board.to_move;
+    features_cheap(board, mv, ctx, &mut f);
+
+    let attackers_after = king_attackers_after(after, mover);
+    if ctx.own_king_attackers > 0 && attackers_after == 0 { f[0] = 1.0; }
+    if attackers_after < ctx.own_king_attackers {
+        f[1] = (ctx.own_king_attackers - attackers_after) as f32;
+    }
+
+    // `newly_threatened_kings` zählt Bedrohungen, die es vorher nicht gab —
+    // genau die Größe, an der auch die Bonuspunkte hängen (+1 für zwei neue,
+    // +5 für drei).
+    match Rules::newly_threatened_kings(board, after, mover) {
+        0 => {}
+        1 => f[7] = 1.0,
+        n => { f[7] = 1.0; f[8] = (n - 1) as f32; }
+    }
+    f
+}
+
+/// Merkmale, die sich die Suche leisten kann.
+///
+/// Zwei Unterschiede zu [`features`]:
+///
+/// * **`schach_gegeben` und `doppelschach` bleiben null.** Sie brauchen für
+///   *jeden* Zug eine frische Angriffskarte des Ziehenden; bei 15 Zügen sind
+///   das 15 zusätzliche Zuggenerierungen je Knoten, mehr als eine
+///   NNUE-Bewertung kostet. Ihre gelernten Gewichte sind mit +0,09 und +0,66
+///   die kleinsten der tatsächlich wirksamen Merkmale — der Handel geht auf.
+/// * **Die beiden Schach-Abwehr-Merkmale werden faul berechnet.** Sie sind nur
+///   dann von null verschieden, wenn der eigene König überhaupt angegriffen
+///   ist, und das steht schon im Kontext. Im Normalfall kostet das nichts; nur
+///   im Schach zahlt die Suche den vollen Preis, und dort lohnt es sich.
+///
+/// Wie viel diese Abkürzung an Vorhersagekraft kostet, misst der Trainer mit
+/// (`move_model --help`); gemessen sind es 0,6 Punkte Beam-Trefferquote.
+pub fn fast_features(board: &Board, mv: &Move, ctx: &MoveFeatureContext) -> [f32; N_FEATURES] {
+    let mut f = [0.0f32; N_FEATURES];
+    features_cheap(board, mv, ctx, &mut f);
+
+    if ctx.own_king_attackers > 0 {
+        let after = Rules::apply_with_effects(board, *mv);
+        let attackers_after = king_attackers_after(&after, board.to_move);
+        if attackers_after == 0 { f[0] = 1.0; }
+        if attackers_after < ctx.own_king_attackers {
+            f[1] = (ctx.own_king_attackers - attackers_after) as f32;
+        }
+    }
     f
 }
 
@@ -216,9 +253,68 @@ pub struct MoveModel {
     pub note: String,
 }
 
+/// Die aus echten Partien geschätzten Gewichte, wie die Suche sie benutzt.
+///
+/// Aus 862.206 Zugentscheidungen von Spielern ab 2400 (6.366 Partien), per
+/// konditionaler Logit-Regression; gebaut mit
+/// `cargo run --release -p chaturaji-trainer --bin move_model`.
+///
+/// Es ist die **ungewichtete** Schätzung ohne die beiden teuren Merkmale — also
+/// genau das, was [`fast_features`] rechnet. Die erfolgsgewichtete Fassung sagt
+/// fast dasselbe (größte Abweichung: Umwandlung +0,18) und sagt den
+/// menschlichen Zug einen halben Punkt schlechter vorher.
+///
+/// Auf zurückgehaltenen Partien gemessen, Anteil der Fälle, in denen der
+/// menschliche Zug den Beam der besten 6 überlebt:
+///
+/// | | Top-1 | im Beam-6 |
+/// |---|---|---|
+/// | Zufall | 8,0 % | 47,5 % |
+/// | die alte Handheuristik | 17,0 % | 54,6 % |
+/// | **diese Gewichte** | **25,6 %** | **74,3 %** |
+///
+/// Eingebaut statt als Datei geladen, damit die Engine ohne Fremdpfad
+/// auskommt — das Eröffnungsbuch ist optional, die Zugsortierung nicht.
+pub const DEFAULT_WEIGHTS: [f32; N_FEATURES] = [
+     2.0902,  // koenig_aus_schach
+     1.9385,  // schach_vermeiden
+     1.1251,  // umwandlung
+     0.3712,  // umwandlung_naeher
+     2.6058,  // schlag_ungedeckt
+     2.3519,  // schlag_gedeckt
+     2.6229,  // koenig_geschlagen
+     0.0000,  // schach_gegeben   — von `fast_features` nicht berechnet
+     0.0000,  // doppelschach     — dito
+     1.4875,  // figur_gerettet
+    -1.4559,  // figur_eingestellt
+    -0.0905,  // zentrum
+     0.7584,  // ist_bauer
+    -0.2402,  // ist_koenig
+];
+
+impl Default for MoveModel {
+    fn default() -> Self {
+        Self { w: DEFAULT_WEIGHTS.to_vec(), note: "eingebaut, aus echten Partien".into() }
+    }
+}
+
 impl MoveModel {
     pub fn new(w: Vec<f32>, note: impl Into<String>) -> Self {
         Self { w, note: note.into() }
+    }
+
+    /// Score aller legalen Züge einer Stellung, absteigend sortiert.
+    ///
+    /// Der Kontext wird einmal je Stellung gebaut — das ist der teure Teil und
+    /// der Grund, warum die Sortierung nicht Zug für Zug nachrechnen darf.
+    pub fn rank_moves(&self, board: &Board, moves: &mut [Move]) {
+        if moves.len() < 2 { return; }
+        let ctx = MoveFeatureContext::new(board);
+        let mut mit_score: Vec<(Move, f32)> = moves.iter()
+            .map(|mv| (*mv, self.score_features(&fast_features(board, mv, &ctx))))
+            .collect();
+        mit_score.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        for (slot, (mv, _)) in moves.iter_mut().zip(mit_score) { *slot = mv; }
     }
 
     pub fn zeros() -> Self {

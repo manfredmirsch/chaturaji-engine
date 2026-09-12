@@ -2,8 +2,9 @@
 //!
 //! Verwendet das NNUE-Netz direkt als Evaluierungsfunktion (Max^n mit TT).
 //!
-//! Beam-Suche: Interne Knoten sortieren Züge per billigem Material-Heuristik
-//! (Schlagwert) und rekursieren nur in die besten `beam_width` davon.
+//! Beam-Suche: Interne Knoten sortieren Züge nach dem gelernten Zugmodell
+//! (`chaturaji_engine::move_features`) und rekursieren nur in die besten
+//! `beam_width` davon.
 //! NNUE-Evals laufen ausschließlich an Blattknoten → ~beam_width^(depth-1)
 //! Evals pro Wurzel-Zug statt B^(depth-1).
 //!
@@ -14,16 +15,16 @@
 //!   depth 4, beam 5 – ~3750 Evals/Zug  (30 × 5³)
 
 use std::collections::HashMap;
-use std::cmp::Reverse;
 use rand::{Rng, SeedableRng};
 use rand::rngs::SmallRng;
 use rayon::prelude::*;
 use chaturaji_core::board::{Board, Move};
-use chaturaji_core::piece::{Color, PieceKind};
+use chaturaji_core::piece::Color;
 use chaturaji_core::rules::Rules;
 use chaturaji_core::notation::move_to_str;
 use chaturaji_core::zobrist::{hash_board, ZobristKeys};
 use chaturaji_engine::book::OpeningBook;
+use chaturaji_engine::move_features::{fast_features, MoveFeatureContext, MoveModel};
 use crate::network::NnueNetwork;
 
 pub struct SelfPlayConfig {
@@ -102,27 +103,39 @@ pub struct GameResult {
 
 // ─── Hilfsfunktionen ─────────────────────────────────────────────────────────
 
-/// Billige Material-Heuristik für Beam-Sortierung (kein NNUE-Aufruf nötig).
-#[inline]
-fn move_priority(mv: Move) -> i32 {
-    let capture = match mv.captured.map(|p| p.kind) {
-        Some(PieceKind::King)   => 100,
-        Some(PieceKind::Boat)   => 50,
-        Some(PieceKind::Knight) => 30,
-        Some(PieceKind::Bishop) => 30,
-        Some(PieceKind::Pawn)   => 10,
-        None                     => 0,
-    };
-    let promotion = if mv.promoted { 20 } else { 0 };
-    capture + promotion
+/// Das gelernte Zugmodell für die Beam-Auswahl.
+///
+/// Bis 2026-09-12 stand hier eine Handheuristik: Schlagwert plus 20 für eine
+/// Umwandlung. Gemessen an 86.221 Zugentscheidungen von Spielern ab 2400, die
+/// nicht zum Lernen benutzt wurden — wie oft überlebt der Zug, den ein starker
+/// Spieler wählt, den Beam der besten sechs?
+///
+/// | | Top-1 | im Beam-6 |
+/// |---|---|---|
+/// | zufällige Reihenfolge | 8,0 % | 47,5 % |
+/// | die alte Heuristik | 17,0 % | 54,6 % |
+/// | **das Modell** | **25,6 %** | **74,3 %** |
+///
+/// Die alte Heuristik lag also nur sieben Punkte über dem Zufall: fast die
+/// Hälfte der Züge, die ein starker Spieler wählen würde, fiel aus dem Beam
+/// und wurde nie angesehen.
+///
+/// Der Beam ist die Stelle, an der das zählt — hier werden Züge **verworfen**.
+/// Im Alpha-Beta der Engine (`chaturaji_engine::ordering`) ist MVV-LVA
+/// weiterhin besser, weil es dort um frühe Schnitte geht und nicht um
+/// Menschenähnlichkeit; dort kostete dasselbe Modell 12 % mehr Knoten.
+static MOVE_MODEL: std::sync::OnceLock<MoveModel> = std::sync::OnceLock::new();
+
+fn move_model() -> &'static MoveModel {
+    MOVE_MODEL.get_or_init(MoveModel::default)
 }
 
 // ─── NNUE Max^n mit Transpositionstabelle ────────────────────────────────────
 
 /// Rekursiver Max^n mit NNUE-Blattbewertung und optionalem Beam.
 ///
-/// `beam_width > 0`: Interne Knoten sortieren Züge per `move_priority`
-/// (Schlagwert, kein NNUE) und rekursieren nur in die besten `beam_width`.
+/// `beam_width > 0`: Interne Knoten sortieren Züge nach dem gelernten
+/// Zugmodell (kein NNUE-Aufruf) und rekursieren nur in die besten `beam_width`.
 /// NNUE-Evals laufen ausschließlich an Blattknoten (depth == 0).
 ///
 /// Die TT speichert (Tiefe, Scorevektor); ein Eintrag wird nur verwendet,
@@ -151,10 +164,17 @@ fn nnue_maxn(
 
     let mover_idx = board.to_move.idx();
 
-    // Beam: billige Heuristik-Sortierung, dann auf beam_width begrenzen.
+    // Beam: nach dem gelernten Modell sortieren, dann auf beam_width kürzen.
+    // Der Kontext (vier Angriffskarten) wird einmal je Stellung gebaut — das
+    // lohnt sich nur, wenn überhaupt gekürzt wird, deshalb die Abfrage davor.
     if beam_width > 0 && all_moves.len() > beam_width {
-        all_moves.sort_by_key(|&mv| Reverse(move_priority(mv)));
-        all_moves.truncate(beam_width);
+        let model = move_model();
+        let ctx   = MoveFeatureContext::new(board);
+        let mut bewertet: Vec<(Move, f32)> = all_moves.iter()
+            .map(|mv| (*mv, model.score_features(&fast_features(board, mv, &ctx))))
+            .collect();
+        bewertet.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        all_moves = bewertet.into_iter().take(beam_width).map(|(mv, _)| mv).collect();
     }
     let moves = all_moves;
 
