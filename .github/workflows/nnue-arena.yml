@@ -51,6 +51,14 @@ on:
         type: choice
         options: ['model', 'legacy']
         default: 'model'
+      time_ms:
+        description: 'Zeitbudget je Zug in ms (0 = feste Tiefe). Misst gleiche Rechenzeit statt gleicher Vorausschau.'
+        type: string
+        default: '0'
+      max_depth:
+        description: 'Obergrenze der iterativen Vertiefung (nur mit time_ms)'
+        type: string
+        default: '10'
 
 env:
   STATE_TAG: nnue-state
@@ -142,6 +150,8 @@ jobs:
             --seed ${{ inputs.seed }} \
             --a-beam '${{ inputs.a_beam }}' \
             --b-beam '${{ inputs.b_beam }}' \
+            --time-ms ${{ inputs.time_ms }} \
+            --max-depth ${{ inputs.max_depth }} \
             --out "out/shard-$(printf '%03d' ${{ matrix.shard }}).json"
 
       - uses: actions/upload-artifact@v7

@@ -297,6 +297,73 @@ pub fn nnue_best_move_scored(
         .unwrap_or((moves[0], net.forward(board)))
 }
 
+/// Iterative Vertiefung mit Zeitbudget. Gibt Zug, Scorevektor und die zuletzt
+/// **vollständig** gerechnete Tiefe zurück.
+///
+/// # Warum es das braucht
+///
+/// Bei fester Tiefe misst die Arena gleiche Vorausschau, nicht gleiche
+/// Rechenzeit. Zwei Zugsortierungen unterscheiden sich aber gerade darin, was
+/// ein Knoten kostet: die gelernte Sortierung baut vier Angriffskarten je
+/// Stellung und ist damit rund 14 % langsamer. Bei gleicher Tiefe zahlt sie
+/// diesen Preis, ohne ihn anrechnen zu müssen — bei gleicher Zeit sucht die
+/// billigere Sortierung dafür tiefer. Erst der zweite Vergleich sagt, ob sich
+/// der Aufwand lohnt.
+///
+/// # Wie abgebrochen wird
+///
+/// Zwischen den Iterationen, nicht mittendrin: `nnue_maxn` hat keine
+/// Abbruchprüfung, und eine halb gerechnete Tiefe wäre auch kein brauchbares
+/// Ergebnis. Ob die nächste Tiefe noch hineinpasst, wird aus dem gemessenen
+/// Wachstumsfaktor der bisherigen Iterationen geschätzt. Lieber eine Iteration
+/// zu wenig als das Budget zu reißen — sonst bekäme die langsamere Sortierung
+/// unbemerkt mehr Zeit, und genau das soll die Messung ja ausschließen.
+pub fn nnue_best_move_timed(
+    net:        &NnueNetwork,
+    board:      &Board,
+    moves:      &[Move],
+    budget_ms:  u64,
+    max_depth:  u8,
+    beam_width: usize,
+    order:      BeamOrder,
+    keys:       &ZobristKeys,
+    tt:         &mut HashMap<u64, (u8, [f32; 4])>,
+) -> (Move, [f32; 4], u8) {
+    let start = std::time::Instant::now();
+    let budget = std::time::Duration::from_millis(budget_ms);
+
+    // Tiefe 1 wird immer gerechnet — ohne sie gäbe es keinen Zug.
+    let (mut best_mv, mut best_scores) =
+        nnue_best_move_scored(net, board, moves, 1, beam_width, order, keys, tt);
+    let mut erreicht = 1u8;
+    let mut letzte   = start.elapsed();
+    // Erster Schätzwert für den Sprung auf die nächste Tiefe. Der Beam begrenzt
+    // die Verzweigung auf `beam_width`; ohne Beam ist sie die volle Zugzahl.
+    let mut faktor = if beam_width > 0 { beam_width as f64 } else { moves.len().max(2) as f64 };
+
+    for depth in 2..=max_depth {
+        let geschaetzt = letzte.mul_f64(faktor);
+        if start.elapsed() + geschaetzt > budget { break; }
+
+        let t0 = std::time::Instant::now();
+        let (mv, scores) =
+            nnue_best_move_scored(net, board, moves, depth, beam_width, order, keys, tt);
+        let dauer = t0.elapsed();
+
+        best_mv     = mv;
+        best_scores = scores;
+        erreicht    = depth;
+
+        // Gemessener Faktor schlägt die Annahme, sobald es einen gibt.
+        if letzte.as_secs_f64() > 1e-6 {
+            faktor = (dauer.as_secs_f64() / letzte.as_secs_f64()).max(1.5);
+        }
+        letzte = dauer;
+    }
+
+    (best_mv, best_scores, erreicht)
+}
+
 // ─── play_game ────────────────────────────────────────────────────────────────
 
 pub fn play_game(

@@ -42,7 +42,7 @@ use chaturaji_core::rules::Rules;
 use chaturaji_core::zobrist::ZobristKeys;
 use chaturaji_nnue::network::NnueNetwork;
 use chaturaji_nnue::outcome::place_values;
-use chaturaji_nnue::selfplay::{nnue_best_move, BeamOrder};
+use chaturaji_nnue::selfplay::{nnue_best_move, nnue_best_move_timed, BeamOrder};
 
 /// Die sechs Aufteilungen von vier Sitzen auf 2+2. Der Eintrag nennt die Sitze,
 /// die Netz A besetzt; die beiden anderen gehören B.
@@ -67,6 +67,13 @@ struct Args {
     /// spielt dasselbe Netz gegen sich, einmal so und einmal so sortiert.
     a_beam: BeamOrder,
     b_beam: BeamOrder,
+    /// Zeitbudget je Zug in Millisekunden. 0 = aus, dann zählt `depth`.
+    ///
+    /// Mit Budget bekommen beide Seiten dieselbe Rechenzeit und vertiefen so
+    /// weit sie kommen — die Spalte `Ø-Tiefe` zeigt, wie weit das war. Erst so
+    /// lässt sich eine teurere Sortierung fair gegen eine billigere stellen.
+    time_ms: u64,
+    max_depth: u8,
 }
 
 fn parse_args() -> Args {
@@ -85,6 +92,8 @@ fn parse_args() -> Args {
         out: String::new(),
         a_beam: BeamOrder::Model,
         b_beam: BeamOrder::Model,
+        time_ms: 0,
+        max_depth: 10,
     };
     let mut i = 1;
     while i < v.len() {
@@ -103,6 +112,8 @@ fn parse_args() -> Args {
             "--out"           => a.out = next(&mut i),
             "--a-beam"        => a.a_beam = beam_order(&next(&mut i)),
             "--b-beam"        => a.b_beam = beam_order(&next(&mut i)),
+            "--time-ms"       => a.time_ms = next(&mut i).parse().unwrap_or(a.time_ms),
+            "--max-depth"     => a.max_depth = next(&mut i).parse().unwrap_or(a.max_depth),
             _ => {}
         }
         i += 1;
@@ -151,10 +162,14 @@ fn play(
     net_a: &NnueNetwork, net_b: &NnueNetwork,
     a_beam: BeamOrder, b_beam: BeamOrder,
     depth: u8, beam: usize, max_moves: usize, keys: &ZobristKeys,
-) -> ([f32; 4], usize) {
+    time_ms: u64, max_depth: u8,
+) -> ([f32; 4], usize, [f64; 2], [f64; 2]) {
     let mut board = start.clone();
     let mut tt: HashMap<u64, (u8, [f32; 4])> = HashMap::new();
     let mut plies = 0;
+    // [Summe der Tiefen, Zahl der Züge] je Seite — für die Spalte `Ø-Tiefe`.
+    let mut tiefe_a = [0.0f64; 2];
+    let mut tiefe_b = [0.0f64; 2];
 
     while plies < max_moves && !Rules::is_game_over(&board) {
         let moves = Rules::legal_moves(&board);
@@ -167,12 +182,32 @@ fn play(
         // Seiten die Einträge deshalb nicht teilen — sonst läse A Ergebnisse,
         // die B mit anderer Auswahl erzeugt hat.
         tt.clear();
-        let mv = nnue_best_move(net, &board, &moves, depth, beam, order, keys, &mut tt);
+        let mv = if time_ms > 0 {
+            let (mv, _, erreicht) = nnue_best_move_timed(
+                net, &board, &moves, time_ms, max_depth, beam, order, keys, &mut tt);
+            let ziel = if ist_a { &mut tiefe_a } else { &mut tiefe_b };
+            ziel[0] += erreicht as f64;
+            ziel[1] += 1.0;
+            mv
+        } else {
+            nnue_best_move(net, &board, &moves, depth, beam, order, keys, &mut tt)
+        };
         board = Rules::apply_with_effects(&board, mv);
         plies += 1;
     }
 
-    (place_values(Rules::final_scores(&board)), plies)
+    (place_values(Rules::final_scores(&board)), plies, tiefe_a, tiefe_b)
+}
+
+/// Ergebnis einer Gruppe: gepaarte Mittel und, bei Zeitbudget, die erreichte
+/// Suchtiefe je Seite als [Summe, Anzahl].
+struct GroupResult {
+    a: f64,
+    b: f64,
+    d: f64,
+    plies: f64,
+    d_a: [f64; 2],
+    d_b: [f64; 2],
 }
 
 fn main() {
@@ -197,15 +232,19 @@ fn main() {
     println!("{}", "-".repeat(64));
 
     // Je Gruppe die gepaarte Differenz A−B über die sechs Sitzaufteilungen.
-    let results: Vec<(f64, f64, f64, f64)> = groups
+    let results: Vec<GroupResult> = groups
         .par_iter()
         .map(|&g| {
             let start = opening(args.opening_plies, args.seed.wrapping_mul(1_000_003) ^ g as u64);
             let (mut sa, mut sb, mut plies) = (0.0f64, 0.0f64, 0.0f64);
+            let (mut d_a, mut d_b) = ([0.0f64; 2], [0.0f64; 2]);
             for split in SPLITS {
-                let (vals, p) = play(&start, split, &net_a, &net_b,
+                let (vals, p, ta, tb) = play(&start, split, &net_a, &net_b,
                                      args.a_beam, args.b_beam,
-                                     args.depth, args.beam, args.max_moves, &keys);
+                                     args.depth, args.beam, args.max_moves, &keys,
+                                     args.time_ms, args.max_depth);
+                d_a[0] += ta[0]; d_a[1] += ta[1];
+                d_b[0] += tb[0]; d_b[1] += tb[1];
                 for seat in 0..4 {
                     if split.contains(&seat) { sa += vals[seat] as f64; }
                     else                     { sb += vals[seat] as f64; }
@@ -213,28 +252,43 @@ fn main() {
                 plies += p as f64;
             }
             // 6 Partien × 2 Sitze = 12 Messwerte je Netz und Gruppe.
-            (sa / 12.0, sb / 12.0, (sa - sb) / 12.0, plies / 6.0)
+            GroupResult {
+                a: sa / 12.0, b: sb / 12.0, d: (sa - sb) / 12.0, plies: plies / 6.0,
+                d_a, d_b,
+            }
         })
         .collect();
 
     let n = results.len() as f64;
     if n == 0.0 { println!("Keine Gruppen in diesem Shard."); return; }
 
-    let mean_a: f64 = results.iter().map(|r| r.0).sum::<f64>() / n;
-    let mean_b: f64 = results.iter().map(|r| r.1).sum::<f64>() / n;
-    let diffs: Vec<f64> = results.iter().map(|r| r.2).collect();
+    let mean_a: f64 = results.iter().map(|r| r.a).sum::<f64>() / n;
+    let mean_b: f64 = results.iter().map(|r| r.b).sum::<f64>() / n;
+    let diffs: Vec<f64> = results.iter().map(|r| r.d).collect();
     let mean_d: f64 = diffs.iter().sum::<f64>() / n;
     let var: f64 = if n > 1.0 {
         diffs.iter().map(|d| (d - mean_d).powi(2)).sum::<f64>() / (n - 1.0)
     } else { 0.0 };
     let se = (var / n).sqrt();
-    let plies: f64 = results.iter().map(|r| r.3).sum::<f64>() / n;
+    let plies: f64 = results.iter().map(|r| r.plies).sum::<f64>() / n;
 
     println!("Ø Platzwert A : {mean_a:+.4}");
     println!("Ø Platzwert B : {mean_b:+.4}");
     println!("Differenz A−B : {mean_d:+.4}  ± {se:.4} (SE)");
     if se > 0.0 { println!("t             : {:+.2}", mean_d / se); }
     println!("Ø Halbzüge    : {plies:.1}");
+    if args.time_ms > 0 {
+        // Bei gleichem Zeitbudget ist die erreichte Tiefe das, was die
+        // Sortierung kostet oder einspart — ohne diese Spalte wäre der
+        // Vergleich nicht zu deuten.
+        let mittel = |f: fn(&GroupResult) -> [f64; 2]| {
+            let (s, k): (f64, f64) = results.iter().map(f)
+                .fold((0.0, 0.0), |(a, b), x| (a + x[0], b + x[1]));
+            if k > 0.0 { s / k } else { 0.0 }
+        };
+        println!("Ø Tiefe A     : {:.2}", mittel(|r| r.d_a));
+        println!("Ø Tiefe B     : {:.2}", mittel(|r| r.d_b));
+    }
 
     if !args.out.is_empty() {
         // Summen statt Mittel: nur so lassen sich Shards korrekt zusammenlegen.
@@ -243,10 +297,10 @@ fn main() {
         let json = format!(
             "{{\"groups\":{},\"sum_a\":{},\"sum_b\":{},\"sum_d\":{},\"sum_d2\":{},\"sum_plies\":{}}}",
             results.len(),
-            results.iter().map(|r| r.0).sum::<f64>(),
-            results.iter().map(|r| r.1).sum::<f64>(),
+            results.iter().map(|r| r.a).sum::<f64>(),
+            results.iter().map(|r| r.b).sum::<f64>(),
             sum_d, sum_d2,
-            results.iter().map(|r| r.3).sum::<f64>(),
+            results.iter().map(|r| r.plies).sum::<f64>(),
         );
         std::fs::write(&args.out, json).expect("Ergebnisdatei nicht schreibbar");
         println!("Geschrieben: {}", args.out);
