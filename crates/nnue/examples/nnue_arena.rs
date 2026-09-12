@@ -43,6 +43,8 @@ use chaturaji_core::zobrist::ZobristKeys;
 use chaturaji_nnue::network::NnueNetwork;
 use chaturaji_nnue::outcome::place_values;
 use chaturaji_nnue::selfplay::{nnue_best_move, nnue_best_move_timed, BeamOrder};
+use chaturaji_engine::Engine;
+use chaturaji_engine::search::SearchAlgo;
 
 /// Die sechs Aufteilungen von vier Sitzen auf 2+2. Der Eintrag nennt die Sitze,
 /// die Netz A besetzt; die beiden anderen gehören B.
@@ -74,6 +76,36 @@ struct Args {
     /// lässt sich eine teurere Sortierung fair gegen eine billigere stellen.
     time_ms: u64,
     max_depth: u8,
+    a_search: SearchKind,
+    b_search: SearchKind,
+    tt_mb: usize,
+}
+
+/// Welches Suchverfahren eine Seite benutzt.
+///
+/// Beide bewerten Blätter mit demselben NNUE; sie unterscheiden sich darin,
+/// welchen Baum sie aufspannen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchKind {
+    /// Das Self-Play-Max^n mit Beam (`nnue_maxn`). Jeder der vier Spieler
+    /// maximiert seine eigene Komponente; der Beam begrenzt die Verzweigung.
+    Maxn,
+    /// Best-Reply Search aus der Engine. Nur der stärkste Gegner antwortet,
+    /// die beiden anderen passen — eine Runde kostet zwei Halbzüge statt vier.
+    /// Deshalb ist `depth` zwischen beiden Verfahren **nicht** vergleichbar;
+    /// vergleichbar sind Runden, also BRS-Tiefe 2k gegen Max^n-Tiefe 4k.
+    Brs,
+}
+
+fn search_kind(s: &str) -> SearchKind {
+    match s {
+        "maxn" | "beam" => SearchKind::Maxn,
+        "brs"           => SearchKind::Brs,
+        _ => {
+            eprintln!("Unbekanntes Suchverfahren '{s}' — erlaubt sind 'maxn' und 'brs'.");
+            std::process::exit(2);
+        }
+    }
 }
 
 fn parse_args() -> Args {
@@ -94,6 +126,9 @@ fn parse_args() -> Args {
         b_beam: BeamOrder::Model,
         time_ms: 0,
         max_depth: 10,
+        a_search: SearchKind::Maxn,
+        b_search: SearchKind::Maxn,
+        tt_mb: 8,
     };
     let mut i = 1;
     while i < v.len() {
@@ -114,6 +149,9 @@ fn parse_args() -> Args {
             "--b-beam"        => a.b_beam = beam_order(&next(&mut i)),
             "--time-ms"       => a.time_ms = next(&mut i).parse().unwrap_or(a.time_ms),
             "--max-depth"     => a.max_depth = next(&mut i).parse().unwrap_or(a.max_depth),
+            "--a-search"      => a.a_search = search_kind(&next(&mut i)),
+            "--b-search"      => a.b_search = search_kind(&next(&mut i)),
+            "--tt-mb"         => a.tt_mb = next(&mut i).parse().unwrap_or(a.tt_mb),
             _ => {}
         }
         i += 1;
@@ -161,6 +199,7 @@ fn play(
     start: &Board, a_seats: [usize; 2],
     net_a: &NnueNetwork, net_b: &NnueNetwork,
     a_beam: BeamOrder, b_beam: BeamOrder,
+    a_search: SearchKind, b_search: SearchKind, tt_mb: usize,
     depth: u8, beam: usize, max_moves: usize, keys: &ZobristKeys,
     time_ms: u64, max_depth: u8,
 ) -> ([f32; 4], usize, [f64; 2], [f64; 2]) {
@@ -170,6 +209,10 @@ fn play(
     // [Summe der Tiefen, Zahl der Züge] je Seite — für die Spalte `Ø-Tiefe`.
     let mut tiefe_a = [0.0f64; 2];
     let mut tiefe_b = [0.0f64; 2];
+    // Je Seite eine eigene Engine, damit die Transpositionstabellen der beiden
+    // Verfahren sich nicht vermischen. Nur angelegt, wenn die Seite BRS spielt.
+    let mut eng_a = (a_search == SearchKind::Brs).then(|| Engine::new(tt_mb));
+    let mut eng_b = (b_search == SearchKind::Brs).then(|| Engine::new(tt_mb));
 
     while plies < max_moves && !Rules::is_game_over(&board) {
         let moves = Rules::legal_moves(&board);
@@ -182,15 +225,44 @@ fn play(
         // Seiten die Einträge deshalb nicht teilen — sonst läse A Ergebnisse,
         // die B mit anderer Auswahl erzeugt hat.
         tt.clear();
-        let mv = if time_ms > 0 {
-            let (mv, _, erreicht) = nnue_best_move_timed(
-                net, &board, &moves, time_ms, max_depth, beam, order, keys, &mut tt);
-            let ziel = if ist_a { &mut tiefe_a } else { &mut tiefe_b };
-            ziel[0] += erreicht as f64;
-            ziel[1] += 1.0;
-            mv
-        } else {
-            nnue_best_move(net, &board, &moves, depth, beam, order, keys, &mut tt)
+        let kind = if ist_a { a_search } else { b_search };
+        let mv = match kind {
+            SearchKind::Brs => {
+                let engine = if ist_a { eng_a.as_mut() } else { eng_b.as_mut() }
+                    .expect("Engine wurde für diese Seite angelegt");
+                if time_ms > 0 {
+                    // Der Engine fehlt eine eigene Uhr — bewusst, weil `Instant`
+                    // unter wasm32 paniziert. Die Zeitquelle stellt der Aufrufer.
+                    let frist = std::time::Instant::now()
+                        + std::time::Duration::from_millis(time_ms);
+                    engine.set_stop_check(move || std::time::Instant::now() >= frist);
+                } else {
+                    engine.set_stop_check(|| false);
+                }
+                let eval = |b: &Board| net.forward(b);
+                let tiefe_max = if time_ms > 0 { max_depth } else { depth };
+                let r = engine.search_deepening(&board, SearchAlgo::Brs, tiefe_max, Some(&eval));
+                if time_ms > 0 {
+                    let ziel = if ist_a { &mut tiefe_a } else { &mut tiefe_b };
+                    ziel[0] += r.depth as f64;
+                    ziel[1] += 1.0;
+                }
+                match r.best_move {
+                    Some(mv) => mv,
+                    None     => moves[0],
+                }
+            }
+            SearchKind::Maxn if time_ms > 0 => {
+                let (mv, _, erreicht) = nnue_best_move_timed(
+                    net, &board, &moves, time_ms, max_depth, beam, order, keys, &mut tt);
+                let ziel = if ist_a { &mut tiefe_a } else { &mut tiefe_b };
+                ziel[0] += erreicht as f64;
+                ziel[1] += 1.0;
+                mv
+            }
+            SearchKind::Maxn => {
+                nnue_best_move(net, &board, &moves, depth, beam, order, keys, &mut tt)
+            }
         };
         board = Rules::apply_with_effects(&board, mv);
         plies += 1;
@@ -229,6 +301,11 @@ fn main() {
     if args.a_beam != args.b_beam {
         println!("Beam-Sortierung: A {:?}, B {:?}", args.a_beam, args.b_beam);
     }
+    if args.a_search != args.b_search {
+        println!("Suchverfahren: A {:?}, B {:?}", args.a_search, args.b_search);
+        println!("Achtung: die Tiefen sind nicht direkt vergleichbar — BRS gibt \
+                  zwei Halbzüge je Runde aus, Max^n vier.");
+    }
     println!("{}", "-".repeat(64));
 
     // Je Gruppe die gepaarte Differenz A−B über die sechs Sitzaufteilungen.
@@ -241,6 +318,7 @@ fn main() {
             for split in SPLITS {
                 let (vals, p, ta, tb) = play(&start, split, &net_a, &net_b,
                                      args.a_beam, args.b_beam,
+                                     args.a_search, args.b_search, args.tt_mb,
                                      args.depth, args.beam, args.max_moves, &keys,
                                      args.time_ms, args.max_depth);
                 d_a[0] += ta[0]; d_a[1] += ta[1];

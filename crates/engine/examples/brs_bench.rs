@@ -27,7 +27,7 @@ fn main() {
 
     println!("{:<10} {:>7} {:>12} {:>12} {:>10}", "algo", "depth", "rounds", "nodes", "ms");
 
-    let mut row = |name: &str, depth: u8, nodes: u64, ms: u128| {
+    let row = |name: &str, depth: u8, nodes: u64, ms: u128| {
         println!("{name:<10} {depth:>7} {rounds:>12} {nodes:>12} {ms:>10}");
     };
 
