@@ -30,6 +30,15 @@ on:
           - weights.json
           - frisch
         default: weights.json
+      features:
+        description: 'Merkmalssatz eines FRISCHEN Netzes: legacy (1293 Eingaben) oder king (1533, mit König-Bezügen)'
+        type: choice
+        options: ['legacy', 'king']
+        default: 'legacy'
+      out_name:
+        description: 'Name des Ergebnis-Assets im Release'
+        type: string
+        default: 'weights-pretrained.json'
       data_asset:
         description: 'Datensatz-Asset im Release nnue-state'
         type: string
@@ -113,7 +122,16 @@ jobs:
               echo "::warning::Kein opt_state.bin — Adam-Momente starten bei 0."
             fi
           else
-            echo "Startet mit frisch initialisiertem Netz."
+            # Frisches Netz mit dem gewählten Merkmalssatz anlegen. Ohne diesen
+            # Schritt entstünde das Netz erst im Pre-Training, und zwar immer
+            # mit dem alten Satz — `load_or_init_weights` kennt den Schalter
+            # nicht, und das soll es auch nicht: der Merkmalssatz gehört zum
+            # Netz und wird einmal beim Anlegen entschieden.
+            ./target/release/train_nnue --init-state \
+              --weights-out state/weights.json \
+              --progress    state/progress-neu.json \
+              --features    '${{ inputs.features }}'
+            echo "Frisches Netz, Merkmalssatz '${{ inputs.features }}'."
           fi
 
       - name: Pre-Training
@@ -136,8 +154,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          cp state/weights-pretrained.json "state/${{ inputs.out_name }}"
           gh release upload "$STATE_TAG" \
-            state/weights-pretrained.json state/opt_state-pretrained.bin --clobber
+            "state/${{ inputs.out_name }}" state/opt_state-pretrained.bin --clobber
+          echo "Ergebnis liegt als '${{ inputs.out_name }}' im Release." 
 
       # Übernehmen heißt: das Self-Play startet ab jetzt hier. Der bisherige
       # Stand wird vorher als weights-legacy.json gesichert — ein Lauf über
@@ -176,7 +196,7 @@ jobs:
           {
             echo "### NNUE-Pre-Training"
             echo
-            echo "Start: \`${{ inputs.start_from }}\` · Epochen: ${{ inputs.epochs }} · lr: ${{ inputs.lr }}"
+            echo "Start: \`${{ inputs.start_from }}\` · Merkmale: \`${{ inputs.features }}\` · Epochen: ${{ inputs.epochs }} · lr: ${{ inputs.lr }}"
             echo
             echo '```'
             grep -E "^(JSON|PGN):|Partien   :|Stellungen:|Partie |Supervised" pretrain.log 2>/dev/null | tail -20 || echo "(kein Log)"
