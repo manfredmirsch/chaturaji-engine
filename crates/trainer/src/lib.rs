@@ -1,5 +1,6 @@
 pub mod db;
 pub mod features;
+pub mod move_model;
 pub mod network;
 pub mod opening_book;
 pub mod pgn_import;

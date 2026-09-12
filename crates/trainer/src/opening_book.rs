@@ -23,14 +23,14 @@ pub use chaturaji_engine::book::{MoveStats, OpeningBook};
 use crate::pgn_import::parse_move_token;
 
 #[derive(Debug)]
-struct GameMeta {
-    points:       [i32; 4],
-    rating_diffs: [f64; 4],
-    ratings:      [f64; 4],
+pub(crate) struct GameMeta {
+    pub(crate) points:       [i32; 4],
+    pub(crate) rating_diffs: [f64; 4],
+    pub(crate) ratings:      [f64; 4],
     /// Platz je Sitz (1 = bester), Index = Sitz in der Reihenfolge Rot, Blau,
     /// Gelb, Grün. **Nicht** das rohe `standings`-Feld: das listet die
     /// umgekehrte Zuordnung, siehe `parse_meta`.
-    ranks:        [u32; 4],
+    pub(crate) ranks:        [u32; 4],
 }
 
 // ─── Loader ───────────────────────────────────────────────────────────────────
@@ -79,7 +79,7 @@ pub fn build_book_from_dir(dir: &str, max_plies: usize) -> OpeningBook {
     book
 }
 
-fn parse_meta(json: &serde_json::Value) -> Option<GameMeta> {
+pub(crate) fn parse_meta(json: &serde_json::Value) -> Option<GameMeta> {
     let pi = |k: &str| json.get(k).and_then(|v| v.as_i64()).map(|v| v as i32);
     let pf = |k: &str| json.get(k).and_then(|v| v.as_f64());
 
@@ -117,17 +117,16 @@ fn parse_meta(json: &serde_json::Value) -> Option<GameMeta> {
     Some(GameMeta { points, rating_diffs, ratings, ranks })
 }
 
-fn record_game(
-    pgn4: &str,
-    meta: &GameMeta,
-    max_plies: usize,
-    keys: &ZobristKeys,
-    book: &mut OpeningBook,
-) -> bool {
-    // Move-Text einsammeln. Headers sind oft mehrzeilig (z.B. der StartFen4
-    // erstreckt sich über alle 14 Brett-Reihen), deshalb tracken wir explizit,
-    // ob wir noch in einem [Tag "..."]-Block sind, bis wir das schließende ']'
-    // sehen — sonst rutschen die FEN-Zeilen als „Züge" durch.
+/// Zerlegt den `pgn4`-Text in Zug-Tokens.
+///
+/// Headers sind oft mehrzeilig — der `StartFen4` erstreckt sich über alle 14
+/// Brett-Reihen —, deshalb wird explizit verfolgt, ob noch ein `[Tag "..."]`
+/// offen ist, bis das schließende `]` kommt. Ohne das rutschen die FEN-Zeilen
+/// als „Züge" durch.
+///
+/// Wird auch vom Zugmodell benutzt ([`crate::move_model`]), deshalb liegt sie
+/// hier und nicht in `record_game`.
+pub(crate) fn move_tokens(pgn4: &str) -> Vec<String> {
     let mut move_text = String::new();
     let mut in_header = false;
     for line in pgn4.lines() {
@@ -145,10 +144,21 @@ fn record_game(
         move_text.push_str(&strip_braces(line));
     }
 
-    let tokens: Vec<&str> = move_text.split_whitespace()
+    move_text.split_whitespace()
         .filter(|t| !t.ends_with('.'))
         .filter(|t| *t != ".." && *t != "*")
-        .collect();
+        .map(str::to_string)
+        .collect()
+}
+
+fn record_game(
+    pgn4: &str,
+    meta: &GameMeta,
+    max_plies: usize,
+    keys: &ZobristKeys,
+    book: &mut OpeningBook,
+) -> bool {
+    let tokens = move_tokens(pgn4);
 
     let mut board   = Board::default();
     let mut applied = 0usize;

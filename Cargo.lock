@@ -84,6 +84,7 @@ dependencies = [
  "chaturaji-engine",
  "rand",
  "rand_distr",
+ "rayon",
  "rusqlite",
  "serde",
  "serde_json",

@@ -1,0 +1,390 @@
+//! Merkmale eines Zuges und ein daraus gelerntes Zugbewertungsmodell.
+//!
+//! # Warum
+//!
+//! Die Zugsortierung entscheidet in einer Beam-Suche mehr als die Bewertung.
+//! Bei `beam_width 6` und rund 30 legalen Zügen sieht die Suche vier Fünftel
+//! aller Züge nie an; steht der beste nicht unter den ersten sechs, existiert
+//! er für sie nicht. Sortiert wurde bisher mit zwei Handheuristiken
+//! ([`crate::ordering::score_move`] und `move_priority` im Self-Play), die
+//! geraten und nie gemessen wurden.
+//!
+//! Hier stehen stattdessen Merkmale, deren Gewichte aus 6.366 Partien von
+//! Spielern ab 2400 geschätzt werden — rund 760.000 beobachtete Entscheidungen
+//! samt der Züge, die jeweils *nicht* gewählt wurden. Gebaut wird das Modell in
+//! `chaturaji-trainer` (`move_model.rs`), gelesen wird es hier: dasselbe Muster
+//! wie beim Eröffnungsbuch, damit die Engine zur Laufzeit ohne
+//! Trainer-Abhängigkeit auskommt.
+//!
+//! # Kosten
+//!
+//! [`MoveFeatureContext`] hält alles, was für eine Stellung gilt und nicht je
+//! Zug neu berechnet werden muss — vor allem die Angriffskarten der vier
+//! Spieler. `Rules::attacked_squares` klont das Brett und erzeugt alle Züge;
+//! das je Zug zu tun wäre bei 30 Zügen dreißigmal zu teuer.
+//!
+//! Für die Frage „ist das Zielfeld gedeckt?" wird die Karte *vor* dem Zug
+//! benutzt, abzüglich des geschlagenen Steins. Das ist eine Näherung: sie
+//! übersieht Deckungen, die der Zug selbst erst freilegt oder verstellt. Der
+//! exakte Weg — Zug ausführen und drei Angriffskarten neu erzeugen — kostet
+//! rund das Dreißigfache, und für eine Sortierheuristik ist die Näherung der
+//! bessere Handel. Wo sie falsch liegt, lernt das Modell das als Rauschen mit.
+
+use serde::{Deserialize, Serialize};
+
+use chaturaji_core::board::{bit, file_of, rank_of, Board, Move};
+use chaturaji_core::piece::{Color, PieceKind};
+use chaturaji_core::rules::Rules;
+
+/// Anzahl der Merkmale. Reihenfolge und Bedeutung siehe [`FEATURE_NAMES`].
+pub const N_FEATURES: usize = 14;
+
+/// Namen in der Reihenfolge des Vektors — für die Gewichtstabelle.
+pub const FEATURE_NAMES: [&str; N_FEATURES] = [
+    "koenig_aus_schach",     //  0  König war im Schach, ist es nach dem Zug nicht mehr
+    "schach_vermeiden",      //  1  Zahl der Angreifer auf den eigenen König sinkt
+    "umwandlung",            //  2  Bauer wird zum Boot
+    "umwandlung_naeher",     //  3  Bauer verringert den Abstand zur Umwandlungslinie
+    "schlag_ungedeckt",      //  4  Schlagwert, Zielfeld danach von niemandem gedeckt
+    "schlag_gedeckt",        //  5  Schlagwert, Zielfeld gedeckt
+    "koenig_geschlagen",     //  6  gegnerischer König fällt (3 Punkte + Ausscheiden)
+    "schach_gegeben",        //  7  eine neue Schach-Bedrohung
+    "doppelschach",          //  8  zwei neue Schach-Bedrohungen (Bonusregel)
+    "figur_gerettet",        //  9  bedrohte Figur zieht auf ein sicheres Feld
+    "figur_eingestellt",     // 10  eigene Figur landet ungedeckt im Angriff
+    "zentrum",               // 11  Zielfeld in den inneren 4×4
+    "ist_bauer",             // 12  Kontrollgröße: Figurenart
+    "ist_koenig",            // 13  Kontrollgröße: Königszug
+];
+
+/// Größter Schlagwert im Spiel (Bishop und Boat). Normiert die Schlagfelder
+/// auf [0, 1], damit kein Merkmal die Skala der anderen sprengt.
+const MAX_CAPTURE: f32 = 5.0;
+
+/// Was für eine ganze Stellung gilt — einmal berechnen, für alle Züge nutzen.
+pub struct MoveFeatureContext {
+    /// Angriffskarte je Spieler, in der Stellung *vor* dem Zug.
+    attacked: [u64; 4],
+    /// Angegriffen von irgendeinem anderen als dem Ziehenden.
+    by_others: u64,
+    /// Wie viele Gegner den König des Ziehenden angreifen.
+    own_king_attackers: u32,
+    mover: Color,
+}
+
+impl MoveFeatureContext {
+    pub fn new(board: &Board) -> Self {
+        let mover = board.to_move;
+        let attacked: [u64; 4] = std::array::from_fn(|i| {
+            let c = Color::ALL[i];
+            if board.active[i] { Rules::attacked_squares(board, c) } else { 0 }
+        });
+
+        let by_others = Color::ALL.iter()
+            .filter(|&&c| c != mover)
+            .fold(0u64, |acc, &c| acc | attacked[c.idx()]);
+
+        let king = board.pieces(mover, PieceKind::King);
+        let own_king_attackers = Color::ALL.iter()
+            .filter(|&&c| c != mover && board.active[c.idx()])
+            .filter(|&&c| attacked[c.idx()] & king != 0)
+            .count() as u32;
+
+        Self { attacked, by_others, own_king_attackers, mover }
+    }
+
+    /// Angegriffen von einem anderen Spieler als dem Ziehenden, wobei der
+    /// Beitrag eines geschlagenen Steins wegfällt — der steht nach dem Zug
+    /// nicht mehr auf dem Brett und deckt nichts mehr.
+    fn defended_by_others(&self, mv: &Move) -> bool {
+        let target = bit(mv.to);
+        match mv.captured {
+            None => self.by_others & target != 0,
+            Some(victim) => Color::ALL.iter()
+                .filter(|&&c| c != self.mover && c != victim.color)
+                .any(|&c| self.attacked[c.idx()] & target != 0),
+        }
+    }
+}
+
+/// Abstand eines Feldes zur Umwandlungslinie des Ziehenden.
+///
+/// Die Richtung ist je Farbe eine andere — Rot nach Norden, Blau nach Osten,
+/// Gelb nach Süden, Grün nach Westen. Das ist die klassische Fehlerquelle bei
+/// vier Spielern und deshalb hier an einer Stelle festgehalten.
+pub fn promotion_distance(mover: Color, sq: u8) -> u8 {
+    match mover {
+        Color::Red    => 7 - rank_of(sq),
+        Color::Blue   => 7 - file_of(sq),
+        Color::Yellow => rank_of(sq),
+        Color::Green  => file_of(sq),
+    }
+}
+
+/// Merkmalsvektor eines Zuges.
+///
+/// `after` ist die Stellung nach dem Zug; sie wird für die Schach-Merkmale
+/// gebraucht und vom Aufrufer übergeben, weil sie dort oft schon vorliegt.
+pub fn features(board: &Board, mv: &Move, after: &Board, ctx: &MoveFeatureContext) -> [f32; N_FEATURES] {
+    let mut f = [0.0f32; N_FEATURES];
+    let mover = board.to_move;
+
+    let moving_kind = board.piece_at(mv.from).map(|p| p.kind);
+
+    // ─── König und Schach ────────────────────────────────────────────────────
+    let king_after = after.pieces(mover, PieceKind::King);
+    let attackers_after = if king_after == 0 {
+        0   // eigener König weg — kommt im Selbstspiel vor, nicht in echten Partien
+    } else {
+        Color::ALL.iter()
+            .filter(|&&c| c != mover && after.active[c.idx()])
+            .filter(|&&c| Rules::attacked_squares(after, c) & king_after != 0)
+            .count() as u32
+    };
+
+    if ctx.own_king_attackers > 0 && attackers_after == 0 {
+        f[0] = 1.0;
+    }
+    if attackers_after < ctx.own_king_attackers {
+        f[1] = (ctx.own_king_attackers - attackers_after) as f32;
+    }
+
+    // ─── Umwandlung ──────────────────────────────────────────────────────────
+    if mv.promoted {
+        f[2] = 1.0;
+    }
+    if moving_kind == Some(PieceKind::Pawn) && !mv.promoted {
+        let vorher  = promotion_distance(mover, mv.from);
+        let nachher = promotion_distance(mover, mv.to);
+        if nachher < vorher {
+            // Je näher an der Linie, desto mehr zählt der Schritt.
+            f[3] = (7 - nachher) as f32 / 7.0;
+        }
+    }
+
+    // ─── Schlagen ────────────────────────────────────────────────────────────
+    if let Some(victim) = mv.captured {
+        let wert = victim.kind.capture_value() as f32 / MAX_CAPTURE;
+        if ctx.defended_by_others(mv) { f[5] = wert; } else { f[4] = wert; }
+        if victim.kind == PieceKind::King { f[6] = 1.0; }
+    }
+
+    // ─── Schach geben ────────────────────────────────────────────────────────
+    // `newly_threatened_kings` zählt Bedrohungen, die es vorher nicht gab —
+    // genau die Größe, an der auch die Bonuspunkte hängen (+1 für zwei neue,
+    // +5 für drei).
+    match Rules::newly_threatened_kings(board, after, mover) {
+        0 => {}
+        1 => f[7] = 1.0,
+        n => { f[7] = 1.0; f[8] = (n - 1) as f32; }
+    }
+
+    // ─── eigene Figuren in Sicherheit / in Gefahr ────────────────────────────
+    if let Some(kind) = moving_kind {
+        let wert = kind.capture_value() as f32 / MAX_CAPTURE;
+        let stand_im_angriff = ctx.by_others & bit(mv.from) != 0;
+        let landet_im_angriff = ctx.defended_by_others(mv);
+        if stand_im_angriff && !landet_im_angriff { f[9]  = wert; }
+        if landet_im_angriff && mv.captured.is_none() { f[10] = wert; }
+
+        f[12] = (kind == PieceKind::Pawn) as u8 as f32;
+        f[13] = (kind == PieceKind::King) as u8 as f32;
+    }
+
+    // ─── Zentrum ─────────────────────────────────────────────────────────────
+    let (r, c) = (rank_of(mv.to), file_of(mv.to));
+    if (2..=5).contains(&r) && (2..=5).contains(&c) {
+        f[11] = if (3..=4).contains(&r) && (3..=4).contains(&c) { 1.0 } else { 0.5 };
+    }
+
+    f
+}
+
+// ─── Modell ───────────────────────────────────────────────────────────────────
+
+/// Gelernte Gewichte je Merkmal.
+///
+/// Der Score eines Zuges ist das Skalarprodukt `w · f`. Für die Sortierung
+/// genügt das; die Softmax-Normierung aus dem Training ändert die Reihenfolge
+/// nicht, weil der Nenner für alle Züge einer Stellung derselbe ist.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MoveModel {
+    pub w: Vec<f32>,
+    /// Womit trainiert wurde — steht in der Datei, damit ein Modell später
+    /// zuzuordnen ist.
+    #[serde(default)]
+    pub note: String,
+}
+
+impl MoveModel {
+    pub fn new(w: Vec<f32>, note: impl Into<String>) -> Self {
+        Self { w, note: note.into() }
+    }
+
+    pub fn zeros() -> Self {
+        Self { w: vec![0.0; N_FEATURES], note: String::new() }
+    }
+
+    pub fn load(path: &str) -> std::io::Result<Self> {
+        let text = std::fs::read_to_string(path)?;
+        let m: MoveModel = serde_json::from_str(&text)?;
+        if m.w.len() != N_FEATURES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Modell hat {} Gewichte, erwartet {N_FEATURES}", m.w.len()),
+            ));
+        }
+        Ok(m)
+    }
+
+    pub fn save(&self, path: &str) -> std::io::Result<()> {
+        std::fs::write(path, serde_json::to_string_pretty(self)?)
+    }
+
+    #[inline]
+    pub fn score_features(&self, f: &[f32; N_FEATURES]) -> f32 {
+        self.w.iter().zip(f).map(|(w, x)| w * x).sum()
+    }
+
+    /// Bequemer Weg für einen einzelnen Zug — berechnet Kontext und Folgestellung
+    /// selbst und ist deshalb nur für Einzelabfragen gedacht, nicht in Schleifen.
+    pub fn score(&self, board: &Board, mv: &Move) -> f32 {
+        let ctx   = MoveFeatureContext::new(board);
+        let after = Rules::apply_with_effects(board, *mv);
+        self.score_features(&features(board, mv, &after, &ctx))
+    }
+
+    /// Gewichtstabelle als Text, absteigend nach Betrag.
+    pub fn table(&self) -> String {
+        let mut idx: Vec<usize> = (0..N_FEATURES).collect();
+        idx.sort_by(|&a, &b| self.w[b].abs().partial_cmp(&self.w[a].abs()).unwrap());
+        let mut s = String::new();
+        for i in idx {
+            s.push_str(&format!("  {:>18}  {:+8.4}\n", FEATURE_NAMES[i], self.w[i]));
+        }
+        s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chaturaji_core::board::sq;
+
+    /// Die Umwandlungsrichtung ist je Farbe eine andere — Rot Nord, Blau Ost,
+    /// Gelb Süd, Grün West. Bei vier Spielern die klassische Fehlerquelle.
+    #[test]
+    fn promotion_distance_points_the_right_way_for_all_four() {
+        // a1 = 0, h1 = 7, a8 = 56, h8 = 63.
+        assert_eq!(promotion_distance(Color::Red,    sq(0, 0)), 7, "Rot zieht nach Norden");
+        assert_eq!(promotion_distance(Color::Red,    sq(0, 7)), 0);
+        assert_eq!(promotion_distance(Color::Blue,   sq(0, 0)), 7, "Blau zieht nach Osten");
+        assert_eq!(promotion_distance(Color::Blue,   sq(7, 0)), 0);
+        assert_eq!(promotion_distance(Color::Yellow, sq(0, 7)), 7, "Gelb zieht nach Süden");
+        assert_eq!(promotion_distance(Color::Yellow, sq(0, 0)), 0);
+        assert_eq!(promotion_distance(Color::Green,  sq(7, 0)), 7, "Grün zieht nach Westen");
+        assert_eq!(promotion_distance(Color::Green,  sq(0, 0)), 0);
+    }
+
+    /// In der Startstellung darf kein einziger Zug ein Schach-, Schlag- oder
+    /// Umwandlungsmerkmal setzen. Wenn doch, stimmt etwas Grundsätzliches nicht.
+    #[test]
+    fn opening_moves_set_no_tactical_features() {
+        let board = Board::default();
+        let ctx   = MoveFeatureContext::new(&board);
+        for mv in Rules::legal_moves(&board) {
+            let after = Rules::apply_with_effects(&board, mv);
+            let f = features(&board, &mv, &after, &ctx);
+            for i in [0usize, 2, 4, 5, 6, 8] {
+                assert_eq!(f[i], 0.0, "{} bei {:?} in der Startstellung", FEATURE_NAMES[i], mv);
+            }
+        }
+    }
+
+    /// Ein Bauernzug nach vorn muss „näher an die Umwandlung" setzen, und der
+    /// Wert muss mit der Nähe wachsen.
+    #[test]
+    fn advancing_a_pawn_scores_progress_that_grows_near_the_line() {
+        let board = Board::default();
+        let ctx   = MoveFeatureContext::new(&board);
+        // Rot am Zug: irgendein Bauernzug nach Norden.
+        let mv = Rules::legal_moves(&board).into_iter()
+            .find(|m| board.piece_at(m.from).map(|p| p.kind) == Some(PieceKind::Pawn)
+                      && rank_of(m.to) > rank_of(m.from))
+            .expect("Rot hat Bauernzüge nach vorn");
+        let after = Rules::apply_with_effects(&board, mv);
+        let f = features(&board, &mv, &after, &ctx);
+        assert!(f[3] > 0.0, "umwandlung_naeher muss gesetzt sein");
+        assert_eq!(f[12], 1.0, "ist_bauer muss gesetzt sein");
+
+        // Näher an der Linie ⇒ größerer Wert.
+        let nah  = (7 - promotion_distance(Color::Red, sq(0, 6))) as f32 / 7.0;
+        let fern = (7 - promotion_distance(Color::Red, sq(0, 2))) as f32 / 7.0;
+        assert!(nah > fern, "je näher an der Umwandlung, desto höher");
+    }
+
+    /// Schlagen muss in genau einem der beiden Schlagfelder landen — gedeckt
+    /// oder ungedeckt, nie in beiden und nie in keinem.
+    #[test]
+    fn a_capture_lands_in_exactly_one_of_the_two_capture_slots() {
+        let mut board = Board::default();
+        let mut gesehen_gedeckt = false;
+        let mut gesehen_frei    = false;
+
+        // Ein paar Halbzüge spielen, bis Schläge auftauchen.
+        for _ in 0..60 {
+            let ctx   = MoveFeatureContext::new(&board);
+            let moves = Rules::legal_moves(&board);
+            if moves.is_empty() { break; }
+            for mv in &moves {
+                if mv.captured.is_none() { continue; }
+                let after = Rules::apply_with_effects(&board, *mv);
+                let f = features(&board, mv, &after, &ctx);
+                assert!(
+                    (f[4] > 0.0) ^ (f[5] > 0.0),
+                    "genau eines von schlag_ungedeckt/schlag_gedeckt: {:?} / {:?}", f[4], f[5],
+                );
+                if f[5] > 0.0 { gesehen_gedeckt = true; } else { gesehen_frei = true; }
+            }
+            board = Rules::apply_with_effects(&board, moves[moves.len() / 2]);
+        }
+        assert!(gesehen_gedeckt || gesehen_frei, "in 60 Halbzügen kam kein Schlag vor");
+    }
+
+    /// Das Modell darf die Reihenfolge nur über die Gewichte bestimmen: mit
+    /// Nullgewichten sind alle Züge gleichwertig.
+    #[test]
+    fn zero_weights_score_everything_equally() {
+        let board = Board::default();
+        let m = MoveModel::zeros();
+        for mv in Rules::legal_moves(&board) {
+            assert_eq!(m.score(&board, &mv), 0.0);
+        }
+    }
+
+    #[test]
+    fn a_model_survives_a_round_trip_through_json() {
+        let dir = std::env::temp_dir().join("chaturaji-move-model-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("w.json");
+        let p = path.to_str().unwrap();
+
+        let m = MoveModel::new((0..N_FEATURES).map(|i| i as f32 * 0.1).collect(), "test");
+        m.save(p).unwrap();
+        let gelesen = MoveModel::load(p).unwrap();
+        assert_eq!(gelesen.w, m.w);
+        assert_eq!(gelesen.note, "test");
+        std::fs::remove_file(p).ok();
+    }
+
+    #[test]
+    fn a_model_with_the_wrong_width_is_rejected() {
+        let dir = std::env::temp_dir().join("chaturaji-move-model-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("kaputt.json");
+        let p = path.to_str().unwrap();
+        std::fs::write(p, r#"{"w":[1.0,2.0],"note":""}"#).unwrap();
+        assert!(MoveModel::load(p).is_err(), "zu kurzer Gewichtsvektor muss abgelehnt werden");
+        std::fs::remove_file(p).ok();
+    }
+}
