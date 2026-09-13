@@ -25,6 +25,12 @@ use rand::SeedableRng;
 use rand_distr::{Distribution, Normal};
 use serde::{Deserialize, Serialize};
 
+/// Vorgabegrößen für ein **neues** Netz. Ein geladenes Netz bringt seine
+/// eigenen mit — die Schichtbreite steht in den Gewichten und wird von dort
+/// gelesen, nicht aus einer Konstante. Nur so können zwei verschieden große
+/// Netze im selben Prozess gegeneinander spielen, und ohne das ließe sich die
+/// Kapazität nicht messen. Dieselbe Lehre wie bei `BeamOrder` und dem
+/// Suchverfahren in der Arena.
 pub const H1: usize = 256;
 pub const H2: usize = 64;
 pub const OUTPUT: usize = 4;
@@ -80,16 +86,29 @@ pub struct NnueNetwork {
 fn default_beta1() -> f32 { BETA1 }
 
 impl NnueNetwork {
-    pub fn new(lr: f32, _momentum: f32) -> Self {
+    pub fn new(lr: f32, momentum: f32) -> Self {
+        Self::with_sizes(H1, H2, lr, momentum)
+    }
+
+    /// Frisches Netz mit wählbarer Schichtbreite.
+    pub fn with_sizes(h1: usize, h2: usize, lr: f32, _momentum: f32) -> Self {
         Self {
-            l1: Layer::new_he(INPUT_SIZE, H1, 0xDEAD_BEEF_1234_5678),
-            l2: Layer::new_he(H1, H2,         0xCAFE_BABE_ABCD_EF01),
-            l3: Layer::new_he(H2, OUTPUT,      0x1234_5678_9ABC_DEF0),
+            l1: Layer::new_he(INPUT_SIZE, h1, 0xDEAD_BEEF_1234_5678),
+            l2: Layer::new_he(h1, h2,         0xCAFE_BABE_ABCD_EF01),
+            l3: Layer::new_he(h2, OUTPUT,     0x1234_5678_9ABC_DEF0),
             lr,
             momentum: BETA1,
             steps: 0,
         }
     }
+
+    /// Breite der ersten versteckten Schicht, aus den Gewichten gelesen.
+    #[inline]
+    pub fn h1(&self) -> usize { self.l1.b.len() }
+
+    /// Breite der zweiten versteckten Schicht.
+    #[inline]
+    pub fn h2(&self) -> usize { self.l2.b.len() }
 
     /// Forward-Pass aus einer Stellung.
     ///
@@ -129,6 +148,7 @@ impl NnueNetwork {
     ///
     /// L1 wird sparse über die Bitboards aus `cache.bb` aktualisiert.
     pub fn backward_into_traces(&self, cache: &ForwardCache, traces: &mut Traces, lambda: f32) {
+        let (h1, h2) = (self.h1(), self.h2());
         traces.step += 1;
         traces.ensure_pow(lambda, traces.step);
 
@@ -137,7 +157,7 @@ impl NnueNetwork {
         let d_tanh: Vec<f32> = cache.a3.iter().map(|&a| 1.0 - a * a).collect();
         for i in 0..OUTPUT {
             let d = d_tanh[i];
-            for j in 0..H2 {
+            for j in 0..h2 {
                 traces.l3w[i][j] = lambda * traces.l3w[i][j] + d * cache.a2[j];
             }
             traces.l3b[i] = lambda * traces.l3b[i] + d;
@@ -159,26 +179,26 @@ impl NnueNetwork {
             }
         }
 
-        let mut delta2 = vec![0.0f32; H2];
-        let mut delta1 = vec![0.0f32; H1];
+        let mut delta2 = vec![0.0f32; h2];
+        let mut delta1 = vec![0.0f32; h1];
 
         for o in 0..OUTPUT {
             // L2: nur der Pfad über Ausgabe o, nicht die Summe über alle.
-            for j in 0..H2 {
+            for j in 0..h2 {
                 delta2[j] = self.l3.w[o][j] * d_tanh[o]
                           * if cache.z2[j] > 0.0 { 1.0 } else { 0.0 };
             }
-            for i in 0..H2 {
+            for i in 0..h2 {
                 let (row, a1) = (&mut traces.l2w[o][i], &cache.a1);
-                for j in 0..H1 {
+                for j in 0..h1 {
                     row[j] = lambda * row[j] + delta2[i] * a1[j];
                 }
                 traces.l2b[o][i] = lambda * traces.l2b[o][i] + delta2[i];
             }
 
             // L1
-            for j in 0..H1 {
-                let g: f32 = (0..H2).map(|i| self.l2.w[i][j] * delta2[i]).sum();
+            for j in 0..h1 {
+                let g: f32 = (0..h2).map(|i| self.l2.w[i][j] * delta2[i]).sum();
                 delta1[j] = g * if cache.z1[j] > 0.0 { 1.0 } else { 0.0 };
             }
             // Der gespeicherte Wert gilt für `l1_last[feat]`; bis jetzt sind
@@ -188,7 +208,7 @@ impl NnueNetwork {
             let step = traces.step;
             for_each_feature(&cache.bb, |feat| {
                 let f = traces.lambda_pow[(step - traces.l1_last[feat]) as usize];
-                for i in 0..H1 {
+                for i in 0..h1 {
                     traces.l1w[o][i][feat] = f * traces.l1w[o][i][feat] + delta1[i];
                 }
             });
@@ -197,11 +217,11 @@ impl NnueNetwork {
                 if x == 0.0 { continue; }
                 let col = PIECE_FEATURES + k;
                 let f = traces.lambda_pow[(step - traces.l1_last[col]) as usize];
-                for i in 0..H1 {
+                for i in 0..h1 {
                     traces.l1w[o][i][col] = f * traces.l1w[o][i][col] + delta1[i] * x;
                 }
             }
-            for i in 0..H1 {
+            for i in 0..h1 {
                 traces.l1b[o][i] = lambda * traces.l1b[o][i] + delta1[i];
             }
         }
@@ -223,6 +243,7 @@ impl NnueNetwork {
     /// gleitenden Mittel, Wurzel und Division — fällt damit weiterhin nur
     /// einmal an; vervierfacht hat sich nur das Zusammensetzen des Gradienten.
     pub fn apply_td_update(&mut self, traces: &Traces, td_error: &[f32; 4]) {
+        let (h1, h2) = (self.h1(), self.h2());
         let lr  = self.lr;
         let t   = (self.steps + 1) as f32;
         let bc1 = 1.0 - BETA1.powf(t);
@@ -239,7 +260,7 @@ impl NnueNetwork {
         // L3 (OUTPUT × H2)
         for i in 0..OUTPUT {
             let err = td_error[i];
-            for j in 0..H2 {
+            for j in 0..h2 {
                 let g = err * traces.l3w[i][j];
                 adam_step!(self.l3.mw[i][j], self.l3.vw[i][j], self.l3.w[i][j], g);
             }
@@ -250,8 +271,8 @@ impl NnueNetwork {
         // L2 (H2 × H1): Σ_o err_o · e_o — die Kettenregel über alle vier
         // Ausgaben. Der Adam-Schritt bleibt einer je Gewicht; nur der Gradient
         // wird aus vier Traces zusammengesetzt.
-        for i in 0..H2 {
-            for j in 0..H1 {
+        for i in 0..h2 {
+            for j in 0..h1 {
                 let g: f32 = (0..OUTPUT)
                     .map(|o| td_error[o] * traces.l2w[o][i][j])
                     .sum();
@@ -262,7 +283,7 @@ impl NnueNetwork {
         }
 
         // L1 (H1 × INPUT_SIZE) – nur gesehene Features
-        for i in 0..H1 {
+        for i in 0..h1 {
             for &j in &traces.l1_seen_list {
                 // Spalten, die seit ihrer letzten Berührung untätig waren,
                 // haben ihren Zerfall noch vor sich.
@@ -297,19 +318,21 @@ impl NnueNetwork {
     /// Initialisiert Adam-Momente nach dem Laden aus der DB.
     pub fn init_momentum(&mut self) {
         self.ensure_input_size();
+        let (h1, h2) = (self.h1(), self.h2());
         let init = |layer: &mut Layer, out: usize, inp: usize| {
             if layer.mw.is_empty() { layer.mw = vec![vec![0.0f32; inp]; out]; }
             if layer.mb.is_empty() { layer.mb = vec![0.0f32; out]; }
             if layer.vw.is_empty() { layer.vw = vec![vec![0.0f32; inp]; out]; }
             if layer.vb.is_empty() { layer.vb = vec![0.0f32; out]; }
         };
-        init(&mut self.l1, H1, INPUT_SIZE);
-        init(&mut self.l2, H2, H1);
-        init(&mut self.l3, OUTPUT, H2);
+        init(&mut self.l1, h1, INPUT_SIZE);
+        init(&mut self.l2, h2, h1);
+        init(&mut self.l3, OUTPUT, h2);
     }
 
     pub fn param_count(&self) -> usize {
-        INPUT_SIZE * H1 + H1 + H1 * H2 + H2 + H2 * OUTPUT + OUTPUT
+        let (h1, h2) = (self.h1(), self.h2());
+        INPUT_SIZE * h1 + h1 + h1 * h2 + h2 + h2 * OUTPUT + OUTPUT
     }
 
     /// Standard-Backpropagation für Supervised Learning.
@@ -317,6 +340,7 @@ impl NnueNetwork {
     /// Korrekte Kettenregel über alle 4 Ausgaben hinweg — kein `i % OUTPUT`-Hack.
     /// Gibt den MSE-Loss zurück.
     pub fn apply_supervised_gradient(&mut self, cache: &ForwardCache, error: &[f32; 4]) -> f32 {
+        let (h1, h2) = (self.h1(), self.h2());
         let loss = error.iter().map(|e| e * e).sum::<f32>() / 4.0;
 
         let lr  = self.lr;
@@ -338,7 +362,7 @@ impl NnueNetwork {
             .collect();
 
         for o in 0..OUTPUT {
-            for j in 0..H2 {
+            for j in 0..h2 {
                 let g = delta3[o] * cache.a2[j];
                 adam_step!(self.l3.mw[o][j], self.l3.vw[o][j], self.l3.w[o][j], g);
             }
@@ -346,13 +370,13 @@ impl NnueNetwork {
         }
 
         // L2: delta2[i] = sum_o(l3.w[o][i] * delta3[o]) * relu'(z2[i])
-        let delta2: Vec<f32> = (0..H2).map(|i| {
+        let delta2: Vec<f32> = (0..h2).map(|i| {
             let g: f32 = (0..OUTPUT).map(|o| self.l3.w[o][i] * delta3[o]).sum();
             g * if cache.z2[i] > 0.0 { 1.0 } else { 0.0 }
         }).collect();
 
-        for i in 0..H2 {
-            for j in 0..H1 {
+        for i in 0..h2 {
+            for j in 0..h1 {
                 let g = delta2[i] * cache.a1[j];
                 adam_step!(self.l2.mw[i][j], self.l2.vw[i][j], self.l2.w[i][j], g);
             }
@@ -360,20 +384,20 @@ impl NnueNetwork {
         }
 
         // L1: delta1[k] = sum_i(l2.w[i][k] * delta2[i]) * relu'(z1[k])
-        let mut delta1 = vec![0.0f32; H1];
-        for i in 0..H2 {
+        let mut delta1 = vec![0.0f32; h1];
+        for i in 0..h2 {
             if delta2[i] == 0.0 { continue; }
-            for k in 0..H1 {
+            for k in 0..h1 {
                 delta1[k] += self.l2.w[i][k] * delta2[i];
             }
         }
-        for k in 0..H1 {
+        for k in 0..h1 {
             if cache.z1[k] <= 0.0 { delta1[k] = 0.0; }
         }
 
         // L1, binärer Block: grad(l1.w[k][feat]) = delta1[k], weil das Feature 1 ist.
         for_each_feature(&cache.bb, |feat| {
-            for k in 0..H1 {
+            for k in 0..h1 {
                 if delta1[k] == 0.0 { continue; }
                 adam_step!(self.l1.mw[k][feat], self.l1.vw[k][feat], self.l1.w[k][feat], delta1[k]);
             }
@@ -383,14 +407,14 @@ impl NnueNetwork {
         for (d, &x) in cache.dense.iter().enumerate() {
             if x == 0.0 { continue; }
             let col = PIECE_FEATURES + d;
-            for k in 0..H1 {
+            for k in 0..h1 {
                 if delta1[k] == 0.0 { continue; }
                 let g = delta1[k] * x;
                 adam_step!(self.l1.mw[k][col], self.l1.vw[k][col], self.l1.w[k][col], g);
             }
         }
 
-        for k in 0..H1 {
+        for k in 0..h1 {
             if delta1[k] != 0.0 {
                 adam_step!(self.l1.mb[k], self.l1.vb[k], self.l1.b[k], delta1[k]);
             }
@@ -409,9 +433,10 @@ fn l1_preactivations(
     dense: &[f32; DENSE_FEATURES],
 ) -> Vec<f32> {
     let mut pre = layer.b.clone();
+    let h1 = pre.len();
     // Binärer Block: Gewicht zählt einfach, weil das Feature 1 ist.
     for_each_feature(bb, |feat| {
-        for i in 0..H1 {
+        for i in 0..h1 {
             pre[i] += layer.w[i][feat];
         }
     });
@@ -419,7 +444,7 @@ fn l1_preactivations(
     for (k, &x) in dense.iter().enumerate() {
         if x == 0.0 { continue; }
         let col = PIECE_FEATURES + k;
-        for i in 0..H1 {
+        for i in 0..h1 {
             pre[i] += layer.w[i][col] * x;
         }
     }
@@ -525,19 +550,27 @@ pub struct Traces {
 }
 
 impl Traces {
-    pub fn new() -> Self {
+    /// Traces in Vorgabegröße. Bequemlichkeit für Tests.
+    pub fn new() -> Self { Self::for_net(INPUT_SIZE, H1, H2) }
+
+    /// Traces passend zu einem Netz.
+    ///
+    /// Die Maße müssen stimmen: zu kurze Vektoren griffen beim ersten breiteren
+    /// Netz über den Rand, und ein zu langer `l1_seen` verschwendete Speicher
+    /// in der Größenordnung von Megabyte je Ausgabe.
+    pub fn for_net(input_size: usize, h1: usize, h2: usize) -> Self {
         Self {
-            l1w:          std::array::from_fn(|_| vec![vec![0.0; INPUT_SIZE]; H1]),
-            l1b:          std::array::from_fn(|_| vec![0.0; H1]),
-            l1_seen:      vec![false; INPUT_SIZE],
+            l1w:          std::array::from_fn(|_| vec![vec![0.0; input_size]; h1]),
+            l1b:          std::array::from_fn(|_| vec![0.0; h1]),
+            l1_seen:      vec![false; input_size],
             l1_seen_list: Vec::with_capacity(256),
-            l1_last:      vec![0; INPUT_SIZE],
+            l1_last:      vec![0; input_size],
             step:         0,
             lambda_pow:   vec![1.0],
             lambda_of:    f32::NAN,
-            l2w:          std::array::from_fn(|_| vec![vec![0.0; H1]; H2]),
-            l2b:          std::array::from_fn(|_| vec![0.0; H2]),
-            l3w:          vec![vec![0.0; H2]; OUTPUT],
+            l2w:          std::array::from_fn(|_| vec![vec![0.0; h1]; h2]),
+            l2b:          std::array::from_fn(|_| vec![0.0; h2]),
+            l3w:          vec![vec![0.0; h2]; OUTPUT],
             l3b:          vec![0.0; OUTPUT],
         }
     }
@@ -835,6 +868,66 @@ mod tests {
         // Und das Netz rechnet weiter.
         let out = net.forward(&Board::default());
         for v in out { assert!((-1.0..=1.0).contains(&v)); }
+    }
+
+    /// Ein breiteres Netz muss überall mitziehen — Forward, Backward, Traces,
+    /// Parameterzahl. Ohne diesen Test fiele eine übersehene Konstante erst im
+    /// Training auf, und zwar als Absturz oder, schlimmer, als stiller Unsinn.
+    #[test]
+    fn a_wider_net_works_end_to_end() {
+        let mut net = NnueNetwork::with_sizes(512, 128, 0.001, 0.9);
+        net.init_momentum();
+        assert_eq!(net.h1(), 512);
+        assert_eq!(net.h2(), 128);
+        assert_eq!(net.param_count(), INPUT_SIZE * 512 + 512 + 512 * 128 + 128 + 128 * 4 + 4);
+
+        let board = Board::default();
+        for v in net.forward(&board) {
+            assert!(v.is_finite() && (-1.0..=1.0).contains(&v), "Ausgabe {v} außerhalb tanh");
+        }
+
+        // Überwachter Schritt
+        let target = [1.0f32, 1.0 / 3.0, -1.0 / 3.0, -1.0];
+        let vorher = net.forward(&board);
+        for _ in 0..20 {
+            let cache = net.forward_full(&board);
+            let e: [f32; 4] = std::array::from_fn(|i| target[i] - cache.a3[i]);
+            net.apply_supervised_gradient(&cache, &e);
+        }
+        let fehler = |p: [f32; 4]| (0..4).map(|i| (p[i] - target[i]).powi(2)).sum::<f32>();
+        assert!(fehler(net.forward(&board)) < fehler(vorher), "der Fehler muss sinken");
+
+        // TD-Schritt mit passend dimensionierten Traces
+        let mut traces = Traces::for_net(INPUT_SIZE, net.h1(), net.h2());
+        let cache = net.forward_full(&board);
+        net.backward_into_traces(&cache, &mut traces, 0.7);
+        net.apply_td_update(&traces, &[0.1, -0.1, 0.05, -0.05]);
+        for v in net.forward(&board) {
+            assert!(v.is_finite(), "TD-Update hat die Ausgabe zerstört");
+        }
+    }
+
+    /// Zwei verschieden breite Netze müssen nebeneinander bestehen können —
+    /// sonst ließe sich die Kapazität nicht in der Arena messen.
+    #[test]
+    fn two_nets_of_different_width_coexist() {
+        let schmal = NnueNetwork::with_sizes(64, 16, 0.001, 0.9);
+        let breit  = NnueNetwork::with_sizes(512, 128, 0.001, 0.9);
+        let board  = Board::default();
+        assert_eq!(schmal.forward(&board).len(), 4);
+        assert_eq!(breit.forward(&board).len(), 4);
+        assert!(breit.param_count() > schmal.param_count() * 4);
+    }
+
+    /// Die Breite steht in den Gewichten, nicht in einer Konstante: ein
+    /// geladenes Netz muss seine eigene Größe melden.
+    #[test]
+    fn width_is_read_back_from_the_weights() {
+        let net = NnueNetwork::with_sizes(128, 32, 0.001, 0.9);
+        let json = serde_json::to_string(&net).unwrap();
+        let gelesen: NnueNetwork = serde_json::from_str(&json).unwrap();
+        assert_eq!(gelesen.h1(), 128);
+        assert_eq!(gelesen.h2(), 32);
     }
 
     #[test]

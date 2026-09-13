@@ -42,7 +42,7 @@ use chaturaji_core::zobrist::ZobristKeys;
 use chaturaji_engine::book::OpeningBook;
 
 use crate::features::INPUT_SIZE;
-use crate::network::{Layer, NnueNetwork, Traces, H1, H2, OUTPUT};
+use crate::network::{Layer, NnueNetwork, Traces, OUTPUT};
 use crate::pgn_import::{load_games_from_dir, load_games_from_json_dir};
 use crate::selfplay::{final_targets, game_seed, play_batch, GameJob, SelfPlayConfig};
 use crate::supervised::run_supervised;
@@ -160,7 +160,7 @@ pub fn save_opt_state(path: &str, net: &NnueNetwork) -> io::Result<()> {
     w.write_all(OPT_MAGIC)?;
     // Dimensionen mitschreiben, damit ein Format-/Architekturwechsel auffällt,
     // statt still falsche Zahlen einzulesen.
-    for d in [INPUT_SIZE as u32, H1 as u32, H2 as u32, OUTPUT as u32] {
+    for d in [INPUT_SIZE as u32, net.h1() as u32, net.h2() as u32, OUTPUT as u32] {
         w.write_all(&d.to_le_bytes())?;
     }
     for layer in [&net.l1, &net.l2, &net.l3] {
@@ -194,7 +194,7 @@ pub fn load_opt_state(path: &str, net: &mut NnueNetwork) -> io::Result<bool> {
         r.read_exact(&mut buf)?;
         *d = u32::from_le_bytes(buf);
     }
-    if dims != [INPUT_SIZE as u32, H1 as u32, H2 as u32, OUTPUT as u32] {
+    if dims != [INPUT_SIZE as u32, net.h1() as u32, net.h2() as u32, OUTPUT as u32] {
         eprintln!("Warnung: '{path}' passt nicht zur Architektur {dims:?}; Momente starten bei 0.");
         return Ok(false);
     }
@@ -493,7 +493,7 @@ pub fn learn(cfg: LearnConfig) -> io::Result<LearnStats> {
 
     // Einmal anlegen statt je Partie: die Traces belegen mit vier
     // Ausgaben rund 5 MB, und `reset` leert nur die gesehenen Spalten.
-    let mut traces = Traces::new();
+    let mut traces = Traces::for_net(INPUT_SIZE, net.h1(), net.h2());
 
     let mut acc_loss  = 0.0f32;
     let mut acc_plies = 0u64;

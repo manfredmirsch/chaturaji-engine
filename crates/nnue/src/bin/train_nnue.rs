@@ -58,6 +58,10 @@ fn main() {
     // flutteraji (`nnue/train.py --q-weight`); dort trägt der Partieausgang
     // also neun Zehntel des Ziels.
     let mut q_weight     = 0.10f32;
+    // Schichtbreiten eines *neuen* Netzes. Ein geladenes bringt seine eigenen
+    // mit — sie stehen in den Gewichten und lassen sich nicht umdeuten.
+    let mut h1           = chaturaji_nnue::network::H1;
+    let mut h2           = chaturaji_nnue::network::H2;
 
     let mut i = 1;
     while i < args.len() {
@@ -110,6 +114,8 @@ fn main() {
                 if i < args.len() { games_dir = args[i].clone(); }
             }
             "--q-weight"    => { i += 1; if i < args.len() { q_weight = args[i].parse().unwrap_or(q_weight); } }
+            "--h1"          => { i += 1; if i < args.len() { h1 = args[i].parse().unwrap_or(h1); } }
+            "--h2"          => { i += 1; if i < args.len() { h2 = args[i].parse().unwrap_or(h2); } }
             "--epochs"      => { i += 1; if i < args.len() { epochs = args[i].parse().unwrap_or(epochs); } }
             "--init-state" => { mode = Mode::InitState; }
             "--weights"     => { i += 1; if i < args.len() { weights_path  = args[i].clone(); } }
@@ -168,9 +174,10 @@ fn main() {
                     n
                 }
                 None => {
-                    println!("Keine DB gefunden — neues NNUE.");
-                    let mut n = NnueNetwork::new(lr, 0.9);
+                    let mut n = NnueNetwork::with_sizes(h1, h2, lr, 0.9);
                     n.init_momentum();
+                    println!("Keine DB gefunden — neues NNUE, {}→{}→{}→4 ({} Parameter).",
+                             chaturaji_nnue::features::INPUT_SIZE, h1, h2, n.param_count());
                     n
                 }
             };
@@ -404,6 +411,7 @@ fn print_help() {
     println!("  --learn-gen <verz>   dieselben Partien überwacht lernen (Generationentraining):");
     println!("                       Ziel = Partieausgang + Suchbewertung, gemischt, mehrere Epochen");
     println!("  --q-weight <f>       Anteil der Suchbewertung am Ziel, 0..1  [Standard: 0.10]");
+    println!("  --h1 <n> --h2 <n>    Schichtbreiten eines NEUEN Netzes       [Standard: 256 / 64]");
     println!("  --pretrain <verz>    Supervised Pre-Training aus echten Partien (dateibasiert)");
     println!("  --epochs <n>         Durchläufe über den Datensatz    [Standard: 1]");
     println!("  --weights <datei>    Gewichte (Ein-/Ausgabe)               [Standard: weights.json]");
