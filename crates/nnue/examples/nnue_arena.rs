@@ -43,6 +43,8 @@ use chaturaji_core::zobrist::ZobristKeys;
 use chaturaji_nnue::network::NnueNetwork;
 use chaturaji_nnue::outcome::place_values;
 use chaturaji_nnue::selfplay::{nnue_best_move, nnue_best_move_timed, BeamOrder};
+use chaturaji_nnue::mcts::{Mcts, MctsConfig};
+use chaturaji_engine::move_features::MoveModel;
 use chaturaji_engine::Engine;
 use chaturaji_engine::search::SearchAlgo;
 
@@ -79,6 +81,10 @@ struct Args {
     a_search: SearchKind,
     b_search: SearchKind,
     tt_mb: usize,
+    /// Simulationen je Zug für MCTS. Kein Gegenstück zu `depth` — die Suche
+    /// verteilt sie selbst über den Baum.
+    iters: u32,
+    c_puct: f32,
 }
 
 /// Welches Suchverfahren eine Seite benutzt.
@@ -95,14 +101,18 @@ enum SearchKind {
     /// Deshalb ist `depth` zwischen beiden Verfahren **nicht** vergleichbar;
     /// vergleichbar sind Runden, also BRS-Tiefe 2k gegen Max^n-Tiefe 4k.
     Brs,
+    /// Monte-Carlo-Baumsuche mit gelerntem Zug-Prior (`chaturaji_nnue::mcts`).
+    /// Kennt keine Tiefe, sondern `--iters` Simulationen je Zug.
+    Mcts,
 }
 
 fn search_kind(s: &str) -> SearchKind {
     match s {
         "maxn" | "beam" => SearchKind::Maxn,
         "brs"           => SearchKind::Brs,
+        "mcts"          => SearchKind::Mcts,
         _ => {
-            eprintln!("Unbekanntes Suchverfahren '{s}' — erlaubt sind 'maxn' und 'brs'.");
+            eprintln!("Unbekanntes Suchverfahren '{s}' — erlaubt sind 'maxn', 'brs' und 'mcts'.");
             std::process::exit(2);
         }
     }
@@ -129,6 +139,8 @@ fn parse_args() -> Args {
         a_search: SearchKind::Maxn,
         b_search: SearchKind::Maxn,
         tt_mb: 8,
+        iters: 400,
+        c_puct: chaturaji_nnue::mcts::DEFAULT_C_PUCT,
     };
     let mut i = 1;
     while i < v.len() {
@@ -152,6 +164,8 @@ fn parse_args() -> Args {
             "--a-search"      => a.a_search = search_kind(&next(&mut i)),
             "--b-search"      => a.b_search = search_kind(&next(&mut i)),
             "--tt-mb"         => a.tt_mb = next(&mut i).parse().unwrap_or(a.tt_mb),
+            "--iters"         => a.iters = next(&mut i).parse().unwrap_or(a.iters),
+            "--c-puct"        => a.c_puct = next(&mut i).parse().unwrap_or(a.c_puct),
             _ => {}
         }
         i += 1;
@@ -200,6 +214,7 @@ fn play(
     net_a: &NnueNetwork, net_b: &NnueNetwork,
     a_beam: BeamOrder, b_beam: BeamOrder,
     a_search: SearchKind, b_search: SearchKind, tt_mb: usize,
+    mcts_cfg: &MctsConfig,
     depth: u8, beam: usize, max_moves: usize, keys: &ZobristKeys,
     time_ms: u64, max_depth: u8,
 ) -> ([f32; 4], usize, [f64; 2], [f64; 2]) {
@@ -213,6 +228,10 @@ fn play(
     // Verfahren sich nicht vermischen. Nur angelegt, wenn die Seite BRS spielt.
     let mut eng_a = (a_search == SearchKind::Brs).then(|| Engine::new(tt_mb));
     let mut eng_b = (b_search == SearchKind::Brs).then(|| Engine::new(tt_mb));
+    // Baum und Zugmodell einmal je Partie; der Baum wird je Zug geleert, die
+    // Allokationen bleiben erhalten.
+    let mut baum   = Mcts::new();
+    let modell     = MoveModel::default();
 
     while plies < max_moves && !Rules::is_game_over(&board) {
         let moves = Rules::legal_moves(&board);
@@ -263,6 +282,13 @@ fn play(
             SearchKind::Maxn => {
                 nnue_best_move(net, &board, &moves, depth, beam, order, keys, &mut tt)
             }
+            SearchKind::Mcts => {
+                // MCTS kennt kein Zeitbudget; `--iters` steuert den Aufwand.
+                // Die Zeitspalte bleibt für diese Seite deshalb leer.
+                baum.search(net, &modell, &board, mcts_cfg)
+                    .map(|r| r.best)
+                    .unwrap_or(moves[0])
+            }
         };
         board = Rules::apply_with_effects(&board, mv);
         plies += 1;
@@ -305,6 +331,9 @@ fn main() {
         println!("Suchverfahren: A {:?}, B {:?}", args.a_search, args.b_search);
         println!("Achtung: die Tiefen sind nicht direkt vergleichbar — BRS gibt \
                   zwei Halbzüge je Runde aus, Max^n vier.");
+        if args.a_search == SearchKind::Mcts || args.b_search == SearchKind::Mcts {
+            println!("MCTS: {} Simulationen je Zug, c_puct {}", args.iters, args.c_puct);
+        }
     }
     println!("{}", "-".repeat(64));
 
@@ -319,6 +348,7 @@ fn main() {
                 let (vals, p, ta, tb) = play(&start, split, &net_a, &net_b,
                                      args.a_beam, args.b_beam,
                                      args.a_search, args.b_search, args.tt_mb,
+                                     &MctsConfig { iterations: args.iters, c_puct: args.c_puct },
                                      args.depth, args.beam, args.max_moves, &keys,
                                      args.time_ms, args.max_depth);
                 d_a[0] += ta[0]; d_a[1] += ta[1];

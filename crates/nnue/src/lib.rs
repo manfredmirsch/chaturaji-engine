@@ -3,6 +3,7 @@ pub mod dist;
 pub mod eval;
 pub mod features;
 pub mod gen_train;
+pub mod mcts;
 pub mod network;
 pub mod outcome;
 pub mod pgn_import;
