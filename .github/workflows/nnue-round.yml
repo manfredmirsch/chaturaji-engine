@@ -170,6 +170,9 @@ jobs:
             --beam-width ${{ inputs.beam_width }} \
             --max-moves  ${{ inputs.max_moves }} \
             --max-seconds ${{ inputs.max_seconds }} \
+            --generator ${{ inputs.generator }} \
+            --iters     ${{ inputs.iters }} \
+            --c-puct    ${{ inputs.c_puct }} \
             $BOOK_ARGS
 
       - uses: actions/upload-artifact@v7
