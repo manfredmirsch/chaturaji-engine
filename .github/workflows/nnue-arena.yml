@@ -60,15 +60,23 @@ on:
         type: string
         default: '10'
       a_search:
-        description: 'Suchverfahren für A (maxn = Self-Play-Max^n mit Beam, brs = Best-Reply Search)'
+        description: 'Suchverfahren für A (maxn = Max^n mit Beam, brs = Best-Reply, mcts = Baumsuche mit Zug-Prior)'
         type: choice
-        options: ['maxn', 'brs']
+        options: ['maxn', 'brs', 'mcts']
         default: 'maxn'
       b_search:
         description: 'Suchverfahren für B'
         type: choice
-        options: ['maxn', 'brs']
+        options: ['maxn', 'brs', 'mcts']
         default: 'maxn'
+      iters:
+        description: 'nur mcts: Simulationen je Zug (1600 ≈ kostengleich zu Tiefe 4 / Beam 6)'
+        type: string
+        default: '1600'
+      c_puct:
+        description: 'nur mcts: Erkundungsgewicht'
+        type: string
+        default: '1.5'
 
 env:
   STATE_TAG: nnue-state
@@ -164,6 +172,8 @@ jobs:
             --max-depth ${{ inputs.max_depth }} \
             --a-search '${{ inputs.a_search }}' \
             --b-search '${{ inputs.b_search }}' \
+            --iters  ${{ inputs.iters }} \
+            --c-puct ${{ inputs.c_puct }} \
             --out "out/shard-$(printf '%03d' ${{ matrix.shard }}).json"
 
       - uses: actions/upload-artifact@v7
