@@ -25,6 +25,7 @@ use chaturaji_core::notation::move_to_str;
 use chaturaji_core::zobrist::{hash_board, ZobristKeys};
 use chaturaji_engine::book::OpeningBook;
 use chaturaji_engine::move_features::{fast_features, MoveFeatureContext, MoveModel};
+use crate::mcts::{Mcts, MctsConfig};
 use crate::network::NnueNetwork;
 
 pub struct SelfPlayConfig {
@@ -58,6 +59,47 @@ pub struct SelfPlayConfig {
     pub book_min_count:  u32,
     /// Womit der Beam auswählt. Vorgabe: das gelernte Zugmodell.
     pub beam_order:      BeamOrder,
+    /// Welche Suche die Partien erzeugt.
+    pub generator:       Generator,
+}
+
+/// Wie die Züge im Self-Play gesucht werden.
+///
+/// # Warum das zur Wahl steht
+///
+/// Die erzeugende Suche ist der **Lehrer**: das Netz lernt, sie zu destillieren.
+/// Gemessen (dasselbe Netz, nur anders gesucht, je 576 Partien) schlägt MCTS
+/// mit gelerntem Zug-Prior das bisherige Max^n mit Beam um **+0,54 bei gleicher
+/// Rechenzeit** und um **+0,18 bei einem Viertel davon**. Auf der Kurve des
+/// Beams — 0,051 Platzwert je Verdopplung des Aufwands — entspricht das rund
+/// 1.600-facher Suche.
+///
+/// Ob ein besserer Lehrer auch einen besseren Fixpunkt ergibt, ist damit noch
+/// nicht gezeigt: Startnetz und Kapazität waren ohne Wirkung, die Suchstärke
+/// wirkte nur logarithmisch. Ein Sprung dieser Größe ist aber etwas anderes als
+/// die Verdopplungen, die bisher geprüft wurden.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Generator {
+    /// Max^n mit Beam — der Weg bis 2026-09-14.
+    Beam,
+    /// Monte-Carlo-Baumsuche mit Zug-Prior. 1600 Simulationen sind
+    /// kostengleich zu Tiefe 4 / Beam 6.
+    Mcts { iterations: u32, c_puct: f32 },
+}
+
+impl Generator {
+    /// Aus einem CLI-Wort. `mcts` nimmt die kostengleiche Vorgabe.
+    pub fn from_str(s: &str, iterations: u32, c_puct: f32) -> Option<Self> {
+        match s {
+            "beam" | "maxn" => Some(Self::Beam),
+            "mcts"          => Some(Self::Mcts { iterations, c_puct }),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self { Self::Beam => "beam", Self::Mcts { .. } => "mcts" }
+    }
 }
 
 impl Default for SelfPlayConfig {
@@ -73,6 +115,7 @@ impl Default for SelfPlayConfig {
             book_max_plies: 16,
             book_min_count: 2,
             beam_order:     BeamOrder::Model,
+            generator:      Generator::Beam,
         }
     }
 }
@@ -378,6 +421,10 @@ pub fn play_game(
     let mut steps    = Vec::with_capacity(cfg.max_moves);
     let mut move_log = Vec::with_capacity(cfg.max_moves);
     let mut tt: HashMap<u64, (u8, [f32; 4])> = HashMap::new();
+    // Baum und Zugmodell einmal je Partie. Der Baum wird je Zug geleert, seine
+    // Allokationen bleiben erhalten.
+    let mut baum   = Mcts::new();
+    let modell     = MoveModel::default();
 
     for ply in 0..cfg.max_moves {
         if Rules::is_game_over(&board) { break; }
@@ -398,13 +445,32 @@ pub fn play_game(
         } else if rng.gen::<f32>() < epsilon {
             moves[rng.gen_range(0..moves.len())]
         } else {
-            tt.clear();
-            let (mv, scores) = nnue_best_move_scored(
-                net, &board, &moves, cfg.engine_depth, cfg.beam_width, cfg.beam_order,
-                keys, &mut tt,
-            );
-            search_value = Some(scores);
-            mv
+            match cfg.generator {
+                Generator::Beam => {
+                    tt.clear();
+                    let (mv, scores) = nnue_best_move_scored(
+                        net, &board, &moves, cfg.engine_depth, cfg.beam_width,
+                        cfg.beam_order, keys, &mut tt,
+                    );
+                    search_value = Some(scores);
+                    mv
+                }
+                Generator::Mcts { iterations, c_puct } => {
+                    let r = baum.search(net, &modell, &board,
+                                        &MctsConfig { iterations, c_puct });
+                    match r {
+                        Some(r) => {
+                            // Die Wurzelbewertung von MCTS ist der Mittelwert
+                            // über alle Simulationen und damit eine bessere
+                            // Schätzung als der Scorevektor eines einzelnen
+                            // Max^n-Pfades.
+                            search_value = Some(r.value);
+                            r.best
+                        }
+                        None => moves[0],
+                    }
+                }
+            }
         };
 
         steps.push(Step { board: board.clone(), value, search_value });

@@ -15,7 +15,7 @@ use chaturaji_nnue::network::NnueNetwork;
 use chaturaji_nnue::pgn_import::{load_games_from_dir, load_games_from_json_dir};
 use chaturaji_nnue::supervised::run_supervised;
 use chaturaji_nnue::td::{export_weights, run, show_stats, TrainConfig};
-use chaturaji_nnue::selfplay::SelfPlayConfig;
+use chaturaji_nnue::selfplay::{Generator, SelfPlayConfig};
 use chaturaji_engine::book::OpeningBook;
 
 fn main() {
@@ -58,6 +58,12 @@ fn main() {
     // flutteraji (`nnue/train.py --q-weight`); dort trägt der Partieausgang
     // also neun Zehntel des Ziels.
     let mut q_weight     = 0.10f32;
+    // Welche Suche die Partien erzeugt. `mcts` schlägt den Beam bei gleicher
+    // Rechenzeit um +0,54 Platzwert; 1600 Simulationen sind kostengleich zu
+    // Tiefe 4 / Beam 6.
+    let mut generator    = "beam".to_string();
+    let mut mcts_iters   = 1600u32;
+    let mut c_puct       = chaturaji_nnue::mcts::DEFAULT_C_PUCT;
 
     let mut i = 1;
     while i < args.len() {
@@ -110,6 +116,9 @@ fn main() {
                 if i < args.len() { games_dir = args[i].clone(); }
             }
             "--q-weight"    => { i += 1; if i < args.len() { q_weight = args[i].parse().unwrap_or(q_weight); } }
+            "--generator"   => { i += 1; if i < args.len() { generator = args[i].clone(); } }
+            "--iters"       => { i += 1; if i < args.len() { mcts_iters = args[i].parse().unwrap_or(mcts_iters); } }
+            "--c-puct"      => { i += 1; if i < args.len() { c_puct = args[i].parse().unwrap_or(c_puct); } }
             "--epochs"      => { i += 1; if i < args.len() { epochs = args[i].parse().unwrap_or(epochs); } }
             "--init-state" => { mode = Mode::InitState; }
             "--weights"     => { i += 1; if i < args.len() { weights_path  = args[i].clone(); } }
@@ -226,6 +235,13 @@ fn main() {
                 shard,
                 games_total: total_games as u64,
                 selfplay: SelfPlayConfig {
+                    generator: match Generator::from_str(&generator, mcts_iters, c_puct) {
+                        Some(g) => g,
+                        None => {
+                            eprintln!("Unbekannter Erzeuger '{generator}' — erlaubt sind 'beam' und 'mcts'.");
+                            std::process::exit(2);
+                        }
+                    },
                     engine_depth:   depth,
                     beam_width,
                     book_max_plies: book_plies,
@@ -352,6 +368,13 @@ fn main() {
                 lr,
                 momentum: 0.9,
                 selfplay: SelfPlayConfig {
+                    generator: match Generator::from_str(&generator, mcts_iters, c_puct) {
+                        Some(g) => g,
+                        None => {
+                            eprintln!("Unbekannter Erzeuger '{generator}' — erlaubt sind 'beam' und 'mcts'.");
+                            std::process::exit(2);
+                        }
+                    },
                     engine_depth:   depth,
                     beam_width,
                     book_max_plies: book_plies,
@@ -404,6 +427,9 @@ fn print_help() {
     println!("  --learn-gen <verz>   dieselben Partien überwacht lernen (Generationentraining):");
     println!("                       Ziel = Partieausgang + Suchbewertung, gemischt, mehrere Epochen");
     println!("  --q-weight <f>       Anteil der Suchbewertung am Ziel, 0..1  [Standard: 0.10]");
+    println!("  --generator <art>    Suche für die Erzeugung: beam | mcts     [Standard: beam]");
+    println!("  --iters <n>          nur mcts: Simulationen je Zug            [Standard: 1600]");
+    println!("  --c-puct <f>         nur mcts: Erkundungsgewicht              [Standard: 1.5]");
     println!("  --pretrain <verz>    Supervised Pre-Training aus echten Partien (dateibasiert)");
     println!("  --epochs <n>         Durchläufe über den Datensatz    [Standard: 1]");
     println!("  --weights <datei>    Gewichte (Ein-/Ausgabe)               [Standard: weights.json]");

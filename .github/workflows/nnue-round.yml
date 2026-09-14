@@ -32,6 +32,11 @@ on:
       #   gen — Generationentraining: Ziel ist Partieausgang + Suchbewertung,
       #         gemischt über die ganze Runde, mehrere Epochen
       learn_mode:   { type: string, required: false, default: 'td' }
+      # Welche Suche die Partien erzeugt. `mcts` schlägt den Beam bei gleicher
+      # Rechenzeit um +0,54 Platzwert (je 576 Partien, zwei Seeds).
+      generator:    { type: string, required: false, default: 'beam' }
+      iters:        { type: string, required: false, default: '1600' }
+      c_puct:       { type: string, required: false, default: '1.5' }
       q_weight:     { type: string, required: false, default: '0.10' }
       epochs:       { type: string, required: false, default: '1' }
 

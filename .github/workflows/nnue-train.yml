@@ -67,6 +67,19 @@ on:
         description: 'Eröffnungsbuch verwenden (muss im Release liegen)'
         type: boolean
         default: true
+      generator:
+        description: 'Suche für die Partie-Erzeugung: beam oder mcts (kostengleich, +0,54 stärker)'
+        type: choice
+        options: ['beam', 'mcts']
+        default: 'beam'
+      iters:
+        description: 'nur mcts: Simulationen je Zug'
+        type: string
+        default: '1600'
+      c_puct:
+        description: 'nur mcts: Erkundungsgewicht'
+        type: string
+        default: '1.5'
       learn_mode:
         description: 'Lernverfahren: td (TD-Lambda) oder gen (Generationentraining)'
         type: choice
@@ -106,6 +119,9 @@ jobs:
       max_seconds: ${{ inputs.max_seconds }}
       use_book:    ${{ inputs.use_book }}
       learn_mode:  ${{ inputs.learn_mode }}
+      generator:   ${{ inputs.generator }}
+      iters:       ${{ inputs.iters }}
+      c_puct:      ${{ inputs.c_puct }}
       q_weight:    ${{ inputs.q_weight }}
       epochs:      ${{ inputs.epochs }}
 
@@ -126,6 +142,9 @@ jobs:
       max_seconds: ${{ inputs.max_seconds }}
       use_book:    ${{ inputs.use_book }}
       learn_mode:  ${{ inputs.learn_mode }}
+      generator:   ${{ inputs.generator }}
+      iters:       ${{ inputs.iters }}
+      c_puct:      ${{ inputs.c_puct }}
       q_weight:    ${{ inputs.q_weight }}
       epochs:      ${{ inputs.epochs }}
 
@@ -146,6 +165,9 @@ jobs:
       max_seconds: ${{ inputs.max_seconds }}
       use_book:    ${{ inputs.use_book }}
       learn_mode:  ${{ inputs.learn_mode }}
+      generator:   ${{ inputs.generator }}
+      iters:       ${{ inputs.iters }}
+      c_puct:      ${{ inputs.c_puct }}
       q_weight:    ${{ inputs.q_weight }}
       epochs:      ${{ inputs.epochs }}
 
@@ -166,6 +188,9 @@ jobs:
       max_seconds: ${{ inputs.max_seconds }}
       use_book:    ${{ inputs.use_book }}
       learn_mode:  ${{ inputs.learn_mode }}
+      generator:   ${{ inputs.generator }}
+      iters:       ${{ inputs.iters }}
+      c_puct:      ${{ inputs.c_puct }}
       q_weight:    ${{ inputs.q_weight }}
       epochs:      ${{ inputs.epochs }}
 
@@ -186,6 +211,9 @@ jobs:
       max_seconds: ${{ inputs.max_seconds }}
       use_book:    ${{ inputs.use_book }}
       learn_mode:  ${{ inputs.learn_mode }}
+      generator:   ${{ inputs.generator }}
+      iters:       ${{ inputs.iters }}
+      c_puct:      ${{ inputs.c_puct }}
       q_weight:    ${{ inputs.q_weight }}
       epochs:      ${{ inputs.epochs }}
 
@@ -206,6 +234,9 @@ jobs:
       max_seconds: ${{ inputs.max_seconds }}
       use_book:    ${{ inputs.use_book }}
       learn_mode:  ${{ inputs.learn_mode }}
+      generator:   ${{ inputs.generator }}
+      iters:       ${{ inputs.iters }}
+      c_puct:      ${{ inputs.c_puct }}
       q_weight:    ${{ inputs.q_weight }}
       epochs:      ${{ inputs.epochs }}
 
@@ -226,6 +257,9 @@ jobs:
       max_seconds: ${{ inputs.max_seconds }}
       use_book:    ${{ inputs.use_book }}
       learn_mode:  ${{ inputs.learn_mode }}
+      generator:   ${{ inputs.generator }}
+      iters:       ${{ inputs.iters }}
+      c_puct:      ${{ inputs.c_puct }}
       q_weight:    ${{ inputs.q_weight }}
       epochs:      ${{ inputs.epochs }}
 
@@ -246,5 +280,8 @@ jobs:
       max_seconds: ${{ inputs.max_seconds }}
       use_book:    ${{ inputs.use_book }}
       learn_mode:  ${{ inputs.learn_mode }}
+      generator:   ${{ inputs.generator }}
+      iters:       ${{ inputs.iters }}
+      c_puct:      ${{ inputs.c_puct }}
       q_weight:    ${{ inputs.q_weight }}
       epochs:      ${{ inputs.epochs }}
