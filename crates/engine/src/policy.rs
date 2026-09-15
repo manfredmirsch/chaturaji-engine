@@ -260,7 +260,10 @@ mod tests {
         let netz = PolicyNet::default();
         netz.validate(crate::move_features::N_FEATURES)
             .expect("eingebautes Netz muss zur Merkmalszahl passen");
-        assert_eq!(netz.inputs(), crate::move_features::N_FEATURES);
+        // `<=`, nicht `==`: kommen Merkmale hinzu, bleibt das ausgelieferte
+        // Netz bis zum nächsten Training schmaler und sieht die neuen nicht.
+        // Das ist zulässig, siehe `validate` — es wurde ohne sie geschätzt.
+        assert!(netz.inputs() <= crate::move_features::N_FEATURES);
         // Die Breite ist frei; `POLICY_HIDDEN` ist nur die Vorgabe für ein
         // frisch angelegtes Netz, nicht die des ausgelieferten.
         assert!(netz.hidden() >= 16, "unplausibel schmal: {}", netz.hidden());

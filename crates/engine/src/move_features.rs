@@ -38,7 +38,7 @@ use chaturaji_core::piece::{Color, PieceKind};
 use chaturaji_core::rules::Rules;
 
 /// Anzahl der Merkmale. Reihenfolge und Bedeutung siehe [`FEATURE_NAMES`].
-pub const N_FEATURES: usize = 26;
+pub const N_FEATURES: usize = 34;
 
 /// Namen in der Reihenfolge des Vektors — für die Gewichtstabelle.
 pub const FEATURE_NAMES: [&str; N_FEATURES] = [
@@ -77,6 +77,22 @@ pub const FEATURE_NAMES: [&str; N_FEATURES] = [
     "angreifer_zahl",        // 23  wie viele Gegner das Zielfeld angreifen (0..1)
     "schlaegt_gedeckten",    // 24  Schlag auf eine Figur, die ihre Seite deckt
     "zug_zahl",              // 25  wie viele Züge zur Wahl stehen (Kontext)
+    // ─── Drohungen und Vierpersonen-Lage ─────────────────────────────────────
+    //
+    // Zwei Lücken, die bis 2026-09-15 offen standen. Erstens bildete **kein**
+    // Merkmal ab, dass ein Zug eine Drohung *erzeugt* — nur, dass er schlägt
+    // oder Schach gibt. Zweitens nutzte keins, dass hier vier Spieler mit
+    // verschiedenen Punkteständen sitzen: wen man schlägt und wo man selbst
+    // steht, ändert den Wert eines Zuges erheblich.
+    "greift_an",             // 26  Wert gegnerischer Figuren, die der Stein von
+                             //     seinem Zielfeld aus neu angreift
+    "greift_ungedeckt_an",   // 27  davon der Teil, den niemand deckt
+    "beweglichkeit",         // 28  Felder, die der Stein vom Zielfeld deckt
+    "beweglichkeit_gewinn",  // 29  Differenz zum Ausgangsfeld
+    "opfer_rang",            // 30  Platz des Bestohlenen, 1 = Führender
+    "eigener_rang",          // 31  Platz des Ziehenden
+    "punkte_abstand",        // 32  eigener Rückstand auf den Führenden
+    "gegner_zahl",           // 33  wie viele Gegner noch im Spiel sind
 ];
 
 /// Größter Schlagwert im Spiel (Bishop und Boat). Normiert die Schlagfelder
@@ -309,6 +325,71 @@ fn features_cheap(board: &Board, mv: &Move, ctx: &MoveFeatureContext, f: &mut [f
         if deckt_etwas { f[24] = victim.kind.capture_value() as f32 / MAX_CAPTURE; }
     }
 
+    // ─── Drohungen ───────────────────────────────────────────────────────────
+    //
+    // Was der ziehende Stein von seinem Zielfeld aus bedroht, abzüglich dessen,
+    // was er schon vom Ausgangsfeld aus bedrohte. Nur der Zuwachs zählt: eine
+    // Figur, die ohnehin schon angegriffen war, ist keine neue Drohung.
+    if let Some(kind) = moving_kind {
+        let von_to = MoveGen::coverage_from(mover, kind, mv.to, ctx.occ);
+        let von_from = ctx.mover_pieces.iter()
+            .find(|(sq, _, _)| *sq == mv.from)
+            .map(|(_, _, cov)| *cov)
+            .unwrap_or(0);
+        let neu = von_to & !von_from;
+
+        let mut wert = 0.0f32;
+        let mut wert_ungedeckt = 0.0f32;
+        for c in Color::ALL {
+            if c == mover || !board.active[c.idx()] { continue; }
+            let mut bb = board.occupied_by(c) & neu;
+            while bb != 0 {
+                let sq = bb.trailing_zeros() as u8;
+                bb &= bb - 1;
+                if sq == mv.to { continue; }   // das ist der Schlag, schon erfasst
+                let Some(p) = board.piece_at(sq) else { continue };
+                let w = p.kind.capture_value() as f32 / MAX_CAPTURE;
+                wert += w;
+                // Ungedeckt heißt: die eigene Seite deckt es nicht, und auch
+                // kein Dritter. Eine solche Figur ist wirklich in Gefahr.
+                let gedeckt = Color::ALL.iter()
+                    .filter(|&&d| d != mover)
+                    .any(|&d| ctx.covered[d.idx()] & bit(sq) != 0);
+                if !gedeckt { wert_ungedeckt += w; }
+            }
+        }
+        f[26] = wert.min(3.0) / 3.0;
+        f[27] = wert_ungedeckt.min(3.0) / 3.0;
+
+        // Beweglichkeit: wie viele Felder der Stein danach deckt. Eigene
+        // Figuren zählen mit, sie sind ja gedeckt und nicht blockiert im Sinne
+        // der Wirkung.
+        let bew_to = von_to.count_ones() as f32;
+        let bew_from = von_from.count_ones() as f32;
+        f[28] = (bew_to / 27.0).min(1.0);           // 27 = Läufer im Zentrum
+        f[29] = ((bew_to - bew_from) / 27.0).clamp(-1.0, 1.0);
+    }
+
+    // ─── Vierpersonen-Lage ───────────────────────────────────────────────────
+    //
+    // Wen man schlägt, ist nicht gleichgültig: dem Führenden etwas wegzunehmen
+    // hilft der eigenen Platzierung mehr, als den Letzten weiter zu schwächen.
+    // Und wer selbst führt, spielt anders als wer hinten liegt.
+    let punkte = board.scores.as_array();
+    let rang = |c: usize| -> f32 {
+        // 0 = Führender, 1 = Letzter. Punktgleiche teilen sich den Rang.
+        let besser = (0..4).filter(|&j| board.active[j] && punkte[j] > punkte[c]).count() as f32;
+        let aktive = (0..4).filter(|&j| board.active[j]).count().max(1) as f32;
+        besser / (aktive - 1.0).max(1.0)
+    };
+    if let Some(victim) = mv.captured {
+        f[30] = 1.0 - rang(victim.color.idx());   // 1 = dem Führenden genommen
+    }
+    f[31] = 1.0 - rang(mover.idx());
+    let spitze = (0..4).filter(|&j| board.active[j]).map(|j| punkte[j]).max().unwrap_or(0);
+    f[32] = ((spitze - punkte[mover.idx()]) as f32 / 20.0).clamp(0.0, 1.0);
+    f[33] = (0..4).filter(|&j| board.active[j] && j != mover.idx()).count() as f32 / 3.0;
+
     // Wie viele Züge zur Wahl stehen. Kein Merkmal des Zuges, sondern des
     // Kontexts — im Softmax über eine Stellung kürzt es sich weg. Es steht
     // hier, weil das Netz es mit anderen Merkmalen verrechnen kann: ein
@@ -467,6 +548,14 @@ pub const DEFAULT_WEIGHTS: [f32; N_FEATURES] = [
      0.0000,  // angreifer_zahl
      0.0000,  // schlaegt_gedeckten
      0.0000,  // zug_zahl
+     0.0000,  // greift_an
+     0.0000,  // greift_ungedeckt_an
+     0.0000,  // beweglichkeit
+     0.0000,  // beweglichkeit_gewinn
+     0.0000,  // opfer_rang
+     0.0000,  // eigener_rang
+     0.0000,  // punkte_abstand
+     0.0000,  // gegner_zahl
 ];
 
 impl crate::policy::MovePrior for MoveModel {
