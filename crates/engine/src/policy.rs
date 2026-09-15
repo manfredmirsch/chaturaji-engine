@@ -190,17 +190,23 @@ impl PolicyNet {
 /// | Netz statt Linearform (16 Merkmale) | +0,1343 / +0,0648 / +0,1111 / +0,1053 | **+0,104** |
 /// | 26 statt 16 Merkmale | +0,1372 / +0,1337 | **+0,135** |
 /// | 64 statt 32 Einheiten | +0,0220 / +0,0266 / +0,0451 / +0,0168 | **+0,028** |
+/// | 34 statt 26 Merkmale | +0,1036 / +0,1134 | **+0,109** |
 ///
-/// Zusammen rund **+0,27 Platzwert**. Über die bekannte Beziehung von 0,051 je
-/// Verdopplung des Suchaufwands entspricht das gut fünf Verdopplungen — als
-/// wären es 25.600 statt 800 Simulationen, ohne die zweiunddreißigfache
-/// Rechenzeit.
+/// Zusammen rund **+0,38 Platzwert**. Über die bekannte Beziehung von 0,051 je
+/// Verdopplung des Suchaufwands entspricht das gut sieben Verdopplungen — als
+/// liefen 100.000 statt 800 Simulationen.
 ///
-/// Die breitere Schicht ist der einzige der drei Schritte, der überhaupt etwas
-/// kostet: gemessen 5,5 % mehr Rechenzeit (66,6 gegen 63,1 s über 24 Partien).
-/// Auf derselben Kurve sind das 0,004 Platzwert — der Handel geht klar auf.
-/// Die vier Seeds liegen einzeln im Rauschen (t 0,73 bis 1,78), aber alle vier
-/// positiv und mit einheitlicher Größe.
+/// Der Weg dahin war jedes Mal derselbe: **mehr Information hineingeben**, und
+/// jedes Mal erst möglich, weil ein Netz sie verarbeitet. Für die Linearform
+/// vom Morgen wären alle achtzehn neuen Merkmale tote Gewichte gewesen.
+///
+/// Rechenzeit, gemessen statt geschätzt: die breitere Schicht kostet 5,5 %
+/// (66,6 gegen 63,1 s über 24 Partien), die acht Drohungs- und
+/// Vierpersonen-Merkmale 3,2 % (57,4 gegen 55,7 s). Auf derselben Kurve sind
+/// das 0,004 und 0,002 Platzwert — beide Handel gehen klar auf.
+///
+/// Bei der Breite liegen die vier Seeds einzeln im Rauschen (t 0,73 bis 1,78),
+/// aber alle vier positiv und mit einheitlicher Größe.
 ///
 /// Der zweite Schritt war erst nach dem ersten möglich: die zehn neuen
 /// Merkmale wären für eine Linearform tote Gewichte gewesen. „Springer" allein
