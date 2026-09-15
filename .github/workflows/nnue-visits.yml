@@ -1,0 +1,203 @@
+name: NNUE-Besuchsverteilungen
+
+# Selbstspielpartien erzeugen und dabei die Besuchsverteilung der Wurzel
+# mitschreiben — Trainingsmaterial für den Zug-Prior (`policy_selfplay`).
+#
+# Bewusst getrennt von nnue-round.yml: der hier **lernt nichts** und schreibt
+# nichts ins Release. Der Trainingszustand bleibt unangetastet, und der Lauf
+# lässt sich jederzeit anstoßen, ohne eine laufende Runde zu stören.
+#
+# Ein Shard schafft rund 22 Partien je Minute; mit 16 Shards sind 6.400
+# Partien in etwa zwanzig Minuten fertig statt in fünf Stunden auf einem
+# Rechner.
+
+on:
+  workflow_dispatch:
+    inputs:
+      weights:
+        description: 'Netz (Asset im Release nnue-state)'
+        type: string
+        default: 'weights-gen-r12.json'
+      games:
+        description: 'Partien insgesamt'
+        type: string
+        default: '6400'
+      shards:
+        description: 'Parallele Runner'
+        type: string
+        default: '16'
+      iters:
+        description: 'Simulationen je Zug'
+        type: string
+        default: '800'
+      c_puct:
+        description: 'Erkundungsgewicht'
+        type: string
+        default: '1.5'
+      max_moves:
+        description: 'Halbzüge je Partie'
+        type: string
+        default: '150'
+      run_seed:
+        description: 'Seed — bestimmt Eröffnungen und Zufallszüge'
+        type: string
+        default: '4711'
+      use_book:
+        description: 'Eröffnungsbuch benutzen'
+        type: boolean
+        default: true
+      max_seconds:
+        description: 'Zeitbudget je Shard'
+        type: string
+        default: '18000'
+
+env:
+  STATE_TAG: nnue-state
+  CARGO_TERM_COLOR: always
+  GH_REPO: ${{ github.repository }}
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.shards.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Cargo-Cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Trainer bauen
+        run: cargo build --release -p chaturaji-nnue --bin train_nnue
+
+      - name: Netz und Buch holen
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p state
+          if ! gh release download "$STATE_TAG" --pattern '${{ inputs.weights }}' --dir state --clobber; then
+            echo "::error::'${{ inputs.weights }}' liegt nicht am Release '$STATE_TAG'."
+            gh release view "$STATE_TAG" --json assets --jq '.assets[].name' \
+              | sed 's/^/::error::  vorhanden: /'
+            exit 1
+          fi
+          mv "state/${{ inputs.weights }}" state/weights.json
+          if [ "${{ inputs.use_book }}" = "true" ]; then
+            gh release download "$STATE_TAG" --pattern 'opening_book.json' --dir state --clobber
+          fi
+          # Der Fortschritt wird hier frisch gesetzt statt aus dem Release
+          # gelesen: dieser Lauf soll vom Trainingszustand unabhängig sein.
+          # `games_done: 0` heißt, die ε-Kurve beginnt bei 0,30 und fällt über
+          # die ersten ~360 Partien auf 0,05.
+          echo '{"round":0,"games_done":0,"run_seed":${{ inputs.run_seed }}}' > state/progress.json
+          ls -la state/
+
+      - name: Shard-Liste
+        id: shards
+        run: |
+          set -euo pipefail
+          echo "matrix=$(seq 0 $(( ${{ inputs.shards }} - 1 )) | jq -R . | jq -s -c .)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: visits-input
+          retention-days: 2
+          path: |
+            target/release/train_nnue
+            state/
+          if-no-files-found: error
+
+  generate:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: visits-input
+
+      - name: Partien spielen
+        run: |
+          set -euo pipefail
+          chmod +x target/release/train_nnue
+          BOOK_ARGS="--no-book"
+          if [ "${{ inputs.use_book }}" = "true" ]; then
+            BOOK_ARGS="--book state/opening_book.json"
+          fi
+          mkdir -p out
+          ./target/release/train_nnue \
+            --generate "out/shard-$(printf '%03d' ${{ matrix.shard }}).jsonl" \
+            --weights  state/weights.json \
+            --progress state/progress.json \
+            --shards ${{ inputs.shards }} \
+            --shard  ${{ matrix.shard }} \
+            --games  ${{ inputs.games }} \
+            --max-moves ${{ inputs.max_moves }} \
+            --max-seconds ${{ inputs.max_seconds }} \
+            --generator mcts \
+            --iters  ${{ inputs.iters }} \
+            --c-puct ${{ inputs.c_puct }} \
+            --record-visits \
+            $BOOK_ARGS
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: visits-${{ matrix.shard }}
+          path: out/*.jsonl
+          retention-days: 7
+          if-no-files-found: error
+
+  # Alle Shards zu einer Datei zusammenführen, damit man nur ein Artefakt
+  # herunterlädt statt sechzehn.
+  merge:
+    needs: generate
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: visits-*
+          merge-multiple: true
+          path: teile
+
+      - name: Zusammenführen
+        run: |
+          set -euo pipefail
+          ls -la teile/
+          cat teile/*.jsonl > visits.jsonl
+          zeilen=$(wc -l < visits.jsonl)
+          groesse=$(du -h visits.jsonl | cut -f1)
+          echo "$zeilen Partien, $groesse"
+          {
+            echo "### Besuchsverteilungen"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Partien | $zeilen |"
+            echo "| Größe | $groesse |"
+            echo "| Netz | ${{ inputs.weights }} |"
+            echo "| Simulationen | ${{ inputs.iters }} |"
+            echo "| Seed | ${{ inputs.run_seed }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: visits-gesamt
+          path: visits.jsonl
+          retention-days: 14
+          if-no-files-found: error
