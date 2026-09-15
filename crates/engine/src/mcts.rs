@@ -66,11 +66,24 @@ fn final_targets(board: &Board) -> [f32; 4] {
 
 /// Erkundungsgewicht in der PUCT-Formel.
 ///
-/// Muss zur Skala der Werte passen: die Netzausgabe liegt in [−1, 1], der
-/// Erkundungsterm also ebenfalls in dieser Größenordnung. Der oft zitierte Wert
-/// 12 aus `flutteraji` gehört zu Rangpunkten auf einer Skala bis 6 und wäre hier
-/// um eine Größenordnung zu groß — die Suche liefe dann fast nur nach Prior und
-/// ignorierte, was sie selbst herausgefunden hat.
+/// Der Wert 12 aus `flutteraji` gehört zu Rangpunkten auf einer Skala bis 6 und
+/// wäre hier, wo die Netzausgabe in [−1, 1] liegt, deutlich zu groß.
+///
+/// 1,5 sieht andersherum zu groß aus, wenn man nachrechnet: die Werte spannen
+/// [−1, 1] nämlich nicht aus. Über 3.097 Stellungen gemessen (Beispiel
+/// `spanne`) liegt der Abstand zwischen bestem und zweitbestem Zug im Median
+/// bei 0,039, während der Erkundungsterm bei 800 Simulationen und mittlerer
+/// Besuchszahl rund 0,15 beträgt — viermal so groß. Q entscheidet damit kaum,
+/// die Besuche folgen überwiegend dem Prior.
+///
+/// Trotzdem ist 1,5 gemessen besser: **c_puct 0,25 verliert gegen 1,5 um
+/// −0,156 und −0,146 Platzwert** (je 576 Partien, zwei Seeds, gleiches Netz,
+/// 2026-09-15). Bei 800 Simulationen auf rund 30 Züge bekommt jeder Zug nur
+/// etwa 27 Besuche; die Verteilung nach dem Prior ist bei so knappem Budget
+/// kein Mangel, sondern das Beste, was zu haben ist. Mit kleinem c_puct legt
+/// sich die Suche zu früh auf die zuerst besuchten Züge fest.
+///
+/// Die Rechnung oben war also richtig, die Schlussfolgerung daraus falsch.
 pub const DEFAULT_C_PUCT: f32 = 1.5;
 
 /// Obergrenze für die Länge einer einzelnen Simulation.
@@ -80,14 +93,36 @@ pub const DEFAULT_C_PUCT: f32 = 1.5;
 /// eine Simulation im Extremfall bis zum Partieende.
 const MAX_DESCENT: usize = 200;
 
+/// Wonach der Zug an der Wurzel gewählt wird.
+///
+/// AlphaZero nimmt die Besuchszahl, und das ist bei großem Budget auch richtig:
+/// sie fasst zusammen, wohin die Suche ihre Aufmerksamkeit gelenkt hat, und ist
+/// robuster als ein einzelner Mittelwert. Bei kleinem Budget kippt das
+/// Argument: bei 800 Simulationen auf 30 Züge bekommt jeder Zug nur rund 27
+/// Besuche, und die Verteilung folgt dann überwiegend dem Prior — also dem,
+/// was ein Mensch gespielt hätte, nicht dem, was die Suche herausgefunden hat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootChoice {
+    /// Meistbesuchter Zug.
+    Visits,
+    /// Bester Mittelwert aus Sicht des Ziehenden, unter den Zügen mit
+    /// mindestens `MIN_VISITS_FOR_Q` Besuchen — ein Zug mit zwei Besuchen hat
+    /// keinen belastbaren Mittelwert.
+    Value,
+}
+
+/// Untergrenze, ab der ein Mittelwert an der Wurzel zählt.
+const MIN_VISITS_FOR_Q: u32 = 8;
+
 pub struct MctsConfig {
     pub iterations: u32,
     pub c_puct:     f32,
+    pub root:       RootChoice,
 }
 
 impl Default for MctsConfig {
     fn default() -> Self {
-        Self { iterations: 400, c_puct: DEFAULT_C_PUCT }
+        Self { iterations: 400, c_puct: DEFAULT_C_PUCT, root: RootChoice::Visits }
     }
 }
 
@@ -186,7 +221,23 @@ impl Mcts {
             .then(a.0.from.cmp(&b.0.from))
             .then(a.0.to.cmp(&b.0.to)));
 
-        let best = visits.first().map(|(m, _)| *m).unwrap_or(moves[0]);
+        let best = match cfg.root {
+            RootChoice::Visits => visits.first().map(|(m, _)| *m).unwrap_or(moves[0]),
+            RootChoice::Value  => {
+                let seat = board.to_move.idx();
+                self.nodes[root.kids.clone()].iter()
+                    .filter(|k| k.visits >= MIN_VISITS_FOR_Q)
+                    .max_by(|a, b| a.q(seat).partial_cmp(&b.q(seat))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        // Gleichstand wie oben nach Feldern auflösen, damit die
+                        // Wahl nicht an der Zuggenerierung hängt.
+                        .then(b.mv.map_or(0, |m| m.from).cmp(&a.mv.map_or(0, |m| m.from)))
+                        .then(b.mv.map_or(0, |m| m.to).cmp(&a.mv.map_or(0, |m| m.to))))
+                    .and_then(|k| k.mv)
+                    // Keiner hat genug Besuche: dann bleibt nur die Besuchszahl.
+                    .unwrap_or_else(|| visits.first().map(|(m, _)| *m).unwrap_or(moves[0]))
+            }
+        };
         let value = std::array::from_fn(|i| root.q(i));
         Some(SearchResult {
             best, value, visits,

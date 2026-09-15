@@ -93,6 +93,16 @@ on:
         description: 'nur mcts: Erkundungsgewicht nur für B (leer = wie c_puct)'
         type: string
         default: ''
+      a_root:
+        description: 'nur mcts: Zugwahl an der Wurzel für A'
+        type: choice
+        options: ['visits', 'value']
+        default: 'visits'
+      b_root:
+        description: 'nur mcts: Zugwahl an der Wurzel für B'
+        type: choice
+        options: ['visits', 'value']
+        default: 'visits'
 
 env:
   STATE_TAG: nnue-state
@@ -194,6 +204,8 @@ jobs:
             ${{ inputs.b_iters  && format('--b-iters {0}',  inputs.b_iters)  || '' }} \
             ${{ inputs.a_c_puct && format('--a-c-puct {0}', inputs.a_c_puct) || '' }} \
             ${{ inputs.b_c_puct && format('--b-c-puct {0}', inputs.b_c_puct) || '' }} \
+            --a-root '${{ inputs.a_root }}' \
+            --b-root '${{ inputs.b_root }}' \
             --out "out/shard-$(printf '%03d' ${{ matrix.shard }}).json"
 
       - uses: actions/upload-artifact@v7

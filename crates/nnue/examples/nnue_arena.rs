@@ -43,7 +43,7 @@ use chaturaji_core::zobrist::ZobristKeys;
 use chaturaji_nnue::network::NnueNetwork;
 use chaturaji_nnue::outcome::place_values;
 use chaturaji_nnue::selfplay::{nnue_best_move, nnue_best_move_timed, BeamOrder};
-use chaturaji_nnue::mcts::{Mcts, MctsConfig};
+use chaturaji_nnue::mcts::{Mcts, MctsConfig, RootChoice};
 use chaturaji_engine::move_features::MoveModel;
 use chaturaji_engine::Engine;
 use chaturaji_engine::search::SearchAlgo;
@@ -92,6 +92,8 @@ struct Args {
     b_iters:  Option<u32>,
     a_c_puct: Option<f32>,
     b_c_puct: Option<f32>,
+    a_root:   RootChoice,
+    b_root:   RootChoice,
 }
 
 /// Welches Suchverfahren eine Seite benutzt.
@@ -149,6 +151,7 @@ fn parse_args() -> Args {
         iters: 400,
         c_puct: chaturaji_nnue::mcts::DEFAULT_C_PUCT,
         a_iters: None, b_iters: None, a_c_puct: None, b_c_puct: None,
+        a_root: RootChoice::Visits, b_root: RootChoice::Visits,
     };
     let mut i = 1;
     while i < v.len() {
@@ -178,6 +181,8 @@ fn parse_args() -> Args {
             "--b-iters"       => a.b_iters  = next(&mut i).parse().ok(),
             "--a-c-puct"      => a.a_c_puct = next(&mut i).parse().ok(),
             "--b-c-puct"      => a.b_c_puct = next(&mut i).parse().ok(),
+            "--a-root"        => a.a_root = wurzelwahl(&next(&mut i)),
+            "--b-root"        => a.b_root = wurzelwahl(&next(&mut i)),
             _ => {}
         }
         i += 1;
@@ -221,6 +226,17 @@ fn opening(plies: usize, seed: u64) -> Board {
 /// Spielt eine Partie aus der gegebenen Stellung. `a_seats` sind die Sitze von
 /// Netz A. Rückgabe: Platzwerte je Sitz und die Zahl der gespielten Halbzüge.
 #[allow(clippy::too_many_arguments)]
+/// `visits` (Vorgabe) oder `value`. Alles andere bricht ab, statt still die
+/// Vorgabe zu nehmen — eine vertippte Einstellung soll nicht als Messergebnis
+/// durchgehen.
+fn wurzelwahl(s: &str) -> RootChoice {
+    match s {
+        "visits" => RootChoice::Visits,
+        "value"  => RootChoice::Value,
+        _ => { eprintln!("Unbekannte Wurzelwahl '{s}' — erlaubt sind 'visits' und 'value'."); std::process::exit(2); }
+    }
+}
+
 fn play(
     start: &Board, a_seats: [usize; 2],
     net_a: &NnueNetwork, net_b: &NnueNetwork,
@@ -345,9 +361,9 @@ fn main() {
         println!("Achtung: die Tiefen sind nicht direkt vergleichbar — BRS gibt \
                   zwei Halbzüge je Runde aus, Max^n vier.");
         if args.a_search == SearchKind::Mcts || args.b_search == SearchKind::Mcts {
-            println!("MCTS A: {} Simulationen, c_puct {} | B: {} Simulationen, c_puct {}",
-                     args.a_iters.unwrap_or(args.iters), args.a_c_puct.unwrap_or(args.c_puct),
-                     args.b_iters.unwrap_or(args.iters), args.b_c_puct.unwrap_or(args.c_puct));
+            println!("MCTS A: {} Simulationen, c_puct {}, Wurzel {:?} | B: {} Simulationen, c_puct {}, Wurzel {:?}",
+                     args.a_iters.unwrap_or(args.iters), args.a_c_puct.unwrap_or(args.c_puct), args.a_root,
+                     args.b_iters.unwrap_or(args.iters), args.b_c_puct.unwrap_or(args.c_puct), args.b_root);
         }
     }
     println!("{}", "-".repeat(64));
@@ -364,9 +380,11 @@ fn main() {
                                      args.a_beam, args.b_beam,
                                      args.a_search, args.b_search, args.tt_mb,
                                      &MctsConfig { iterations: args.a_iters.unwrap_or(args.iters),
-                                                   c_puct:     args.a_c_puct.unwrap_or(args.c_puct) },
+                                                   c_puct:     args.a_c_puct.unwrap_or(args.c_puct),
+                                                   root:       args.a_root },
                                      &MctsConfig { iterations: args.b_iters.unwrap_or(args.iters),
-                                                   c_puct:     args.b_c_puct.unwrap_or(args.c_puct) },
+                                                   c_puct:     args.b_c_puct.unwrap_or(args.c_puct),
+                                                   root:       args.b_root },
                                      args.depth, args.beam, args.max_moves, &keys,
                                      args.time_ms, args.max_depth);
                 d_a[0] += ta[0]; d_a[1] += ta[1];
