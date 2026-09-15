@@ -38,7 +38,7 @@ use chaturaji_core::piece::{Color, PieceKind};
 use chaturaji_core::rules::Rules;
 
 /// Anzahl der Merkmale. Reihenfolge und Bedeutung siehe [`FEATURE_NAMES`].
-pub const N_FEATURES: usize = 34;
+pub const N_FEATURES: usize = 40;
 
 /// Namen in der Reihenfolge des Vektors — für die Gewichtstabelle.
 pub const FEATURE_NAMES: [&str; N_FEATURES] = [
@@ -93,6 +93,14 @@ pub const FEATURE_NAMES: [&str; N_FEATURES] = [
     "eigener_rang",          // 31  Platz des Ziehenden
     "punkte_abstand",        // 32  eigener Rückstand auf den Führenden
     "gegner_zahl",           // 33  wie viele Gegner noch im Spiel sind
+    // ─── Klassiker, die noch fehlten ─────────────────────────────────────────
+    "see_tausch",            // 34  Tauschbilanz beim Schlagen auf gedecktem Feld
+    "spiess",                // 35  der Zug reiht zwei gegnerische Figuren auf
+    "koenig_naehe",          // 36  Abstand des Zielfelds zum eigenen König
+    "feind_koenig_naehe",    // 37  Abstand zum nächsten gegnerischen König
+    "bauer_gedeckt",         // 38  Bauer zieht auf ein von eigenem Bauern
+                             //     gedecktes Feld
+    "freibauer",             // 39  kein gegnerischer Bauer mehr auf der Bahn
 ];
 
 /// Größter Schlagwert im Spiel (Bishop und Boat). Normiert die Schlagfelder
@@ -390,6 +398,121 @@ fn features_cheap(board: &Board, mv: &Move, ctx: &MoveFeatureContext, f: &mut [f
     f[32] = ((spitze - punkte[mover.idx()]) as f32 / 20.0).clamp(0.0, 1.0);
     f[33] = (0..4).filter(|&j| board.active[j] && j != mover.idx()).count() as f32 / 3.0;
 
+    // ─── Tauschbilanz ────────────────────────────────────────────────────────
+    //
+    // Bisher unterschied das Modell nur, *ob* das Schlagfeld gedeckt ist. Ob
+    // ein Bauer einen Läufer schlägt oder umgekehrt, macht aber den ganzen
+    // Unterschied — und genau das ist die Größe, die eine Suche an dieser
+    // Stelle statisch abschätzt.
+    if let (Some(victim), Some(kind)) = (mv.captured, moving_kind) {
+        if ctx.defended_by_others(mv) {
+            let bilanz = victim.kind.capture_value() as f32 - kind.capture_value() as f32;
+            f[34] = (bilanz / MAX_CAPTURE).clamp(-1.0, 1.0);
+        } else {
+            // Ungedeckt: der volle Wert bleibt.
+            f[34] = victim.kind.capture_value() as f32 / MAX_CAPTURE;
+        }
+    }
+
+    // ─── Spieß ───────────────────────────────────────────────────────────────
+    //
+    // Ein Schieber, der von seinem Zielfeld aus zwei gegnerische Figuren auf
+    // einer Linie aufreiht: die vordere kann ziehen, die hintere steht dann
+    // offen. Nur für Läufer und Boot; Springer und Bauern können das nicht.
+    if let Some(kind) = moving_kind {
+        let richtungen: &[(i8, i8)] = match kind {
+            PieceKind::Bishop => &[(-1,-1),(-1,1),(1,-1),(1,1)],
+            PieceKind::Boat   => &[(-1,0),(1,0),(0,-1),(0,1)],
+            _ => &[],
+        };
+        let mut gewinn = 0.0f32;
+        for &(df, dr) in richtungen {
+            let (mut ff, mut rr) = (file_of(mv.to) as i8 + df, rank_of(mv.to) as i8 + dr);
+            let mut erste: Option<u8> = None;
+            while (0..8).contains(&ff) && (0..8).contains(&rr) {
+                let sq = (rr as u8) * 8 + ff as u8;
+                if sq == mv.from { ff += df; rr += dr; continue; }   // zieht ja weg
+                if let Some(p) = board.piece_at(sq) {
+                    if p.color == mover { break; }                   // eigene Figur blockt
+                    match erste {
+                        None => erste = Some(p.kind.capture_value() as u8),
+                        Some(v1) => {
+                            // Der Gewinn ist die kleinere der beiden Figuren:
+                            // so viel lässt sich mindestens holen.
+                            let v2 = p.kind.capture_value() as u8;
+                            gewinn += v1.min(v2) as f32;
+                            break;
+                        }
+                    }
+                }
+                ff += df; rr += dr;
+            }
+        }
+        f[35] = (gewinn / MAX_CAPTURE).min(1.0);
+    }
+
+    // ─── Königsabstände ──────────────────────────────────────────────────────
+    let abstand = |a: u8, b: u8| -> f32 {
+        let (df, dr) = ((file_of(a) as i32 - file_of(b) as i32).abs(),
+                        (rank_of(a) as i32 - rank_of(b) as i32).abs());
+        df.max(dr) as f32 / 7.0
+    };
+    let eigener_koenig = board.pieces(mover, PieceKind::King);
+    if eigener_koenig != 0 {
+        f[36] = 1.0 - abstand(mv.to, eigener_koenig.trailing_zeros() as u8);
+    }
+    let naechster = Color::ALL.iter()
+        .filter(|&&c| c != mover && board.active[c.idx()])
+        .filter_map(|&c| {
+            let k = board.pieces(c, PieceKind::King);
+            (k != 0).then(|| abstand(mv.to, k.trailing_zeros() as u8))
+        })
+        .fold(f32::INFINITY, f32::min);
+    if naechster.is_finite() { f[37] = 1.0 - naechster; }
+
+    // ─── Bauern ──────────────────────────────────────────────────────────────
+    if moving_kind == Some(PieceKind::Pawn) {
+        // Von welchen Feldern aus ein eigener Bauer das Zielfeld deckt: das
+        // sind genau die, von denen aus er dorthin schlagen könnte.
+        let eigene_bauern = board.pieces(mover, PieceKind::Pawn) & !bit(mv.from);
+        let (f0, r0) = (file_of(mv.to) as i8, rank_of(mv.to) as i8);
+        let rueck: &[(i8, i8)] = match mover {
+            Color::Red    => &[(-1,-1),(1,-1)],
+            Color::Blue   => &[(-1,-1),(-1,1)],
+            Color::Yellow => &[(-1,1),(1,1)],
+            Color::Green  => &[(1,-1),(1,1)],
+        };
+        for &(df, dr) in rueck {
+            let (ff, rr) = (f0 + df, r0 + dr);
+            if (0..8).contains(&ff) && (0..8).contains(&rr)
+                && eigene_bauern & bit((rr as u8) * 8 + ff as u8) != 0 {
+                f[38] = 1.0;
+            }
+        }
+
+        // Freibauer: auf der Bahn vor ihm steht kein gegnerischer Bauer mehr.
+        // „Vor ihm" ist je Farbe eine andere Richtung — dieselbe Quelle von
+        // Fehlern wie überall bei vier Spielern, deshalb über
+        // `promotion_distance` statt über feste Achsen.
+        let rest = promotion_distance(mover, mv.to);
+        let mut frei = true;
+        for c in Color::ALL {
+            if c == mover || !board.active[c.idx()] { continue; }
+            let mut bb = board.pieces(c, PieceKind::Pawn);
+            while bb != 0 {
+                let sq = bb.trailing_zeros() as u8;
+                bb &= bb - 1;
+                // Gegnerischer Bauer auf derselben Bahn und noch vor uns.
+                let gleiche_bahn = match mover {
+                    Color::Red | Color::Yellow => file_of(sq) == file_of(mv.to),
+                    Color::Blue | Color::Green => rank_of(sq) == rank_of(mv.to),
+                };
+                if gleiche_bahn && promotion_distance(mover, sq) < rest { frei = false; }
+            }
+        }
+        if frei { f[39] = (7 - rest) as f32 / 7.0; }
+    }
+
     // Wie viele Züge zur Wahl stehen. Kein Merkmal des Zuges, sondern des
     // Kontexts — im Softmax über eine Stellung kürzt es sich weg. Es steht
     // hier, weil das Netz es mit anderen Merkmalen verrechnen kann: ein
@@ -556,6 +679,12 @@ pub const DEFAULT_WEIGHTS: [f32; N_FEATURES] = [
      0.0000,  // eigener_rang
      0.0000,  // punkte_abstand
      0.0000,  // gegner_zahl
+     0.0000,  // see_tausch
+     0.0000,  // spiess
+     0.0000,  // koenig_naehe
+     0.0000,  // feind_koenig_naehe
+     0.0000,  // bauer_gedeckt
+     0.0000,  // freibauer
 ];
 
 impl crate::policy::MovePrior for MoveModel {

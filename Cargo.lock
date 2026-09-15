@@ -58,6 +58,8 @@ version = "0.1.0"
 dependencies = [
  "chaturaji-core",
  "chaturaji-trainer",
+ "rand",
+ "rand_distr",
  "serde",
  "serde_json",
 ]
