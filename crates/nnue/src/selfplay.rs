@@ -61,6 +61,12 @@ pub struct SelfPlayConfig {
     pub beam_order:      BeamOrder,
     /// Welche Suche die Partien erzeugt.
     pub generator:       Generator,
+    /// Besuchsverteilung der Wurzel je Halbzug mitschreiben.
+    ///
+    /// Standardmäßig aus: sie kostet rund 25 KB je Partie und wird nur
+    /// gebraucht, wenn auf sie trainiert werden soll. Ein gewöhnlicher
+    /// Trainingslauf über 6.400 Partien würde damit 160 MB Artefakt erzeugen.
+    pub record_visits:   bool,
 }
 
 /// Wie die Züge im Self-Play gesucht werden.
@@ -116,9 +122,17 @@ impl Default for SelfPlayConfig {
             book_min_count: 2,
             beam_order:     BeamOrder::Model,
             generator:      Generator::Beam,
+            record_visits:  false,
         }
     }
 }
+
+/// Wie viele Züge je Stellung aufgezeichnet werden.
+///
+/// Der Schwanz der Verteilung besteht aus Zügen mit ein bis zwei Besuchen; bei
+/// 800 Simulationen auf ~30 Züge trägt er nichts zum Ziel bei und verdoppelte
+/// die Dateigröße. Sechzehn decken alles ab, was nennenswert besucht wurde.
+pub const VISIT_TOP_K: usize = 16;
 
 pub struct Step {
     /// Die vollständige Stellung, nicht nur die Bitboards: das Netz braucht
@@ -138,6 +152,18 @@ pub struct Step {
     /// ε-Zufallszug. Beides wäre nachträglich nur mit einer zweiten Suche zu
     /// füllen, und die kostet so viel wie die erste.
     pub search_value: Option<[f32; 4]>,
+    /// Besuchszahl je Zug an der Wurzel, absteigend und auf die wichtigsten
+    /// gekürzt.
+    ///
+    /// Das ist das Trainingsziel für den Zug-Prior: die Suche verteilt ihre
+    /// Aufmerksamkeit besser, als der Prior sie vorhergesagt hat — sonst
+    /// brächte sie nichts —, und genau diese Differenz ist das Lernsignal.
+    ///
+    /// Leer, wenn nicht mit MCTS gesucht wurde (Buchzug, ε-Zufallszug, oder
+    /// der Beam als Erzeuger). Gekürzt, weil die Verteilung einen langen
+    /// Schwanz aus Zügen mit ein bis zwei Besuchen hat, der nichts trägt und
+    /// die Dateien verdoppelte.
+    pub visits: Vec<(u8, u8, u32)>,
 }
 
 pub struct GameResult {
@@ -440,6 +466,7 @@ pub fn play_game(
             .and_then(|entries| sample_book_move(&entries, &moves, rng));
 
         let mut search_value = None;
+        let mut besuche: Vec<(u8, u8, u32)> = Vec::new();
         let chosen = if let Some(mv) = book_move {
             mv
         } else if rng.gen::<f32>() < epsilon {
@@ -465,6 +492,11 @@ pub fn play_game(
                             // Schätzung als der Scorevektor eines einzelnen
                             // Max^n-Pfades.
                             search_value = Some(r.value);
+                            if cfg.record_visits {
+                                besuche = r.visits.iter().take(VISIT_TOP_K)
+                                    .map(|(m, n)| (m.from, m.to, *n))
+                                    .collect();
+                            }
                             r.best
                         }
                         None => moves[0],
@@ -473,7 +505,7 @@ pub fn play_game(
             }
         };
 
-        steps.push(Step { board: board.clone(), value, search_value });
+        steps.push(Step { board: board.clone(), value, search_value, visits: besuche });
         move_log.push(move_to_str(&chosen));
         board = Rules::apply_with_effects(&board, chosen);
     }

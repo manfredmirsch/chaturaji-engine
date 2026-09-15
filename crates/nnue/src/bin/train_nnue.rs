@@ -64,6 +64,7 @@ fn main() {
     let mut generator    = "beam".to_string();
     let mut mcts_iters   = 1600u32;
     let mut c_puct       = chaturaji_nnue::mcts::DEFAULT_C_PUCT;
+    let mut record_visits = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -119,6 +120,7 @@ fn main() {
             "--generator"   => { i += 1; if i < args.len() { generator = args[i].clone(); } }
             "--iters"       => { i += 1; if i < args.len() { mcts_iters = args[i].parse().unwrap_or(mcts_iters); } }
             "--c-puct"      => { i += 1; if i < args.len() { c_puct = args[i].parse().unwrap_or(c_puct); } }
+            "--record-visits" => { record_visits = true; }
             "--epochs"      => { i += 1; if i < args.len() { epochs = args[i].parse().unwrap_or(epochs); } }
             "--init-state" => { mode = Mode::InitState; }
             "--weights"     => { i += 1; if i < args.len() { weights_path  = args[i].clone(); } }
@@ -235,6 +237,7 @@ fn main() {
                 shard,
                 games_total: total_games as u64,
                 selfplay: SelfPlayConfig {
+                    record_visits,
                     generator: match Generator::from_str(&generator, mcts_iters, c_puct) {
                         Some(g) => g,
                         None => {
@@ -368,6 +371,7 @@ fn main() {
                 lr,
                 momentum: 0.9,
                 selfplay: SelfPlayConfig {
+                    record_visits,
                     generator: match Generator::from_str(&generator, mcts_iters, c_puct) {
                         Some(g) => g,
                         None => {
@@ -414,6 +418,7 @@ fn print_help() {
     println!("  --book <pfad>        Eröffnungsbuch");
     println!("  --no-book            Training ohne Eröffnungsbuch");
     println!("  --book-plies <n>     Halbzüge mit Buch            [Standard: 16]");
+    println!("  --record-visits      Besuchsverteilung mitschreiben (für den Policy-Kopf)");
     println!("  --book-min <n>       Mindestbeobachtungen je Buchzug [Standard: 2]");
     println!("  --pgn-dir <pfad>     Supervised Training aus PGN-Verzeichnis");
     println!("  --json-dir <pfad>    Supervised Training aus JSON-Verzeichnis (chess.com Export)");

@@ -234,6 +234,18 @@ pub struct GameLine {
     /// damit zurecht und fällt dann auf das reine Endergebnis zurück.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub search_values: Vec<Option<[f32; 4]>>,
+
+    /// Besuchsverteilung der Wurzel je Halbzug, als flache Tripel
+    /// `[von, nach, Besuche]`.
+    ///
+    /// Trainingsziel für den Zug-Prior (siehe `selfplay::Step::visits`). Nur
+    /// vorhanden, wenn der Lauf mit `--record-visits` erzeugt wurde; ein
+    /// leerer Eintrag steht für einen Halbzug ohne Suche.
+    ///
+    /// Flach statt verschachtelt, weil eine Million Tripel als
+    /// `[[1,2,3],[4,5,6]]` doppelt so viel Text sind wie `[1,2,3,4,5,6]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub visits: Vec<Vec<u32>>,
 }
 
 /// Auf vier Nachkommastellen runden, damit die JSONL-Zeile nicht von
@@ -327,6 +339,13 @@ pub fn generate(cfg: GenerateConfig) -> io::Result<GenerateStats> {
                 search_values: result.steps.iter()
                     .map(|s| s.search_value.map(round4))
                     .collect(),
+                visits: if cfg.selfplay.record_visits {
+                    result.steps.iter()
+                        .map(|s| s.visits.iter()
+                            .flat_map(|(f, t, n)| [*f as u32, *t as u32, *n])
+                            .collect())
+                        .collect()
+                } else { Vec::new() },
             };
             writeln!(out, "{}", serde_json::to_string(&line)?)?;
             plies += result.steps.len() as u64;

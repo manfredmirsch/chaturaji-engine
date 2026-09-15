@@ -1,0 +1,189 @@
+//! Den Zug-Prior auf die Besuchsverteilung der eigenen Suche trainieren.
+//!
+//! # Der Kreislauf
+//!
+//! Die Baumsuche spielt besser als ihr eigener Prior — sonst brächte sie
+//! nichts. Bei 800 Simulationen verteilt sie die Besuche zwar überwiegend nach
+//! dem Prior, aber eben nicht nur: Züge, die sich in den Simulationen als gut
+//! erweisen, bekommen mehr, als der Prior ihnen zugedacht hatte. Genau diese
+//! Differenz ist das Lernsignal.
+//!
+//! Trainiert man den Prior darauf, die Besuchsverteilung nachzubilden, wird er
+//! besser als das menschliche Vorbild, mit dem er heute lernt. Und weil die
+//! Suche dem Prior folgt, wird die Suche dadurch besser und erzeugt beim
+//! nächsten Durchgang wiederum bessere Ziele. Das ist der Kreislauf, den
+//! AlphaZero fährt; hier fehlte bisher nur der Policy-Kopf dafür.
+//!
+//! Das Bewertungsnetz steckt dagegen an einem Fixpunkt fest, gegen den weder
+//! ein besseres Startnetz noch mehr Kapazität noch ein stärkerer Lehrer
+//! geholfen haben. Der Prior ist der Teil, den das Selbstspiel bisher gar
+//! nicht trainiert hat.
+//!
+//! # Aufruf
+//!
+//! ```text
+//! # Partien mit Besuchsverteilung erzeugen
+//! train_nnue --generate spiele.jsonl --weights netz.json --generator mcts \
+//!            --iters 800 --record-visits --games 2000
+//!
+//! # darauf trainieren
+//! policy_selfplay --games spiele.jsonl --out policy_v2.json
+//! ```
+
+use std::collections::HashMap;
+
+use chaturaji_core::board::Board;
+use chaturaji_core::notation::parse_move;
+use chaturaji_core::rules::Rules;
+use chaturaji_engine::move_features::{fast_features, MoveFeatureContext};
+use chaturaji_engine::policy::{MovePrior, PolicyNet};
+use chaturaji_trainer::move_model::{accuracy, fit_policy, print_accuracy, Decision};
+
+fn main() {
+    let mut games  = String::new();
+    let mut out    = "policy_selfplay.json".to_string();
+    let mut epochs = 30u32;
+    let mut lr     = 0.01f32;
+    let mut batch  = 4096usize;
+    // Anteil der Partien, der zum Messen zurückgehalten wird.
+    let mut test_anteil = 10usize;
+
+    let args: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    while i < args.len() {
+        let wert = args.get(i + 1).cloned().unwrap_or_default();
+        match args[i].as_str() {
+            "--games"  => { games  = wert; i += 1; }
+            "--out"    => { out    = wert; i += 1; }
+            "--epochs" => { epochs = wert.parse().unwrap_or(epochs); i += 1; }
+            "--lr"     => { lr     = wert.parse().unwrap_or(lr); i += 1; }
+            "--batch"  => { batch  = wert.parse().unwrap_or(batch); i += 1; }
+            "--help" | "-h" => {
+                println!("policy_selfplay --games <jsonl> [--out datei] [--epochs n] [--lr f] [--batch n]");
+                return;
+            }
+            other => { eprintln!("unbekanntes Argument: {other}"); std::process::exit(2); }
+        }
+        i += 1;
+    }
+    if games.is_empty() { eprintln!("--games fehlt"); std::process::exit(2); }
+
+    let t0 = std::time::Instant::now();
+    let (daten, partien, ohne_suche) = sammle(&games);
+    if daten.is_empty() {
+        eprintln!("Keine Stellungen mit Besuchsverteilung — wurde mit --record-visits erzeugt?");
+        std::process::exit(1);
+    }
+    println!(
+        "{partien} Partien, {} Stellungen mit Suche ({ohne_suche} ohne), {:.1} s",
+        daten.len(), t0.elapsed().as_secs_f32(),
+    );
+
+    // Nach Partien schneiden, nicht nach Stellungen: Stellungen derselben
+    // Partie in Lern- und Testteil wären eine verdeckte Überschneidung.
+    let schnitt = daten.len() * (100 - test_anteil.min(50)) / 100;
+    let mut daten = daten;
+    let test  = daten.split_off(schnitt);
+    let train = daten;
+    println!("Lernen auf {}, Test auf {}\n", train.len(), test.len());
+
+    println!("─── Policy-Netz auf der Besuchsverteilung ───");
+    let (netz, letzte, erste) = fit_policy(&train, false, epochs, lr, batch, 20260915);
+    println!("  {} Parameter, {:+.5} → {:+.5}", netz.param_count(), erste, letzte);
+
+    // Gemessen wird gegen den meistbesuchten Zug: trifft das Modell den Zug,
+    // den die Suche am Ende gespielt hätte? Das ist dieselbe Größe wie bei den
+    // menschlichen Partien, nur mit der Suche als Maßstab.
+    println!("\n═══ Trefferquoten gegen die Wahl der Suche ═══\n");
+    let zufall = accuracy(&test, |_| 0.0);
+    println!("  {} Stellungen, ∅ {:.1} legale Züge\n", zufall.n, zufall.avg_moves);
+    print_accuracy("Zufall", &zufall);
+    let eingebaut = PolicyNet::default();
+    print_accuracy("Policy v1 (menschlich)", &accuracy(&test, |f| eingebaut.logit(f)));
+    print_accuracy("Policy v2 (Suche)",      &accuracy(&test, |f| netz.logit(f)));
+
+    let mut netz = netz;
+    netz.note = format!("Policy v2, auf Besuchsverteilung aus {partien} Selbstspielpartien");
+    match std::fs::write(&out, serde_json::to_string(&netz).unwrap_or_default()) {
+        Ok(()) => println!("\nGeschrieben: {out}"),
+        Err(e) => eprintln!("\nSchreiben fehlgeschlagen: {e}"),
+    }
+    println!("Gesamtzeit {:.1} s", t0.elapsed().as_secs_f32());
+}
+
+/// Liest die JSONL-Datei, spielt jede Partie nach und baut je Stellung mit
+/// Besuchsverteilung eine Entscheidung.
+///
+/// Rückgabe: Entscheidungen, Zahl der Partien, Zahl der übersprungenen
+/// Halbzüge (Buchzug, ε-Zufallszug — dort hat keine Suche stattgefunden).
+fn sammle(pfad: &str) -> (Vec<Decision>, usize, usize) {
+    let text = match std::fs::read_to_string(pfad) {
+        Ok(t) => t,
+        Err(e) => { eprintln!("{pfad}: {e}"); std::process::exit(1); }
+    };
+
+    let mut alle = Vec::new();
+    let mut partien = 0usize;
+    let mut ohne_suche = 0usize;
+
+    for zeile in text.lines() {
+        let json: serde_json::Value = match serde_json::from_str(zeile) {
+            Ok(j) => j,
+            Err(_) => continue,
+        };
+        let zuege: Vec<&str> = json["moves"].as_str().unwrap_or("").split_whitespace().collect();
+        let besuche = match json["visits"].as_array() {
+            Some(v) => v,
+            None => continue,
+        };
+        partien += 1;
+
+        let mut board = Board::default();
+        for (ply, zug_text) in zuege.iter().enumerate() {
+            let legal = Rules::legal_moves(&board);
+            if legal.is_empty() { break; }
+
+            // Die Besuchsverteilung dieses Halbzugs, als (von, nach) → Besuche.
+            let flach: Vec<u32> = besuche.get(ply)
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_u64().map(|n| n as u32)).collect())
+                .unwrap_or_default();
+
+            if flach.len() >= 3 {
+                let mut karte: HashMap<(u8, u8), u32> = HashMap::new();
+                for t in flach.chunks(3) {
+                    if t.len() == 3 { karte.insert((t[0] as u8, t[1] as u8), t[2]); }
+                }
+                let summe: f32 = karte.values().map(|&n| n as f32).sum::<f32>().max(1.0);
+
+                let ctx = MoveFeatureContext::new(&board);
+                let feats: Vec<_> = legal.iter()
+                    .map(|mv| fast_features(&board, mv, &ctx))
+                    .collect();
+                let target: Vec<f32> = legal.iter()
+                    .map(|mv| *karte.get(&(mv.from, mv.to)).unwrap_or(&0) as f32 / summe)
+                    .collect();
+                // Der meistbesuchte Zug — die Wahl, die die Suche getroffen hat.
+                let chosen = target.iter().enumerate()
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(i, _)| i).unwrap_or(0);
+
+                if legal.len() > 1 {
+                    alle.push(Decision { feats, chosen, weight: 1.0, target: Some(target) });
+                }
+            } else {
+                ohne_suche += 1;
+            }
+
+            let mv = match parse_move(&board, zug_text)
+                .ok()
+                .and_then(|m| legal.iter().find(|l| l.from == m.from && l.to == m.to).copied()) {
+                Some(m) => m,
+                None => break,   // Partie nicht nachspielbar — Rest verwerfen
+            };
+            board = Rules::apply_with_effects(&board, mv);
+        }
+    }
+
+    (alle, partien, ohne_suche)
+}

@@ -68,6 +68,14 @@ pub struct Decision {
     pub feats:  Vec<[f32; N_FEATURES]>,
     pub chosen: usize,
     pub weight: f32,
+    /// Zielverteilung über die Züge, falls es eine gibt.
+    ///
+    /// Bei menschlichen Partien ist das Ziel ein einzelner Zug, und `chosen`
+    /// genügt. Beim Lernen aus der eigenen Suche ist es die **Besuchsverteilung
+    /// der Wurzel** — die trägt mehr als nur den besten Zug: dass zwei Züge
+    /// fast gleich oft besucht wurden, ist eine Aussage, die ein One-Hot-Ziel
+    /// wegwirft.
+    pub target: Option<Vec<f32>>,
 }
 
 /// Gewicht einer Entscheidung nach der Platzierung des Ziehenden.
@@ -145,6 +153,8 @@ fn decisions_from_file(path: &Path) -> Option<Vec<Decision>> {
                 feats,
                 chosen,
                 weight: place_weight(meta.ranks[board.to_move.idx()]),
+                // Menschliche Partie: das Ziel ist der gespielte Zug.
+                target: None,
             });
         }
 
@@ -353,6 +363,7 @@ pub fn without_slow_features(data: &[Decision]) -> Vec<Decision> {
             g
         }).collect(),
         chosen: d.chosen,
+        target: d.target.clone(),
         weight: d.weight,
     }).collect()
 }
@@ -566,8 +577,14 @@ pub fn fit_policy(
                     let mut a1 = vec![vec![0.0f32; inputs]; POLICY_HIDDEN];
                     let mut ab = vec![0.0f32; POLICY_HIDDEN];
                     let mut a2 = vec![0.0f32; POLICY_HIDDEN];
+                    // ∂/∂score(m) der Kreuzentropie ist π(m) − P(m); das
+                    // One-Hot-Ziel ist davon nur der Sonderfall.
+                    let ziel = |i: usize| match &d.target {
+                        Some(t) => t.get(i).copied().unwrap_or(0.0),
+                        None    => (i == d.chosen) as u8 as f32,
+                    };
                     for (i, f) in d.feats.iter().enumerate() {
-                        let ds = gewicht * ((i == d.chosen) as u8 as f32 - p[i]);
+                        let ds = gewicht * (ziel(i) - p[i]);
                         if ds == 0.0 { continue; }
                         for h in 0..POLICY_HIDDEN {
                             let akt = hidden[i][h];
@@ -578,7 +595,12 @@ pub fn fit_policy(
                             for (k, &x) in f.iter().enumerate() { a1[h][k] += dh * x; }
                         }
                     }
-                    (a1, ab, a2, gewicht * p[d.chosen].max(1e-30).ln(), gewicht)
+                    let ll = match &d.target {
+                        Some(t) => t.iter().zip(&p)
+                            .map(|(pi, pm)| pi * pm.max(1e-30).ln()).sum::<f32>(),
+                        None => p[d.chosen].max(1e-30).ln(),
+                    };
+                    (a1, ab, a2, gewicht * ll, gewicht)
                 })
                 .reduce(
                     || (vec![vec![0.0f32; inputs]; POLICY_HIDDEN],
