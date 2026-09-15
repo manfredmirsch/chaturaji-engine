@@ -181,18 +181,21 @@ impl PolicyNet {
 /// Parameter sind rund 10 KB JSON — gegenüber dem Bewertungsnetz mit 4,2 MB
 /// nicht der Rede wert.
 ///
-/// Gemessen gegen die Linearform, MCTS 800 auf beiden Seiten, gleiches
-/// Bewertungsnetz, je 576 Partien:
+/// Zwei Schritte, beide in der Arena gemessen — MCTS 800 auf beiden Seiten,
+/// gleiches Bewertungsnetz, je 576 Partien:
 ///
-/// | Seed | 1 | 42 | 7 | 99 |
-/// |---|---|---|---|---|
-/// | Differenz | +0,1343 | +0,0648 | +0,1111 | +0,1053 |
-/// | t | +4,77 | +1,96 | +3,86 | +3,82 |
+/// | Schritt | Seeds | Mittel |
+/// |---|---|---|
+/// | Netz statt Linearform (16 Merkmale) | +0,1343 / +0,0648 / +0,1111 / +0,1053 | **+0,104** |
+/// | 26 statt 16 Merkmale | +0,1372 / +0,1337 | **+0,135** |
 ///
-/// Im Mittel **+0,104 Platzwert** über 2.304 Partien. Über die bekannte
-/// Beziehung von 0,051 je Verdopplung des Suchaufwands entspricht das zwei
-/// Verdopplungen — als wären es 3.200 statt 800 Simulationen, ohne die
-/// vierfache Rechenzeit.
+/// Zusammen rund **+0,24 Platzwert**. Über die bekannte Beziehung von 0,051 je
+/// Verdopplung des Suchaufwands entspricht das gut vier Verdopplungen — als
+/// wären es 12.800 statt 800 Simulationen, ohne die sechzehnfache Rechenzeit.
+///
+/// Der zweite Schritt war erst nach dem ersten möglich: die zehn neuen
+/// Merkmale wären für eine Linearform tote Gewichte gewesen. „Springer" allein
+/// sagt nichts, „Springer, der ins Zentrum zieht" schon.
 const EINGEBAUT: &str = include_str!("policy_v1.json");
 
 impl Default for PolicyNet {
@@ -249,9 +252,7 @@ mod tests {
         netz.validate(crate::move_features::N_FEATURES)
             .expect("eingebautes Netz muss zur Merkmalszahl passen");
         assert_eq!(netz.hidden(), POLICY_HIDDEN);
-        // v1 wurde mit 16 Merkmalen geschätzt; seither sind welche
-        // hinzugekommen, die es nicht sieht. Siehe `validate`.
-        assert_eq!(netz.inputs(), 16);
+        assert_eq!(netz.inputs(), crate::move_features::N_FEATURES);
     }
 
     /// Es muss Züge auch wirklich unterscheiden — ein Netz, das überall
