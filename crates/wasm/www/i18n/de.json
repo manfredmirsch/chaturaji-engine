@@ -85,5 +85,12 @@
   "record.dlg.players": "Spielernamen (Rot / Blau / Gelb / Grün)",
   "record.dlg.gamenr": "Spielnummer (optional)",
   "record.dlg.cancel": "Abbrechen",
-  "record.dlg.save": "Speichern"
+  "record.dlg.save": "Speichern",
+  "controls.algo": "Suchverfahren",
+  "controls.algoMcts": "Baumsuche (stärker)",
+  "controls.algoBrs": "Best-Reply",
+  "controls.algoParanoid": "Paranoid",
+  "controls.iters": "Simulationen",
+  "engine.searchingMcts": "Baumsuche mit {iters} Simulationen…",
+  "engine.mctsInfo": "{nodes} Knoten · bis {depth} Halbzüge tief · {ms}ms{net}{tops}"
 }

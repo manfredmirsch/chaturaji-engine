@@ -456,7 +456,7 @@ pub fn play_game(
                     mv
                 }
                 Generator::Mcts { iterations, c_puct } => {
-                    let r = baum.search(net, &modell, &board,
+                    let r = baum.search(&|b: &Board| net.forward(b), &modell, &board,
                                         &MctsConfig { iterations, c_puct });
                     match r {
                         Some(r) => {

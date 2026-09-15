@@ -189,9 +189,22 @@
               <button id="btn-play-next" data-i18n-title="controls.playNext" title="Next (→)" disabled>&#9654;</button>
             </div>
             <div class="control-group">
+              <label data-i18n="controls.algo">Search</label>
+              <select id="algo">
+                <option value="mcts" data-i18n="controls.algoMcts">Tree search</option>
+                <option value="brs" data-i18n="controls.algoBrs">Best-Reply</option>
+                <option value="paranoid" data-i18n="controls.algoParanoid">Paranoid</option>
+              </select>
+            </div>
+            <div class="control-group" id="depth-group">
               <label data-i18n="controls.depth">Search depth</label>
               <input id="depth" type="range" min="1" max="6" value="4" />
               <span id="depth-val">4</span>
+            </div>
+            <div class="control-group hidden" id="iters-group">
+              <label data-i18n="controls.iters">Simulations</label>
+              <input id="iters" type="range" min="100" max="3200" step="100" value="800" />
+              <span id="iters-val">800</span>
             </div>
             <button id="btn-engine-move" data-i18n-title="controls.engineMove" title="Engine moves">&#129302;</button>
             <button id="btn-undo"        data-i18n-title="controls.undo"       title="Undo">&#8617;</button>

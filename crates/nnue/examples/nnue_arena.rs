@@ -285,7 +285,7 @@ fn play(
             SearchKind::Mcts => {
                 // MCTS kennt kein Zeitbudget; `--iters` steuert den Aufwand.
                 // Die Zeitspalte bleibt für diese Seite deshalb leer.
-                baum.search(net, &modell, &board, mcts_cfg)
+                baum.search(&|b: &Board| net.forward(b), &modell, &board, mcts_cfg)
                     .map(|r| r.best)
                     .unwrap_or(moves[0])
             }

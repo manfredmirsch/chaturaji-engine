@@ -193,6 +193,16 @@ impl Engine {
     ///
     /// Wenn ein Buch geladen ist und die aktuelle Stellung darin steht, wird
     /// der historisch beste Zug **ohne Suche** zurückgegeben. `depth = 0` und
+    /// Buchzug für eine Stellung, ohne zu suchen.
+    ///
+    /// Die Suchen fragen das Buch selbst ab; das hier ist für Aufrufer, die
+    /// eine eigene Suche mitbringen (MCTS im Frontend) und trotzdem nicht
+    /// stillschweigend ohne Buch spielen sollen.
+    pub fn book_move(&self, board: &Board) -> Option<Move> {
+        self.book.as_ref()
+            .and_then(|b| b.probe(board, &self.keys, self.book_min_count))
+    }
+
     /// `nodes = 0` signalisieren das (Engine hat nichts gerechnet).
     pub fn search(&mut self, board: &Board, max_depth: u8) -> SearchResult {
         self.nodes   = 0;

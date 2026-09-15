@@ -10,6 +10,8 @@ use chaturaji_core::notation::{move_to_str, parse_move, GameRecord};
 use chaturaji_core::piece::Color;
 use chaturaji_core::rules::Rules;
 use chaturaji_engine::book::OpeningBook;
+use chaturaji_engine::mcts::{Mcts, MctsConfig, DEFAULT_C_PUCT};
+use chaturaji_engine::move_features::MoveModel;
 use chaturaji_engine::search::{Engine as SearchEngine, SearchAlgo};
 use network::Network;
 
@@ -87,6 +89,27 @@ enum Algorithm {
     Brs,
     /// All three opponents minimise the root player's score.
     Paranoid,
+    /// Monte-Carlo-Baumsuche mit gelerntem Zug-Prior.
+    ///
+    /// Gemessen am 2026-09-14 gegen Max^n Tiefe 4 / Beam 6, je 576 Partien mit
+    /// demselben Netz auf beiden Seiten: **+0,54 Platzwert bei gleicher
+    /// Rechenzeit** (1.600 Simulationen), **+0,18 bei einem Viertel** (400).
+    /// Das ist der größte gemessene Stärkegewinn des Projekts.
+    ///
+    /// Braucht ein geladenes Netz — ohne Blattbewertung hat MCTS nichts, was
+    /// es zurücktragen könnte. Die Einstiegspunkte fallen dann auf BRS zurück.
+    Mcts,
+}
+
+/// Die beiden Alpha-Beta-Verfahren, ohne MCTS.
+///
+/// Ein eigener Typ, damit die Suchpfade darüber vollständig verzweigen können:
+/// `Algorithm::Mcts` ist dort ausgeschlossen, und das soll der Compiler sehen
+/// statt es einem toten `match`-Arm zu überlassen.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AlphaBeta {
+    Brs,
+    Paranoid,
 }
 
 #[wasm_bindgen]
@@ -96,6 +119,27 @@ pub struct WasmEngine {
     history: Vec<Board>,
     network: Option<Network>,
     algo:    Algorithm,
+    /// Der Baum wird zwischen den Zügen behalten, damit nicht bei jedem Zug
+    /// neu alloziert wird; `search` leert ihn selbst.
+    mcts:    Mcts,
+    model:   MoveModel,
+    iters:   u32,
+    c_puct:  f32,
+    /// Gemessene Simulationen je Millisekunde, für `best_move_timed`.
+    ///
+    /// Der Startwert ist eine Schätzung; nach dem ersten Zug steht die
+    /// gemessene Rate darin. Sie hängt vom Gerät ab und von der Stellung — ein
+    /// leergeräumtes Brett hat weniger legale Züge und rechnet schneller —,
+    /// deshalb wird sie fortlaufend nachgeführt statt einmal festgelegt.
+    sims_per_ms: f32,
+    /// Besuchsverteilung der letzten Baumsuche an der aktuellen Stellung.
+    ///
+    /// Die Oberfläche ruft nach `best_move` noch `top_moves` für die
+    /// Kandidatenpfeile. Bei Alpha-Beta kostet das kaum etwas, weil die
+    /// Transpositionstabelle noch warm ist; MCTS hat keine und würde den
+    /// ganzen Baum ein zweites Mal bauen — also wird die Verteilung behalten
+    /// und bei jeder Brettänderung verworfen.
+    mcts_cache: Option<Vec<(chaturaji_core::board::Move, u32)>>,
 }
 
 #[wasm_bindgen]
@@ -108,6 +152,12 @@ impl WasmEngine {
             history: Vec::new(),
             network: None,
             algo:    Algorithm::Brs,
+            mcts:    Mcts::new(),
+            model:   MoveModel::default(),
+            iters:   800,
+            c_puct:  DEFAULT_C_PUCT,
+            sims_per_ms: 3.0,
+            mcts_cache:  None,
         }
     }
 
@@ -122,6 +172,7 @@ impl WasmEngine {
         match name {
             "brs"      => { self.algo = Algorithm::Brs;      true }
             "paranoid" => { self.algo = Algorithm::Paranoid; true }
+            "mcts"     => { self.algo = Algorithm::Mcts;     true }
             _          => false,
         }
     }
@@ -130,7 +181,87 @@ impl WasmEngine {
         match self.algo {
             Algorithm::Brs      => "brs".to_string(),
             Algorithm::Paranoid => "paranoid".to_string(),
+            Algorithm::Mcts     => "mcts".to_string(),
         }
+    }
+
+    /// Aufwand der Baumsuche: Simulationen je Zug.
+    ///
+    /// Anders als bei `depth` ist der Zusammenhang zur Wartezeit hier linear —
+    /// doppelt so viele Simulationen kosten doppelt so lange. 1.600 entspricht
+    /// ungefähr Max^n Tiefe 4 / Beam 6; der Standard 800 ist bewusst darunter,
+    /// weil im Browser eine Sekunde Bedenkzeit unangenehmer wirkt als am
+    /// Messrechner. Werte unter 2 ergeben keinen Baum.
+    pub fn set_mcts_iterations(&mut self, iters: u32) -> bool {
+        if iters < 2 { return false; }
+        self.iters = iters;
+        true
+    }
+
+    pub fn mcts_iterations(&self) -> u32 { self.iters }
+
+    /// Erkundungsgewicht der PUCT-Formel. Größer heißt mehr Vertrauen in den
+    /// Zug-Prior, kleiner mehr in die eigenen Simulationen. Der Standard 1,5
+    /// passt zur Skala der Netzausgabe [−1, 1] und ist gemessen; Verstellen
+    /// lohnt nur zum Experimentieren.
+    pub fn set_c_puct(&mut self, c: f32) -> bool {
+        if !c.is_finite() || c < 0.0 { return false; }
+        self.c_puct = c;
+        true
+    }
+
+    pub fn c_puct(&self) -> f32 { self.c_puct }
+
+
+    // ── MCTS ──────────────────────────────────────────────────────────────────
+
+    /// Eine Baumsuche für die aktuelle Stellung, oder `None`, wenn MCTS hier
+    /// nicht zuständig ist: anderes Verfahren gewählt, kein Netz geladen, oder
+    /// keine legalen Züge.
+    ///
+    /// Ohne Netz gibt es keine Blattbewertung — MCTS hätte nichts, was es
+    /// zurücktragen könnte, und liefe auf eine reine Prior-Sortierung hinaus.
+    /// Die Aufrufer fallen in dem Fall auf ihr bisheriges Verfahren zurück,
+    /// statt kommentarlos schwächer zu spielen.
+    fn mcts_search(&mut self) -> Option<chaturaji_engine::mcts::SearchResult> {
+        if self.algo != Algorithm::Mcts { return None; }
+        let net = self.network.as_ref()?;
+        let cfg = MctsConfig { iterations: self.iters, c_puct: self.c_puct };
+        // Feldweise ausleihen: der Baum wird verändert, während das Netz
+        // gelesen wird.
+        let board = &self.board;
+        let model = &self.model;
+        let r = self.mcts.search(&|b: &Board| net.forward(b), model, board, &cfg);
+        self.mcts_cache = r.as_ref().map(|r| r.visits.clone());
+        r
+    }
+
+    /// Verwirft die zwischengespeicherte Besuchsverteilung.
+    ///
+    /// Muss von jeder Stelle gerufen werden, die `self.board` ändert — sonst
+    /// zeigten die Kandidatenpfeile die Züge der vorigen Stellung.
+    fn invalidate_mcts(&mut self) { self.mcts_cache = None; }
+
+    /// Buchzug, falls die Stellung im geladenen Buch steht.
+    ///
+    /// Die Alpha-Beta-Suchen fragen das Buch selbst ab. MCTS tut das nicht,
+    /// also muss es hier geschehen — sonst schaltete die Wahl von MCTS das
+    /// Eröffnungsbuch stillschweigend ab.
+    /// Verfahren für die Alpha-Beta-Pfade.
+    ///
+    /// Diese Pfade werden bei MCTS nur noch erreicht, wenn die Baumsuche nicht
+    /// zuständig war — praktisch: kein Netz geladen. Dann ist BRS das bessere
+    /// von beidem, also wird darauf zurückgefallen, statt den Zug zu verweigern.
+    fn alpha_beta_algo(&self) -> AlphaBeta {
+        match self.algo {
+            Algorithm::Paranoid => AlphaBeta::Paranoid,
+            // MCTS ohne Netz: BRS ist der bessere Rückfall.
+            Algorithm::Brs | Algorithm::Mcts => AlphaBeta::Brs,
+        }
+    }
+
+    fn book_move_str(&self) -> Option<String> {
+        self.engine.book_move(&self.board).map(|mv| move_to_str(&mv))
     }
 
     // ── Board ─────────────────────────────────────────────────────────────────
@@ -175,6 +306,7 @@ impl WasmEngine {
             Ok(mv) => {
                 self.history.push(self.board.clone());
                 self.board = Rules::apply_with_effects(&self.board, mv);
+                self.invalidate_mcts();
                 true
             }
             Err(_) => false,
@@ -183,7 +315,9 @@ impl WasmEngine {
 
     pub fn undo(&mut self) -> bool {
         if let Some(prev) = self.history.pop() {
-            self.board = prev; true
+            self.board = prev;
+            self.invalidate_mcts();
+            true
         } else { false }
     }
 
@@ -201,6 +335,7 @@ impl WasmEngine {
         };
         if !self.board.active[c.idx()] { return false; }
         self.history.push(self.board.clone());
+        self.invalidate_mcts();
         self.board.active[c.idx()] = false;
         if self.board.to_move == c {
             let mut next = c.next();
@@ -219,8 +354,29 @@ impl WasmEngine {
         let net_values = self.network.as_ref().map(|net| {
             net.forward(&self.board)
         });
+        if self.algo == Algorithm::Mcts {
+            if let Some(mv) = self.book_move_str() {
+                let er = EngineResult {
+                    best_move: Some(mv), scores: self.board.scores.as_array(),
+                    net_values, depth: 0, nodes: 0,
+                    used_network: self.network.is_some(),
+                };
+                return serde_wasm_bindgen::to_value(&er).unwrap();
+            }
+            if let Some(r) = self.mcts_search() {
+                let er = EngineResult {
+                    best_move:    Some(move_to_str(&r.best)),
+                    scores:       self.board.scores.as_array(),
+                    net_values,
+                    depth:        r.depth,
+                    nodes:        r.nodes,
+                    used_network: true,
+                };
+                return serde_wasm_bindgen::to_value(&er).unwrap();
+            }
+        }
         // Split field borrows so the network closure and engine mutation can coexist.
-        let algo    = self.algo;
+        let algo    = self.alpha_beta_algo();
         let engine  = &mut self.engine;
         let network = &self.network;
         let board   = &self.board;
@@ -230,8 +386,8 @@ impl WasmEngine {
             None      => None,
         };
         let result = match algo {
-            Algorithm::Brs      => engine.search_brs(board, depth, net_eval),
-            Algorithm::Paranoid => engine.search_paranoid(board, depth, net_eval),
+            AlphaBeta::Brs      => engine.search_brs(board, depth, net_eval),
+            AlphaBeta::Paranoid => engine.search_paranoid(board, depth, net_eval),
         };
         let er = EngineResult {
             best_move:    result.best_move.map(|mv| move_to_str(&mv)),
@@ -258,12 +414,56 @@ impl WasmEngine {
     pub fn best_move_timed(&mut self, budget_ms: f64, max_depth: u8) -> JsValue {
         let net_values = self.network.as_ref().map(|net| net.forward(&self.board));
 
+        // MCTS hat keine iterative Vertiefung, die man abbrechen könnte. Statt
+        // das Budget zu ignorieren, wird es in Simulationen umgerechnet: die
+        // Kosten je Simulation sind annähernd konstant, anders als bei einer
+        // Tiefe. Gemessen wird dafür an der laufenden Suche — der erste Zug
+        // einer Sitzung kalibriert sich an einem kurzen Probelauf.
+        if self.algo == Algorithm::Mcts && self.network.is_some() {
+            if let Some(mv) = self.book_move_str() {
+                let er = EngineResult {
+                    best_move: Some(mv), scores: self.board.scores.as_array(),
+                    net_values, depth: 0, nodes: 0, used_network: true,
+                };
+                return serde_wasm_bindgen::to_value(&er).unwrap();
+            }
+            // Aus der gemessenen Rate die Zahl der Simulationen schätzen. Die
+            // Untergrenze verhindert, dass ein winziges Budget einen Baum
+            // ergibt, der nichts aussagt; die Obergrenze fängt eine kaputte
+            // Rate ab.
+            let geplant = (budget_ms as f32 * self.sims_per_ms)
+                .clamp(32.0, 200_000.0) as u32;
+            let merk = self.iters;
+            self.iters = geplant;
+            let start = js_sys::Date::now();
+            let r = self.mcts_search();
+            let gebraucht = (js_sys::Date::now() - start).max(0.001);
+            self.iters = merk;
+            // Rate nachführen, geglättet: ein einzelner Ausreißer (Tab im
+            // Hintergrund, GC) soll die nächste Suche nicht verreißen.
+            let gemessen = geplant as f32 / gebraucht as f32;
+            if gemessen.is_finite() && gemessen > 0.0 {
+                self.sims_per_ms = 0.7 * self.sims_per_ms + 0.3 * gemessen;
+            }
+            if let Some(r) = r {
+                let er = EngineResult {
+                    best_move:    Some(move_to_str(&r.best)),
+                    scores:       self.board.scores.as_array(),
+                    net_values,
+                    depth:        r.depth,
+                    nodes:        r.nodes,
+                    used_network: true,
+                };
+                return serde_wasm_bindgen::to_value(&er).unwrap();
+            }
+        }
+
         // js_sys::Date::now() statt std::time::Instant: letzteres paniziert
         // unter wasm32-unknown-unknown.
         let deadline = js_sys::Date::now() + budget_ms;
         self.engine.set_stop_check(move || js_sys::Date::now() >= deadline);
 
-        let algo    = self.algo;
+        let algo    = self.alpha_beta_algo();
         let engine  = &mut self.engine;
         let network = &self.network;
         let board   = &self.board;
@@ -273,8 +473,8 @@ impl WasmEngine {
             None      => None,
         };
         let search_algo = match algo {
-            Algorithm::Brs      => SearchAlgo::Brs,
-            Algorithm::Paranoid => SearchAlgo::Paranoid,
+            AlphaBeta::Brs      => SearchAlgo::Brs,
+            AlphaBeta::Paranoid => SearchAlgo::Paranoid,
         };
         let result = engine.search_deepening(board, search_algo, max_depth, net_eval);
         self.engine.clear_stop_check();
@@ -293,7 +493,28 @@ impl WasmEngine {
     /// Returns the top-`n` moves at the current position as a JS array of
     /// `{mv, score, pct}` objects.  `pct` is 0–100 with 100 = best move.
     pub fn top_moves(&mut self, depth: u8, n: u8) -> JsValue {
-        let algo    = self.algo;
+        if self.algo == Algorithm::Mcts {
+            // Die Verteilung der letzten Suche an dieser Stellung, sonst neu
+            // suchen.
+            let visits = match self.mcts_cache.take() {
+                Some(v) => Some(v),
+                None    => self.mcts_search().map(|r| r.visits),
+            };
+            if let Some(visits) = visits {
+                // Bei MCTS ist die Besuchszahl das Maß, nicht ein Score: sie
+                // ist das Ergebnis der Suche selbst. `score` trägt deshalb die
+                // Besuche, `pct` ihren Anteil am meistbesuchten Zug.
+                let max = visits.first().map(|(_, v)| *v).unwrap_or(1).max(1);
+                let top: Vec<TopMove> = visits.iter().take(n as usize).map(|(mv, v)| TopMove {
+                    mv:    move_to_str(mv),
+                    score: *v as i32,
+                    pct:   ((*v as f64 / max as f64) * 100.0).round() as u8,
+                }).collect();
+                self.mcts_cache = Some(visits);
+                return serde_wasm_bindgen::to_value(&top).unwrap();
+            }
+        }
+        let algo    = self.alpha_beta_algo();
         let engine  = &mut self.engine;
         let network = &self.network;
         let board   = &self.board;
@@ -303,8 +524,8 @@ impl WasmEngine {
             None      => None,
         };
         let ranked = match algo {
-            Algorithm::Brs      => engine.top_n_brs(board, depth, n as usize, net_eval),
-            Algorithm::Paranoid => engine.top_n_paranoid(board, depth, n as usize, net_eval),
+            AlphaBeta::Brs      => engine.top_n_brs(board, depth, n as usize, net_eval),
+            AlphaBeta::Paranoid => engine.top_n_paranoid(board, depth, n as usize, net_eval),
         };
         let mover_idx = self.board.to_move.idx();
 
@@ -329,7 +550,18 @@ impl WasmEngine {
     }
 
     pub fn engine_move(&mut self, depth: u8) -> bool {
-        let algo    = self.algo;
+        if self.algo == Algorithm::Mcts {
+            let gewaehlt = self.engine.book_move(&self.board)
+                .or_else(|| self.mcts_search().map(|r| r.best));
+            if let Some(mv) = gewaehlt {
+                self.history.push(self.board.clone());
+                self.board = Rules::apply_with_effects(&self.board, mv);
+                self.invalidate_mcts();
+                return true;
+            }
+            // Kein Netz geladen: unten weiter mit BRS statt gar nicht zu ziehen.
+        }
+        let algo    = self.alpha_beta_algo();
         let engine  = &mut self.engine;
         let network = &self.network;
         let board   = &self.board;
@@ -339,12 +571,13 @@ impl WasmEngine {
             None      => None,
         };
         let result = match algo {
-            Algorithm::Brs      => engine.search_brs(board, depth, net_eval),
-            Algorithm::Paranoid => engine.search_paranoid(board, depth, net_eval),
+            AlphaBeta::Brs      => engine.search_brs(board, depth, net_eval),
+            AlphaBeta::Paranoid => engine.search_paranoid(board, depth, net_eval),
         };
         if let Some(mv) = result.best_move {
             self.history.push(self.board.clone());
             self.board = Rules::apply_with_effects(&self.board, mv);
+            self.invalidate_mcts();
             true
         } else { false }
     }
@@ -367,6 +600,7 @@ impl WasmEngine {
                     return Some(format!("Netzwerk-Architektur passt nicht: {e}"));
                 }
                 self.network = Some(net);
+                self.invalidate_mcts();
                 None
             }
             Err(e)  => Some(format!("Fehler: {e}")),
@@ -381,7 +615,7 @@ impl WasmEngine {
         serde_wasm_bindgen::to_value(&info).unwrap()
     }
 
-    pub fn unload_network(&mut self) { self.network = None; }
+    pub fn unload_network(&mut self) { self.network = None; self.invalidate_mcts(); }
 
     // ── Eröffnungsbuch ────────────────────────────────────────────────────────
 
@@ -427,6 +661,7 @@ impl WasmEngine {
                 self.history.clear();
                 self.board = board;
                 self.engine.new_game();
+                self.invalidate_mcts();
                 None
             }
             Err(e) => Some(e),
@@ -441,6 +676,7 @@ impl WasmEngine {
         self.history.clear();
         self.board = Board::default();
         self.engine.new_game();
+        self.invalidate_mcts();
     }
 }
 

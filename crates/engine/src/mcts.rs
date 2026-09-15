@@ -19,7 +19,7 @@
 //!
 //! # Der Prior
 //!
-//! [`chaturaji_engine::move_features`] liefert für jeden Zug einen Score, der
+//! [`crate::move_features`] liefert für jeden Zug einen Score, der
 //! aus 862.206 Zugentscheidungen von Spielern ab 2400 geschätzt wurde. Das
 //! Modell ist eine konditionale Logit-Regression — seine Scores **sind** also
 //! Log-Wahrscheinlichkeiten bis auf eine Konstante, und der Softmax darüber ist
@@ -42,10 +42,27 @@ use std::collections::HashMap;
 
 use chaturaji_core::board::{Board, Move};
 use chaturaji_core::rules::Rules;
-use chaturaji_engine::move_features::{fast_features, MoveFeatureContext, MoveModel};
 
-use crate::network::NnueNetwork;
-use crate::selfplay::final_targets;
+use crate::move_features::{fast_features, MoveFeatureContext, MoveModel};
+use crate::outcome::place_values;
+
+/// Blattbewertung: Stellung → erwartete Platzierung je Sitz, in [−1, 1].
+///
+/// Als Funktion statt als konkretes Netz, damit die Suche in der Engine leben
+/// kann. Der Trainer reicht sein `NnueNetwork` durch, das WASM-Frontend sein
+/// eigenes — und ein Test kommt mit einer Konstanten aus.
+pub type LeafEval<'a> = &'a dyn Fn(&Board) -> [f32; 4];
+
+/// Endstand → Platzwertung. Wie `chaturaji_nnue::selfplay::final_targets`, und
+/// bewusst dieselbe Rechnung: eine Endstellung im Baum muss denselben Wert
+/// bekommen wie dieselbe Stellung im Trainingsziel, sonst sucht die Engine auf
+/// einer anderen Skala als das Netz gelernt hat.
+///
+/// `Rules::final_scores` statt `board.scores`: bleibt genau ein Spieler übrig,
+/// gehören ihm die 3 Punkte je nie geschlagenem König.
+fn final_targets(board: &Board) -> [f32; 4] {
+    place_values(Rules::final_scores(board))
+}
 
 /// Erkundungsgewicht in der PUCT-Formel.
 ///
@@ -106,6 +123,8 @@ impl Node {
 
 pub struct Mcts {
     nodes: Vec<Node>,
+    /// Längster Abstieg der letzten Suche, für die Anzeige.
+    tiefe: usize,
 }
 
 /// Ergebnis einer Suche.
@@ -119,11 +138,16 @@ pub struct SearchResult {
     /// Trainingsziel für einen Policy-Kopf. Heute wird sie nur zur Zugwahl
     /// benutzt.
     pub visits: Vec<(Move, u32)>,
+    /// Angelegte Baumknoten — das Gegenstück zu `nodes` der Alpha-Beta-Suche.
+    pub nodes:  u64,
+    /// Längster Abstieg in Halbzügen. Anders als bei fester Tiefe ist das ein
+    /// Ergebnis, kein Parameter: MCTS vertieft dort, wo es sich lohnt.
+    pub depth:  u8,
 }
 
 impl Mcts {
     pub fn new() -> Self {
-        Self { nodes: Vec::with_capacity(4096) }
+        Self { nodes: Vec::with_capacity(4096), tiefe: 0 }
     }
 
     /// Sucht von `board` aus und gibt den meistbesuchten Zug zurück.
@@ -135,7 +159,7 @@ impl Mcts {
     /// Auswahl.
     pub fn search(
         &mut self,
-        net:   &NnueNetwork,
+        eval:  LeafEval,
         model: &MoveModel,
         board: &Board,
         cfg:   &MctsConfig,
@@ -144,10 +168,11 @@ impl Mcts {
         if moves.is_empty() { return None; }
 
         self.nodes.clear();
+        self.tiefe = 0;
         self.nodes.push(Node::new(None, 1.0, board.to_move.idx()));
 
         for _ in 0..cfg.iterations {
-            self.simulate(net, model, board, cfg.c_puct);
+            self.simulate(eval, model, board, cfg.c_puct);
         }
 
         let root = &self.nodes[0];
@@ -163,11 +188,15 @@ impl Mcts {
 
         let best = visits.first().map(|(m, _)| *m).unwrap_or(moves[0]);
         let value = std::array::from_fn(|i| root.q(i));
-        Some(SearchResult { best, value, visits })
+        Some(SearchResult {
+            best, value, visits,
+            nodes: self.nodes.len() as u64,
+            depth: self.tiefe.min(u8::MAX as usize) as u8,
+        })
     }
 
     /// Eine Simulation: absteigen, ein Blatt erweitern und bewerten, zurücktragen.
-    fn simulate(&mut self, net: &NnueNetwork, model: &MoveModel, root: &Board, c_puct: f32) {
+    fn simulate(&mut self, eval: LeafEval, model: &MoveModel, root: &Board, c_puct: f32) {
         let mut board = root.clone();
         let mut pfad  = vec![0usize];
         let mut idx   = 0usize;
@@ -189,8 +218,10 @@ impl Mcts {
             if !self.nodes[idx].expanded {
                 self.expand(idx, model, &board);
             }
-            net.forward(&board)
+            eval(&board)
         };
+
+        self.tiefe = self.tiefe.max(pfad.len() - 1);
 
         // ─── Zurücktragen ──────────────────────────────────────────────────
         for &n in &pfad {
@@ -266,23 +297,28 @@ impl Default for Mcts {
 /// `_tt` wird nicht benutzt; der Parameter hält die Signatur mit
 /// `nnue_best_move` vergleichbar, damit die Arena beide gleich aufrufen kann.
 pub fn mcts_best_move(
-    net:   &NnueNetwork,
+    eval:  LeafEval,
     model: &MoveModel,
     board: &Board,
     cfg:   &MctsConfig,
     _tt:   &mut HashMap<u64, (u8, [f32; 4])>,
 ) -> Option<SearchResult> {
-    Mcts::new().search(net, model, board, cfg)
+    Mcts::new().search(eval, model, board, cfg)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn netz() -> NnueNetwork {
-        let mut n = NnueNetwork::new(0.001, 0.9);
-        n.init_momentum();
-        n
+    /// Bewertung für die Tests: hängt von der Stellung ab, ist aber
+    /// deterministisch und ohne Netz zu haben. Die Punktedifferenz reicht —
+    /// geprüft wird hier die Mechanik der Suche, nicht die Spielstärke.
+    fn netz() -> impl Fn(&Board) -> [f32; 4] {
+        |b: &Board| {
+            let p = b.scores.as_array();
+            let summe: i32 = p.iter().sum::<i32>().max(1);
+            std::array::from_fn(|i| p[i] as f32 / summe as f32 - 0.25)
+        }
     }
 
     #[test]

@@ -85,5 +85,12 @@
   "record.dlg.players": "שמות שחקנים (אדום / כחול / צהוב / ירוק)",
   "record.dlg.gamenr": "מספר משחק (אופציונלי)",
   "record.dlg.cancel": "ביטול",
-  "record.dlg.save": "שמור"
+  "record.dlg.save": "שמור",
+  "controls.algo": "חיפוש",
+  "controls.algoMcts": "חיפוש עץ (חזק יותר)",
+  "controls.algoBrs": "Best-Reply",
+  "controls.algoParanoid": "פרנואיד",
+  "controls.iters": "סימולציות",
+  "engine.searchingMcts": "חיפוש עץ, {iters} סימולציות…",
+  "engine.mctsInfo": "{nodes} צמתים · בעומק {depth} חצאי־מהלכים · {ms}ms{net}{tops}"
 }

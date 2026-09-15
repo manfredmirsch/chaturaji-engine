@@ -85,5 +85,12 @@
   "record.dlg.players": "أسماء اللاعبين (أحمر / أزرق / أصفر / أخضر)",
   "record.dlg.gamenr": "رقم المباراة (اختياري)",
   "record.dlg.cancel": "إلغاء",
-  "record.dlg.save": "حفظ"
+  "record.dlg.save": "حفظ",
+  "controls.algo": "البحث",
+  "controls.algoMcts": "بحث شجري (أقوى)",
+  "controls.algoBrs": "Best-Reply",
+  "controls.algoParanoid": "بارانويد",
+  "controls.iters": "عمليات محاكاة",
+  "engine.searchingMcts": "بحث شجري، {iters} عملية محاكاة…",
+  "engine.mctsInfo": "{nodes} عقدة · بعمق {depth} نصف نقلة · {ms}ms{net}{tops}"
 }

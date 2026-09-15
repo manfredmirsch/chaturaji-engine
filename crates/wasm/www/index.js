@@ -2,10 +2,10 @@
 // Die gesamte Spiel-Logik (Zuggenerierung, Suche, Bewertung) liegt in Rust und
 // wird per wasm-bindgen exportiert. `engine` hält den einzigen globalen Spiel-
 // zustand; alles UI-seitige (Highlights, Animation, Chat) lebt in dieser Datei.
-import init, { WasmEngine } from './pkg/chaturaji_wasm.js?v=2609102328';
+import init, { WasmEngine } from './pkg/chaturaji_wasm.js?v=2609150915';
 import { initI18n, setLang, t, getLang, onLanguageChange, applyTranslations, SUPPORTED_LANGS } from './i18n.js';
 
-await init({ module_or_path: './pkg/chaturaji_wasm_bg.wasm?v=2609102328' });
+await init({ module_or_path: './pkg/chaturaji_wasm_bg.wasm?v=2609150915' });
 const engine = new WasmEngine();
 
 // Sprache (Default: en) frühestmöglich anwenden — vor dem ersten draw().
@@ -48,11 +48,42 @@ const engineInfo = document.getElementById('engine-info');
 const moveList   = document.getElementById('movelist');
 const depthInput = document.getElementById('depth');
 const depthVal   = document.getElementById('depth-val');
+const algoSelect = document.getElementById('algo');
+const itersInput = document.getElementById('iters');
+const itersVal   = document.getElementById('iters-val');
+const depthGroup = document.getElementById('depth-group');
+const itersGroup = document.getElementById('iters-group');
 const netStatus  = document.getElementById('net-status');
 const netBars    = document.getElementById('net-eval-bars');
 const unloadBtn  = document.getElementById('btn-unload-net');
 
 depthInput.addEventListener('input', () => { depthVal.textContent = depthInput.value; });
+itersInput.addEventListener('input', () => {
+  itersVal.textContent = itersInput.value;
+  engine.set_mcts_iterations(parseInt(itersInput.value));
+});
+
+// Suchverfahren. Die Baumsuche schlug Max^n mit Beam bei gleicher Rechenzeit
+// um 0,54 Platzwert (576 Partien je Seed, zwei Seeds) und ist deshalb die
+// Vorgabe. Sie braucht ein geladenes Netz; ohne eines fällt die Engine von
+// selbst auf Best-Reply zurück.
+function applyAlgo() {
+  const name = algoSelect.value;
+  engine.set_algorithm(name);
+  const mcts = name === 'mcts';
+  depthGroup.classList.toggle('hidden',  mcts);
+  itersGroup.classList.toggle('hidden', !mcts);
+  localStorage.setItem('chaturaji.algo', name);
+}
+algoSelect.addEventListener('change', applyAlgo);
+
+// Beim Start die zuletzt gewählte Einstellung wiederherstellen.
+{
+  const gemerkt = localStorage.getItem('chaturaji.algo');
+  if (gemerkt && ['mcts', 'brs', 'paranoid'].includes(gemerkt)) algoSelect.value = gemerkt;
+  applyAlgo();
+  engine.set_mcts_iterations(parseInt(itersInput.value));
+}
 
 // ─── Zustand ──────────────────────────────────────────────────────────────────
 // `state` ist eine Momentaufnahme aus der Engine (Felder, Punkte, aktive
@@ -487,7 +518,10 @@ document.getElementById('btn-engine-move').addEventListener('click', () => {
   clearPreview();
   clearEngineCandidates();
   const depth = parseInt(depthInput.value);
-  engineInfo.textContent = t('engine.searching', { depth });
+  const istMcts = algoSelect.value === 'mcts';
+  engineInfo.textContent = istMcts
+    ? t('engine.searchingMcts', { iters: parseInt(itersInput.value).toLocaleString() })
+    : t('engine.searching', { depth });
   const epoch = ++actionEpoch;
   setBusy(true);
   // setTimeout(…, 10) gibt dem Browser einen Tick, um den "Suche…"-Text
@@ -533,7 +567,9 @@ document.getElementById('btn-engine-move').addEventListener('click', () => {
     if (isBookMove) {
       engineInfo.textContent = t('engine.bookMove', { ms, net: netNote, tops: topsLine });
     } else {
-      engineInfo.textContent = t('engine.depthInfo', {
+      // Bei der Baumsuche ist `depth` der tiefste Abstieg, also ein Ergebnis
+      // und keine Vorgabe — das sagt die eigene Zeile auch so.
+      engineInfo.textContent = t(istMcts ? 'engine.mctsInfo' : 'engine.depthInfo', {
         depth: res.depth,
         nodes: (res.nodes || 0).toLocaleString(),
         ms,

@@ -12,6 +12,29 @@
 
 header('Content-Type: application/json; charset=utf-8');
 
+// Aufrufe vom Bookmarklet kommen aus einer chess.com-Seite, sind also
+// site-fremd. Ohne diese Köpfe schickt der Browser die Anfrage zwar ab, hält
+// die Antwort aber zurück, und das Bookmarklet könnte nicht sagen, ob das
+// Speichern geklappt hat. Nur chess.com wird zugelassen; ein offenes `*`
+// erlaubte jeder beliebigen Seite, hier Dateien abzulegen.
+$erlaubt = ['https://www.chess.com', 'https://chess.com'];
+$herkunft = $_SERVER['HTTP_ORIGIN'] ?? '';
+if (in_array($herkunft, $erlaubt, true)) {
+    header('Access-Control-Allow-Origin: ' . $herkunft);
+    header('Vary: Origin');
+    header('Access-Control-Allow-Headers: Content-Type');
+    header('Access-Control-Allow-Methods: POST, OPTIONS');
+    header('Access-Control-Max-Age: 86400');
+}
+
+// Der Vorab-Check des Browsers (wegen Content-Type: application/json) muss vor
+// der Methodenprüfung beantwortet werden, sonst bekäme er ein 405 und der
+// eigentliche POST fände nie statt.
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
+    http_response_code(204);
+    exit;
+}
+
 function fail(int $code, string $msg): void {
     http_response_code($code);
     echo json_encode(['ok' => false, 'error' => $msg], JSON_UNESCAPED_UNICODE);

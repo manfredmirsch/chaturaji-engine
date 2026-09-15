@@ -85,5 +85,12 @@
   "record.dlg.players": "Noms des joueurs (Rouge / Bleu / Jaune / Vert)",
   "record.dlg.gamenr": "Numéro de partie (facultatif)",
   "record.dlg.cancel": "Annuler",
-  "record.dlg.save": "Enregistrer"
+  "record.dlg.save": "Enregistrer",
+  "controls.algo": "Recherche",
+  "controls.algoMcts": "Recherche arborescente (plus forte)",
+  "controls.algoBrs": "Best-Reply",
+  "controls.algoParanoid": "Paranoïaque",
+  "controls.iters": "Simulations",
+  "engine.searchingMcts": "Recherche arborescente, {iters} simulations…",
+  "engine.mctsInfo": "{nodes} nœuds · profondeur {depth} demi-coups · {ms}ms{net}{tops}"
 }

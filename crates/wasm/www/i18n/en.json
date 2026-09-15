@@ -85,5 +85,12 @@
   "record.dlg.players": "Player names (Red / Blue / Yellow / Green)",
   "record.dlg.gamenr": "Game number (optional)",
   "record.dlg.cancel": "Cancel",
-  "record.dlg.save": "Save"
+  "record.dlg.save": "Save",
+  "controls.algo": "Search",
+  "controls.algoMcts": "Tree search (stronger)",
+  "controls.algoBrs": "Best-Reply",
+  "controls.algoParanoid": "Paranoid",
+  "controls.iters": "Simulations",
+  "engine.searchingMcts": "Tree search, {iters} simulations…",
+  "engine.mctsInfo": "{nodes} nodes · {depth} plies deep · {ms}ms{net}{tops}"
 }
