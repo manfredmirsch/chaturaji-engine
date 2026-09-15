@@ -19,7 +19,7 @@ use chaturaji_core::piece::Color;
 use chaturaji_core::rules::Rules;
 use chaturaji_engine::book::OpeningBook;
 use chaturaji_engine::mcts::{Mcts, MctsConfig, RootChoice, DEFAULT_C_PUCT};
-use chaturaji_engine::move_features::MoveModel;
+use chaturaji_engine::policy::PolicyNet;
 use chaturaji_engine::search::{Engine as SearchEngine, SearchAlgo};
 use chaturaji_engine::nnue_network::NnueNetwork as Network;
 
@@ -130,7 +130,14 @@ pub struct WasmEngine {
     /// Der Baum wird zwischen den Zügen behalten, damit nicht bei jedem Zug
     /// neu alloziert wird; `search` leert ihn selbst.
     mcts:    Mcts,
-    model:   MoveModel,
+    /// Der Zug-Prior der Baumsuche.
+    ///
+    /// Das Policy-Netz statt der Linearform: gemessen +0,104 Platzwert über
+    /// 2.304 Partien und vier Seeds, bei gleichem Bewertungsnetz und gleicher
+    /// Suche. Bei den Budgets, die im Browser realistisch sind, folgen die
+    /// Besuche überwiegend dem Prior — er ist also die Stellschraube, nicht
+    /// eine unter vielen.
+    model:   PolicyNet,
     iters:   u32,
     c_puct:  f32,
     root:    RootChoice,
@@ -162,7 +169,7 @@ impl WasmEngine {
             network: None,
             algo:    Algorithm::Brs,
             mcts:    Mcts::new(),
-            model:   MoveModel::default(),
+            model:   PolicyNet::default(),
             iters:   800,
             c_puct:  DEFAULT_C_PUCT,
             root:    RootChoice::Visits,

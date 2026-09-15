@@ -146,6 +146,34 @@ impl PolicyNet {
     }
 }
 
+/// Das eingebaute Netz.
+///
+/// Als Datei im Quellbaum und per `include_str!` einkompiliert, wie die
+/// Gewichte der Linearform: die Engine soll ohne Fremdpfad auskommen. 576
+/// Parameter sind rund 10 KB JSON — gegenüber dem Bewertungsnetz mit 4,2 MB
+/// nicht der Rede wert.
+///
+/// Gemessen gegen die Linearform, MCTS 800 auf beiden Seiten, gleiches
+/// Bewertungsnetz, je 576 Partien:
+///
+/// | Seed | 1 | 42 | 7 | 99 |
+/// |---|---|---|---|---|
+/// | Differenz | +0,1343 | +0,0648 | +0,1111 | +0,1053 |
+/// | t | +4,77 | +1,96 | +3,86 | +3,82 |
+///
+/// Im Mittel **+0,104 Platzwert** über 2.304 Partien. Über die bekannte
+/// Beziehung von 0,051 je Verdopplung des Suchaufwands entspricht das zwei
+/// Verdopplungen — als wären es 3.200 statt 800 Simulationen, ohne die
+/// vierfache Rechenzeit.
+const EINGEBAUT: &str = include_str!("policy_v1.json");
+
+impl Default for PolicyNet {
+    fn default() -> Self {
+        serde_json::from_str(EINGEBAUT)
+            .expect("das einkompilierte Policy-Netz muss ladbar sein")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,6 +211,36 @@ mod tests {
         assert!((s - netz.score(&f)).abs() < 1e-6);
         assert_eq!(h.len(), POLICY_HIDDEN);
         assert!(h.iter().all(|&x| x >= 0.0), "ReLU darf nicht negativ werden");
+    }
+
+    /// Das eingebaute Netz muss laden und zur Merkmalszahl passen — sonst
+    /// fiele ein Fehler beim Einbetten erst zur Laufzeit auf, im Browser.
+    #[test]
+    fn das_eingebaute_netz_passt() {
+        let netz = PolicyNet::default();
+        netz.validate(crate::move_features::N_FEATURES)
+            .expect("eingebautes Netz muss zur Merkmalszahl passen");
+        assert_eq!(netz.param_count(), 576);
+    }
+
+    /// Es muss Züge auch wirklich unterscheiden — ein Netz, das überall
+    /// dasselbe liefert, machte den Softmax zur Gleichverteilung und die
+    /// Baumsuche blind. Derselbe Fehler steckte monatelang im Bewertungsnetz
+    /// des Frontends, ohne aufzufallen.
+    #[test]
+    fn das_eingebaute_netz_unterscheidet_zuege() {
+        use chaturaji_core::board::Board;
+        use chaturaji_core::rules::Rules;
+        use crate::move_features::{fast_features, MoveFeatureContext};
+        let brett = Board::default();
+        let ctx = MoveFeatureContext::new(&brett);
+        let netz = PolicyNet::default();
+        let werte: Vec<f32> = Rules::legal_moves(&brett).iter()
+            .map(|mv| netz.logit(&fast_features(&brett, mv, &ctx)))
+            .collect();
+        let min = werte.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max = werte.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!(max - min > 0.1, "Spanne nur {:.4} über {} Züge", max - min, werte.len());
     }
 
     #[test]
