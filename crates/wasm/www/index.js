@@ -2,10 +2,10 @@
 // Die gesamte Spiel-Logik (Zuggenerierung, Suche, Bewertung) liegt in Rust und
 // wird per wasm-bindgen exportiert. `engine` hält den einzigen globalen Spiel-
 // zustand; alles UI-seitige (Highlights, Animation, Chat) lebt in dieser Datei.
-import init, { WasmEngine } from './pkg/chaturaji_wasm.js?v=2608578673';
-import { initI18n, setLang, t, getLang, onLanguageChange, applyTranslations, SUPPORTED_LANGS } from './i18n.js?v=2608578673';
+import init, { WasmEngine } from './pkg/chaturaji_wasm.js?v=9828691197';
+import { initI18n, setLang, t, getLang, onLanguageChange, applyTranslations, SUPPORTED_LANGS } from './i18n.js?v=9828691197';
 
-await init({ module_or_path: './pkg/chaturaji_wasm_bg.wasm?v=2608578673' });
+await init({ module_or_path: './pkg/chaturaji_wasm_bg.wasm?v=9828691197' });
 const engine = new WasmEngine();
 
 // Sprache (Default: en) frühestmöglich anwenden — vor dem ersten draw().
@@ -58,9 +58,44 @@ const netBars    = document.getElementById('net-eval-bars');
 const unloadBtn  = document.getElementById('btn-unload-net');
 
 depthInput.addEventListener('input', () => { depthVal.textContent = depthInput.value; });
+// Simulationen der Baumsuche, in Verdopplungen statt in gleichen Schritten.
+//
+// Die Stärke wächst mit dem Suchaufwand nur logarithmisch — gemessen 0,051
+// Platzwert je Verdopplung. Von 800 auf 900 zu gehen ist deshalb sinnlos, von
+// 800 auf 1600 nicht. Ein linearer Regler böte hundert Stufen an, von denen
+// nur sieben etwas ändern.
+//
+// 1600 entspricht ungefähr den Kosten von Max^n Tiefe 4 / Beam 6 und ist der
+// Wert, bei dem die Arena +0,54 Platzwert gemessen hat. Nach oben ist
+// Rechenzeit die einzige Grenze; die Engine selbst kennt keine.
+const ITERS_STUFEN = [100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600];
+
+// Gemessene Dauer je Simulation, aus der letzten Baumsuche. Dient nur der
+// Vorschau am Regler — der erste Wert ist geschätzt und wird nach dem ersten
+// Zug durch die tatsächliche Rechenzeit dieses Geräts ersetzt.
+let msJeSimulation = 0.35;
+
+function itersWert() {
+  return ITERS_STUFEN[parseInt(itersInput.value)] ?? 800;
+}
+
+function zeigeIters() {
+  const n = itersWert();
+  const sekunden = (n * msJeSimulation) / 1000;
+  // Zahlformat aus der gewählten Sprache, nicht aus der des Browsers: die
+  // Seite kann auf Deutsch stehen, während der Browser Englisch meldet, und
+  // dann sähe "1,600 · ~1,1 s" nach zwei verschiedenen Konventionen aus.
+  const lok = getLang();
+  const dauer = sekunden < 1
+    ? Math.round(sekunden * 1000) + ' ms'
+    : sekunden.toLocaleString(lok, { maximumFractionDigits: 1 }) + ' s';
+  itersVal.textContent = n.toLocaleString(lok) + ' · ~' + dauer;
+}
+
 itersInput.addEventListener('input', () => {
-  itersVal.textContent = itersInput.value;
-  engine.set_mcts_iterations(parseInt(itersInput.value));
+  engine.set_mcts_iterations(itersWert());
+  zeigeIters();
+  localStorage.setItem('chaturaji.iters', itersInput.value);
 });
 
 // Suchverfahren. Die Baumsuche schlug Max^n mit Beam bei gleicher Rechenzeit
@@ -82,7 +117,12 @@ algoSelect.addEventListener('change', applyAlgo);
   const gemerkt = localStorage.getItem('chaturaji.algo');
   if (gemerkt && ['mcts', 'brs', 'paranoid'].includes(gemerkt)) algoSelect.value = gemerkt;
   applyAlgo();
-  engine.set_mcts_iterations(parseInt(itersInput.value));
+  const stufe = parseInt(localStorage.getItem('chaturaji.iters'));
+  if (Number.isInteger(stufe) && stufe >= 0 && stufe < ITERS_STUFEN.length) {
+    itersInput.value = String(stufe);
+  }
+  engine.set_mcts_iterations(itersWert());
+  zeigeIters();
 }
 
 // ─── Zustand ──────────────────────────────────────────────────────────────────
@@ -520,7 +560,7 @@ document.getElementById('btn-engine-move').addEventListener('click', () => {
   const depth = parseInt(depthInput.value);
   const istMcts = algoSelect.value === 'mcts';
   engineInfo.textContent = istMcts
-    ? t('engine.searchingMcts', { iters: parseInt(itersInput.value).toLocaleString() })
+    ? t('engine.searchingMcts', { iters: itersWert().toLocaleString(getLang()) })
     : t('engine.searching', { depth });
   const epoch = ++actionEpoch;
   setBusy(true);
@@ -567,6 +607,12 @@ document.getElementById('btn-engine-move').addEventListener('click', () => {
     if (isBookMove) {
       engineInfo.textContent = t('engine.bookMove', { ms, net: netNote, tops: topsLine });
     } else {
+      if (istMcts && +ms > 0) {
+        // Rate am tatsächlich Gemessenen nachführen, geglättet gegen
+        // Ausreißer (Tab im Hintergrund, Speicherbereinigung).
+        msJeSimulation = 0.7 * msJeSimulation + 0.3 * (+ms / itersWert());
+        zeigeIters();
+      }
       // Bei der Baumsuche ist `depth` der tiefste Abstieg, also ein Ergebnis
       // und keine Vorgabe — das sagt die eigene Zeile auch so.
       engineInfo.textContent = t(istMcts ? 'engine.mctsInfo' : 'engine.depthInfo', {
@@ -955,7 +1001,7 @@ unloadBtn.addEventListener('click', () => {
 // File-Picker bleibt als manueller Override.
 (async () => {
   try {
-    const r = await fetch('weights.json?v=2608578673');
+    const r = await fetch('weights.json?v=9828691197');
     if (!r.ok) return;
     const text = await r.text();
     const err  = engine.load_network_json(text);
@@ -980,7 +1026,7 @@ unloadBtn.addEventListener('click', () => {
 (async () => {
   const bookStatus = document.getElementById('book-status');
   try {
-    const r = await fetch('opening_book.json?v=2608578673');
+    const r = await fetch('opening_book.json?v=9828691197');
     if (!r.ok) return;
     const text = await r.text();
     const err  = engine.load_book_json(text);
@@ -2220,6 +2266,8 @@ document.querySelectorAll('.score .score-name').forEach(el => {
 // wird (also nicht über data-i18n zurückgesetzt werden kann).
 onLanguageChange(() => {
   if (state) updateStatus();
+  // Der Simulationsregler trägt Zahl und Dauer, beide sprachabhängig formatiert.
+  zeigeIters();
   // Net-Status: nur "leer"-Default re-übersetzen, sonst bleibt aktueller Inhalt.
   if (netStatus && !netStatus.className) netStatus.textContent = t('net.empty');
   const bookStatus = document.getElementById('book-status');

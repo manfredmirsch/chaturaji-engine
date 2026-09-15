@@ -606,6 +606,10 @@ main {
 .control-group.hidden { display: none; }
 .control-group label { font-size: var(--rem-085); color: var(--text-dim); }
 input[type=range] { width: var(--px-60); accent-color: var(--color-accent); }
+/* Der Simulationsregler hat neun Stufen statt sechs und trägt daneben eine
+   Zeitvorschau — beides braucht mehr Platz als der Tiefenregler. */
+#iters { width: calc(var(--px-60) * 1.6); }
+#iters-val { font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 button {
   background: var(--bg-input);
