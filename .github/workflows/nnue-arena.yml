@@ -77,6 +77,22 @@ on:
         description: 'nur mcts: Erkundungsgewicht'
         type: string
         default: '1.5'
+      a_iters:
+        description: 'nur mcts: Simulationen nur für A (leer = wie iters)'
+        type: string
+        default: ''
+      b_iters:
+        description: 'nur mcts: Simulationen nur für B (leer = wie iters)'
+        type: string
+        default: ''
+      a_c_puct:
+        description: 'nur mcts: Erkundungsgewicht nur für A (leer = wie c_puct)'
+        type: string
+        default: ''
+      b_c_puct:
+        description: 'nur mcts: Erkundungsgewicht nur für B (leer = wie c_puct)'
+        type: string
+        default: ''
 
 env:
   STATE_TAG: nnue-state
@@ -174,6 +190,10 @@ jobs:
             --b-search '${{ inputs.b_search }}' \
             --iters  ${{ inputs.iters }} \
             --c-puct ${{ inputs.c_puct }} \
+            ${{ inputs.a_iters  && format('--a-iters {0}',  inputs.a_iters)  || '' }} \
+            ${{ inputs.b_iters  && format('--b-iters {0}',  inputs.b_iters)  || '' }} \
+            ${{ inputs.a_c_puct && format('--a-c-puct {0}', inputs.a_c_puct) || '' }} \
+            ${{ inputs.b_c_puct && format('--b-c-puct {0}', inputs.b_c_puct) || '' }} \
             --out "out/shard-$(printf '%03d' ${{ matrix.shard }}).json"
 
       - uses: actions/upload-artifact@v7

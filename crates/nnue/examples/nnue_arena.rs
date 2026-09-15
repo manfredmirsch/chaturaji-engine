@@ -85,6 +85,13 @@ struct Args {
     /// verteilt sie selbst über den Baum.
     iters: u32,
     c_puct: f32,
+    // Seitenweise Überschreibungen. `None` heißt „nimm den gemeinsamen Wert".
+    // Gebraucht, um zwei Einstellungen derselben Suche gegeneinander zu
+    // messen — c_puct etwa war nie gemessen, nur aus der Wertskala hergeleitet.
+    a_iters:  Option<u32>,
+    b_iters:  Option<u32>,
+    a_c_puct: Option<f32>,
+    b_c_puct: Option<f32>,
 }
 
 /// Welches Suchverfahren eine Seite benutzt.
@@ -141,6 +148,7 @@ fn parse_args() -> Args {
         tt_mb: 8,
         iters: 400,
         c_puct: chaturaji_nnue::mcts::DEFAULT_C_PUCT,
+        a_iters: None, b_iters: None, a_c_puct: None, b_c_puct: None,
     };
     let mut i = 1;
     while i < v.len() {
@@ -166,6 +174,10 @@ fn parse_args() -> Args {
             "--tt-mb"         => a.tt_mb = next(&mut i).parse().unwrap_or(a.tt_mb),
             "--iters"         => a.iters = next(&mut i).parse().unwrap_or(a.iters),
             "--c-puct"        => a.c_puct = next(&mut i).parse().unwrap_or(a.c_puct),
+            "--a-iters"       => a.a_iters  = next(&mut i).parse().ok(),
+            "--b-iters"       => a.b_iters  = next(&mut i).parse().ok(),
+            "--a-c-puct"      => a.a_c_puct = next(&mut i).parse().ok(),
+            "--b-c-puct"      => a.b_c_puct = next(&mut i).parse().ok(),
             _ => {}
         }
         i += 1;
@@ -214,7 +226,7 @@ fn play(
     net_a: &NnueNetwork, net_b: &NnueNetwork,
     a_beam: BeamOrder, b_beam: BeamOrder,
     a_search: SearchKind, b_search: SearchKind, tt_mb: usize,
-    mcts_cfg: &MctsConfig,
+    mcts_a: &MctsConfig, mcts_b: &MctsConfig,
     depth: u8, beam: usize, max_moves: usize, keys: &ZobristKeys,
     time_ms: u64, max_depth: u8,
 ) -> ([f32; 4], usize, [f64; 2], [f64; 2]) {
@@ -285,7 +297,8 @@ fn play(
             SearchKind::Mcts => {
                 // MCTS kennt kein Zeitbudget; `--iters` steuert den Aufwand.
                 // Die Zeitspalte bleibt für diese Seite deshalb leer.
-                baum.search(&|b: &Board| net.forward(b), &modell, &board, mcts_cfg)
+                let cfg = if ist_a { mcts_a } else { mcts_b };
+                baum.search(&|b: &Board| net.forward(b), &modell, &board, cfg)
                     .map(|r| r.best)
                     .unwrap_or(moves[0])
             }
@@ -332,7 +345,9 @@ fn main() {
         println!("Achtung: die Tiefen sind nicht direkt vergleichbar — BRS gibt \
                   zwei Halbzüge je Runde aus, Max^n vier.");
         if args.a_search == SearchKind::Mcts || args.b_search == SearchKind::Mcts {
-            println!("MCTS: {} Simulationen je Zug, c_puct {}", args.iters, args.c_puct);
+            println!("MCTS A: {} Simulationen, c_puct {} | B: {} Simulationen, c_puct {}",
+                     args.a_iters.unwrap_or(args.iters), args.a_c_puct.unwrap_or(args.c_puct),
+                     args.b_iters.unwrap_or(args.iters), args.b_c_puct.unwrap_or(args.c_puct));
         }
     }
     println!("{}", "-".repeat(64));
@@ -348,7 +363,10 @@ fn main() {
                 let (vals, p, ta, tb) = play(&start, split, &net_a, &net_b,
                                      args.a_beam, args.b_beam,
                                      args.a_search, args.b_search, args.tt_mb,
-                                     &MctsConfig { iterations: args.iters, c_puct: args.c_puct },
+                                     &MctsConfig { iterations: args.a_iters.unwrap_or(args.iters),
+                                                   c_puct:     args.a_c_puct.unwrap_or(args.c_puct) },
+                                     &MctsConfig { iterations: args.b_iters.unwrap_or(args.iters),
+                                                   c_puct:     args.b_c_puct.unwrap_or(args.c_puct) },
                                      args.depth, args.beam, args.max_moves, &keys,
                                      args.time_ms, args.max_depth);
                 d_a[0] += ta[0]; d_a[1] += ta[1];
