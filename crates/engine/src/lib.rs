@@ -6,6 +6,7 @@ pub mod nnue_features;
 pub mod nnue_network;
 pub mod ordering;
 pub mod outcome;
+pub mod policy;
 pub mod search;
 pub mod tt;
 pub mod utility;

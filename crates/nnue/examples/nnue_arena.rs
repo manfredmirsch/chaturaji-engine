@@ -44,7 +44,8 @@ use chaturaji_nnue::network::NnueNetwork;
 use chaturaji_nnue::outcome::place_values;
 use chaturaji_nnue::selfplay::{nnue_best_move, nnue_best_move_timed, BeamOrder};
 use chaturaji_nnue::mcts::{Mcts, MctsConfig, RootChoice};
-use chaturaji_engine::move_features::MoveModel;
+use chaturaji_engine::move_features::{MoveModel, N_FEATURES};
+use chaturaji_engine::policy::{MovePrior, PolicyNet};
 use chaturaji_engine::Engine;
 use chaturaji_engine::search::SearchAlgo;
 
@@ -97,6 +98,9 @@ struct Args {
     // Zugmodell je Seite als Datei. Ohne Angabe gilt das eingebaute.
     a_model:  Option<String>,
     b_model:  Option<String>,
+    // Policy-Netz als Prior statt der Linearform, je Seite.
+    a_policy: Option<String>,
+    b_policy: Option<String>,
 }
 
 /// Welches Suchverfahren eine Seite benutzt.
@@ -155,7 +159,7 @@ fn parse_args() -> Args {
         c_puct: chaturaji_nnue::mcts::DEFAULT_C_PUCT,
         a_iters: None, b_iters: None, a_c_puct: None, b_c_puct: None,
         a_root: RootChoice::Visits, b_root: RootChoice::Visits,
-        a_model: None, b_model: None,
+        a_model: None, b_model: None, a_policy: None, b_policy: None,
     };
     let mut i = 1;
     while i < v.len() {
@@ -189,6 +193,8 @@ fn parse_args() -> Args {
             "--b-root"        => a.b_root = wurzelwahl(&next(&mut i)),
             "--a-model"       => a.a_model = Some(next(&mut i)),
             "--b-model"       => a.b_model = Some(next(&mut i)),
+            "--a-policy"      => a.a_policy = Some(next(&mut i)),
+            "--b-policy"      => a.b_policy = Some(next(&mut i)),
             _ => {}
         }
         i += 1;
@@ -249,7 +255,7 @@ fn play(
     a_beam: BeamOrder, b_beam: BeamOrder,
     a_search: SearchKind, b_search: SearchKind, tt_mb: usize,
     mcts_a: &MctsConfig, mcts_b: &MctsConfig,
-    modell_a: &MoveModel, modell_b: &MoveModel,
+    modell_a: &dyn MovePrior, modell_b: &dyn MovePrior,
     depth: u8, beam: usize, max_moves: usize, keys: &ZobristKeys,
     time_ms: u64, max_depth: u8,
 ) -> ([f32; 4], usize, [f64; 2], [f64; 2]) {
@@ -363,10 +369,31 @@ fn main() {
             }
         }
     };
-    let modell_a = lade_modell(&args.a_model);
-    let modell_b = lade_modell(&args.b_model);
-    if args.a_model.is_some() || args.b_model.is_some() {
-        println!("Zugmodell A: {} | B: {}", modell_a.note, modell_b.note);
+    let lin_a = lade_modell(&args.a_model);
+    let lin_b = lade_modell(&args.b_model);
+    let lade_policy = |pfad: &Option<String>| -> Option<PolicyNet> {
+        pfad.as_ref().map(|p| {
+            let txt = std::fs::read_to_string(p)
+                .unwrap_or_else(|e| { eprintln!("Policy-Netz {p}: {e}"); std::process::exit(2) });
+            let netz: PolicyNet = serde_json::from_str(&txt)
+                .unwrap_or_else(|e| { eprintln!("Policy-Netz {p}: {e}"); std::process::exit(2) });
+            netz.validate(N_FEATURES)
+                .unwrap_or_else(|e| { eprintln!("Policy-Netz {p}: {e}"); std::process::exit(2) });
+            netz
+        })
+    };
+    let pol_a = lade_policy(&args.a_policy);
+    let pol_b = lade_policy(&args.b_policy);
+    // Der Trait-Verweis zeigt entweder auf das Netz oder auf die Linearform.
+    let modell_a: &dyn MovePrior = match &pol_a { Some(n) => n, None => &lin_a };
+    let modell_b: &dyn MovePrior = match &pol_b { Some(n) => n, None => &lin_b };
+    if args.a_model.is_some() || args.b_model.is_some()
+        || args.a_policy.is_some() || args.b_policy.is_some() {
+        let name = |p: &Option<PolicyNet>, l: &MoveModel| match p {
+            Some(n) => n.note.clone(),
+            None    => l.note.clone(),
+        };
+        println!("Prior A: {} | B: {}", name(&pol_a, &lin_a), name(&pol_b, &lin_b));
     }
 
     // Gruppen dieses Shards: reihum, damit jeder Shard dieselbe Mischung an
@@ -411,7 +438,7 @@ fn main() {
                                      &MctsConfig { iterations: args.b_iters.unwrap_or(args.iters),
                                                    c_puct:     args.b_c_puct.unwrap_or(args.c_puct),
                                                    root:       args.b_root },
-                                     &modell_a, &modell_b,
+                                     modell_a, modell_b,
                                      args.depth, args.beam, args.max_moves, &keys,
                                      args.time_ms, args.max_depth);
                 d_a[0] += ta[0]; d_a[1] += ta[1];

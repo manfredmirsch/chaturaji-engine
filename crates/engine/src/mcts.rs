@@ -43,7 +43,8 @@ use std::collections::HashMap;
 use chaturaji_core::board::{Board, Move};
 use chaturaji_core::rules::Rules;
 
-use crate::move_features::{fast_features, MoveFeatureContext, MoveModel};
+use crate::move_features::{fast_features, MoveFeatureContext};
+use crate::policy::MovePrior;
 use crate::outcome::place_values;
 
 /// Blattbewertung: Stellung → erwartete Platzierung je Sitz, in [−1, 1].
@@ -199,7 +200,7 @@ impl Mcts {
     pub fn search(
         &mut self,
         eval:  LeafEval,
-        model: &MoveModel,
+        model: &dyn MovePrior,
         board: &Board,
         cfg:   &MctsConfig,
     ) -> Option<SearchResult> {
@@ -251,7 +252,7 @@ impl Mcts {
     }
 
     /// Eine Simulation: absteigen, ein Blatt erweitern und bewerten, zurücktragen.
-    fn simulate(&mut self, eval: LeafEval, model: &MoveModel, root: &Board, c_puct: f32) {
+    fn simulate(&mut self, eval: LeafEval, model: &dyn MovePrior, root: &Board, c_puct: f32) {
         let mut board = root.clone();
         let mut pfad  = vec![0usize];
         let mut idx   = 0usize;
@@ -287,7 +288,7 @@ impl Mcts {
     }
 
     /// Legt die Kinder eines Knotens an und verteilt die Priors.
-    fn expand(&mut self, idx: usize, model: &MoveModel, board: &Board) {
+    fn expand(&mut self, idx: usize, model: &dyn MovePrior, board: &Board) {
         let moves = Rules::legal_moves(board);
         self.nodes[idx].expanded = true;
         if moves.is_empty() { return; }
@@ -295,7 +296,7 @@ impl Mcts {
         // Der Kontext (vier Angriffskarten) einmal je Stellung, nicht je Zug.
         let ctx = MoveFeatureContext::new(board);
         let scores: Vec<f32> = moves.iter()
-            .map(|mv| model.score_features(&fast_features(board, mv, &ctx)))
+            .map(|mv| model.logit(&fast_features(board, mv, &ctx)))
             .collect();
 
         // Softmax, stabilisiert. Die Scores des Modells sind
@@ -353,7 +354,7 @@ impl Default for Mcts {
 /// `nnue_best_move` vergleichbar, damit die Arena beide gleich aufrufen kann.
 pub fn mcts_best_move(
     eval:  LeafEval,
-    model: &MoveModel,
+    model: &dyn MovePrior,
     board: &Board,
     cfg:   &MctsConfig,
     _tt:   &mut HashMap<u64, (u8, [f32; 4])>,
@@ -364,6 +365,7 @@ pub fn mcts_best_move(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::move_features::MoveModel;
 
     /// Bewertung für die Tests: hängt von der Stellung ab, ist aber
     /// deterministisch und ohne Netz zu haben. Die Punktedifferenz reicht —

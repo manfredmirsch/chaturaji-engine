@@ -393,6 +393,12 @@ pub const DEFAULT_WEIGHTS: [f32; N_FEATURES] = [
     -3.6410,  // laesst_haengen
 ];
 
+impl crate::policy::MovePrior for MoveModel {
+    fn logit(&self, f: &[f32]) -> f32 {
+        self.w.iter().zip(f).map(|(w, x)| w * x).sum()
+    }
+}
+
 impl Default for MoveModel {
     fn default() -> Self {
         Self { w: DEFAULT_WEIGHTS.to_vec(), note: "eingebaut, aus echten Partien".into() }

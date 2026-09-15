@@ -60,6 +60,7 @@ use crate::opening_book::{move_tokens, parse_meta};
 /// Zum Messen, was die Abkürzung in der Suche an Vorhersagekraft kostet.
 pub const SLOW_FEATURES: [usize; 2] = [7, 8];
 use crate::pgn_import::parse_move_token;
+use chaturaji_engine::policy::{PolicyNet, POLICY_HIDDEN};
 
 /// Eine beobachtete Entscheidung: die Merkmale aller legalen Züge, der Index
 /// des tatsächlich gespielten, und wie stark sie zählt.
@@ -489,4 +490,140 @@ mod tests {
         assert!(w.windows(2).all(|p| p[0] > p[1]), "monoton fallend: {w:?}");
         assert!(w.iter().all(|&x| x > 0.0), "strikt positiv: {w:?}");
     }
+}
+
+// ─── Policy-Netz ──────────────────────────────────────────────────────────────
+
+/// Trainiert ein [`PolicyNet`] auf derselben Verlustfunktion wie [`fit`].
+///
+/// Die Struktur bleibt die konditionale Logit-Regression: Score je Zug, Softmax
+/// über die legale Zugmenge, Maximum Likelihood auf dem tatsächlich gespielten
+/// Zug. Nur die Score-Funktion ist jetzt ein Netz statt einer Linearform.
+///
+/// Anders als beim linearen Modell wird in **Mini-Batches** gerechnet. Bei 14
+/// Parametern ist Full-Batch reproduzierbar und billig; bei einigen hundert
+/// lohnt sich das nicht mehr, und ein Netz braucht ohnehin mehr Schritte als
+/// Epochen. Die Reihenfolge der Batches ist deterministisch aus dem Seed
+/// abgeleitet — ein Trainingsergebnis, das vom Zufall der Durchmischung
+/// abhängt, taugt nicht als Messung.
+pub fn fit_policy(
+    data: &[Decision], weighted: bool, epochs: u32, lr: f32, batch: usize, seed: u64,
+) -> (PolicyNet, f32, f32) {
+    let inputs = N_FEATURES;
+    let mut netz = PolicyNet::new(inputs, seed);
+
+    // Adam-Momente, in derselben Form wie die Gewichte.
+    let mut m1 = vec![vec![0.0f32; inputs]; POLICY_HIDDEN];
+    let mut v1 = vec![vec![0.0f32; inputs]; POLICY_HIDDEN];
+    let mut mb = vec![0.0f32; POLICY_HIDDEN];
+    let mut vb = vec![0.0f32; POLICY_HIDDEN];
+    let mut m2 = vec![0.0f32; POLICY_HIDDEN];
+    let mut v2 = vec![0.0f32; POLICY_HIDDEN];
+    const B1: f32 = 0.9;
+    const B2: f32 = 0.999;
+    const EPS: f32 = 1e-8;
+
+    let mut reihenfolge: Vec<usize> = (0..data.len()).collect();
+    let mut zustand = seed | 1;
+    let mut wuerfel = move || {
+        zustand ^= zustand << 13; zustand ^= zustand >> 7; zustand ^= zustand << 17; zustand
+    };
+
+    let mut schritt = 0f32;
+    let (mut erste, mut letzte) = (0.0f32, 0.0f32);
+
+    for epoch in 1..=epochs.max(1) {
+        // Fisher-Yates mit demselben Würfel wie oben.
+        for i in (1..reihenfolge.len()).rev() {
+            let j = (wuerfel() as usize) % (i + 1);
+            reihenfolge.swap(i, j);
+        }
+
+        let mut loglik = 0.0f64;
+        let mut gewicht_gesamt = 0.0f64;
+
+        for block in reihenfolge.chunks(batch.max(1)) {
+            // Gradienten je Batch, parallel über die Entscheidungen.
+            let (g1, gb, g2, ll, gw) = block.par_iter()
+                .map(|&idx| {
+                    let d = &data[idx];
+                    let gewicht = if weighted { d.weight } else { 1.0 };
+
+                    // Vorwärts: Score und verborgene Aktivierung je Zug.
+                    let mut scores = Vec::with_capacity(d.feats.len());
+                    let mut hidden = Vec::with_capacity(d.feats.len());
+                    for f in &d.feats {
+                        let (s, h) = netz.forward(f);
+                        scores.push(s);
+                        hidden.push(h);
+                    }
+                    let max = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    let exps: Vec<f32> = scores.iter().map(|s| (s - max).exp()).collect();
+                    let summe: f32 = exps.iter().sum::<f32>().max(1e-30);
+                    let p: Vec<f32> = exps.iter().map(|e| e / summe).collect();
+
+                    // ∂ log P(gewählt) / ∂ score(m) = [m == gewählt] − P(m)
+                    let mut a1 = vec![vec![0.0f32; inputs]; POLICY_HIDDEN];
+                    let mut ab = vec![0.0f32; POLICY_HIDDEN];
+                    let mut a2 = vec![0.0f32; POLICY_HIDDEN];
+                    for (i, f) in d.feats.iter().enumerate() {
+                        let ds = gewicht * ((i == d.chosen) as u8 as f32 - p[i]);
+                        if ds == 0.0 { continue; }
+                        for h in 0..POLICY_HIDDEN {
+                            let akt = hidden[i][h];
+                            a2[h] += ds * akt;
+                            if akt <= 0.0 { continue; }   // ReLU sperrt
+                            let dh = ds * netz.w2[h];
+                            ab[h] += dh;
+                            for (k, &x) in f.iter().enumerate() { a1[h][k] += dh * x; }
+                        }
+                    }
+                    (a1, ab, a2, gewicht * p[d.chosen].max(1e-30).ln(), gewicht)
+                })
+                .reduce(
+                    || (vec![vec![0.0f32; inputs]; POLICY_HIDDEN],
+                        vec![0.0f32; POLICY_HIDDEN], vec![0.0f32; POLICY_HIDDEN], 0.0f32, 0.0f32),
+                    |(mut a1, mut ab, mut a2, la, wa), (b1v, bb, b2v, lb, wb)| {
+                        for h in 0..POLICY_HIDDEN {
+                            for k in 0..inputs { a1[h][k] += b1v[h][k]; }
+                            ab[h] += bb[h];
+                            a2[h] += b2v[h];
+                        }
+                        (a1, ab, a2, la + lb, wa + wb)
+                    },
+                );
+
+            loglik += ll as f64;
+            gewicht_gesamt += gw as f64;
+            let norm = gw.max(1e-9);
+
+            schritt += 1.0;
+            let bc1 = 1.0 - B1.powf(schritt);
+            let bc2 = 1.0 - B2.powf(schritt);
+            let mut adam = |w: &mut f32, m: &mut f32, v: &mut f32, g: f32| {
+                *m = B1 * *m + (1.0 - B1) * g;
+                *v = B2 * *v + (1.0 - B2) * g * g;
+                // Aufstieg wie beim linearen Modell, L2 daneben.
+                *w += lr * (*m / bc1) / ((*v / bc2).sqrt() + EPS);
+                *w -= lr * LAMBDA * *w;
+            };
+            for h in 0..POLICY_HIDDEN {
+                for k in 0..inputs {
+                    adam(&mut netz.w1[h][k], &mut m1[h][k], &mut v1[h][k], g1[h][k] / norm);
+                }
+                adam(&mut netz.b1[h], &mut mb[h], &mut vb[h], gb[h] / norm);
+                adam(&mut netz.w2[h], &mut m2[h], &mut v2[h], g2[h] / norm);
+            }
+        }
+
+        let mittel = (loglik / gewicht_gesamt.max(1e-9)) as f32;
+        if epoch == 1 { erste = mittel; }
+        letzte = mittel;
+        if epoch % 2 == 0 || epoch == 1 || epoch == epochs {
+            println!("  Epoche {epoch:>3}/{epochs} | ∅log P(gewählt) {mittel:+.5}");
+        }
+    }
+
+    netz.note = format!("Policy-Netz, {POLICY_HIDDEN} verborgene, {inputs} Eingaben");
+    (netz, letzte, erste)
 }

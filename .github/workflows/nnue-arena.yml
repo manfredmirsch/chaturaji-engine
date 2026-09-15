@@ -111,6 +111,14 @@ on:
         description: 'Zugmodell für B (leer = eingebaut)'
         type: string
         default: ''
+      a_policy:
+        description: 'Policy-Netz als Prior für A (Datei unter arena_models/, leer = Linearform)'
+        type: string
+        default: ''
+      b_policy:
+        description: 'Policy-Netz als Prior für B (leer = Linearform)'
+        type: string
+        default: ''
 
 env:
   STATE_TAG: nnue-state
@@ -217,6 +225,8 @@ jobs:
             --b-root '${{ inputs.b_root }}' \
             ${{ inputs.a_model && format('--a-model crates/nnue/arena_models/{0}', inputs.a_model) || '' }} \
             ${{ inputs.b_model && format('--b-model crates/nnue/arena_models/{0}', inputs.b_model) || '' }} \
+            ${{ inputs.a_policy && format('--a-policy crates/nnue/arena_models/{0}', inputs.a_policy) || '' }} \
+            ${{ inputs.b_policy && format('--b-policy crates/nnue/arena_models/{0}', inputs.b_policy) || '' }} \
             --out "out/shard-$(printf '%03d' ${{ matrix.shard }}).json"
 
       - uses: actions/upload-artifact@v7

@@ -9,7 +9,7 @@
 
 use chaturaji_engine::move_features::{MoveModel, N_FEATURES};
 use chaturaji_trainer::move_model::{
-    accuracy, collect, compare_table, fit, heuristik_move_priority, print_accuracy,
+    accuracy, collect, compare_table, fit, fit_policy, heuristik_move_priority, print_accuracy,
     without_slow_features,
 };
 
@@ -20,6 +20,12 @@ fn main() {
     let mut limit  = 0usize;
     let mut epochs = 300u32;
     let mut lr     = 0.05f32;
+    // Das Policy-Netz braucht eigene Werte: mehr Parameter, kleinere Schritte,
+    // Mini-Batches statt Full-Batch.
+    let mut policy      = false;
+    let mut pol_epochs  = 12u32;
+    let mut pol_lr      = 0.01f32;
+    let mut pol_batch   = 4096usize;
 
     let mut i = 1;
     while i < args.len() {
@@ -29,8 +35,13 @@ fn main() {
             "--limit"  => { i += 1; if i < args.len() { limit  = args[i].parse().unwrap_or(0); } }
             "--epochs" => { i += 1; if i < args.len() { epochs = args[i].parse().unwrap_or(epochs); } }
             "--lr"     => { i += 1; if i < args.len() { lr     = args[i].parse().unwrap_or(lr); } }
+            "--policy" => { policy = true; }
+            "--pol-epochs" => { i += 1; if i < args.len() { pol_epochs = args[i].parse().unwrap_or(pol_epochs); } }
+            "--pol-lr"     => { i += 1; if i < args.len() { pol_lr     = args[i].parse().unwrap_or(pol_lr); } }
+            "--pol-batch"  => { i += 1; if i < args.len() { pol_batch  = args[i].parse().unwrap_or(pol_batch); } }
             "--help" | "-h" => {
                 println!("move_model [--games <verz>] [--out <datei>] [--limit n] [--epochs n] [--lr f]");
+                println!("           [--policy] [--pol-epochs n] [--pol-lr f] [--pol-batch n]");
                 return;
             }
             other => eprintln!("unbekanntes Argument: {other}"),
@@ -88,6 +99,28 @@ fn main() {
     print_accuracy("gelernt, ungewichtet",  &accuracy(&test, |f| dot(&ung.w, f)));
     let test_schnell = without_slow_features(&test);
     print_accuracy("gelernt, suchtauglich", &accuracy(&test_schnell, |f| dot(&schnell.w, f)));
+
+    // ─── Policy-Netz ─────────────────────────────────────────────────────────
+    //
+    // Gegen die suchtaugliche Linearform gemessen, also bei gleicher
+    // Information: beide sehen dieselben Merkmale, nur einmal linear und
+    // einmal durch ein Netz. Die Frage ist allein, ob die Linearität die
+    // Grenze war.
+    if policy {
+        println!("\n─── Policy-Netz (dieselben Merkmale, suchtauglich) ───");
+        let train_schnell = without_slow_features(&train);
+        let t_pol = std::time::Instant::now();
+        let (netz, _, erste) = fit_policy(&train_schnell, false, pol_epochs, pol_lr, pol_batch, 12345);
+        println!("  {} Parameter, erste Epoche {:+.5}, {:.1} s",
+                 netz.param_count(), erste, t_pol.elapsed().as_secs_f32());
+        print_accuracy("Policy-Netz", &accuracy(&test_schnell, |f| netz.score(f)));
+
+        let out_pol = out.replace(".json", "-policy.json");
+        match std::fs::write(&out_pol, serde_json::to_string(&netz).unwrap_or_default()) {
+            Ok(()) => println!("\nPolicy-Netz geschrieben: {out_pol}"),
+            Err(e) => eprintln!("\nSchreiben fehlgeschlagen: {e}"),
+        }
+    }
 
     match m_gew.save(&out) {
         Ok(()) => println!("\nGewichte (erfolgsgewichtet) geschrieben: {out}"),
