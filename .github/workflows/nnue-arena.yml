@@ -170,6 +170,7 @@ jobs:
           path: |
             target/release/examples/nnue_arena
             nets/
+            crates/nnue/arena_models/
           if-no-files-found: error
 
   match:
