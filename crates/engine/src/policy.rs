@@ -46,11 +46,16 @@ impl MovePrior for PolicyNet {
     fn logit(&self, f: &[f32]) -> f32 { self.score(f) }
 }
 
-/// Breite der verborgenen Schicht.
+/// Vorgabe für die Breite der verborgenen Schicht.
 ///
 /// Klein gehalten: das Netz läuft je Zug einmal, bei ~30 Zügen je Knoten und
 /// tausenden Knoten je Suche. 32 Einheiten über 16 Eingaben sind 576 Gewichte —
 /// gegenüber dem Bewertungsnetz mit 348.000 nicht der Rede wert.
+///
+/// Nur die **Vorgabe**: ein geladenes Netz bringt seine Breite selbst mit
+/// ([`PolicyNet::hidden`]). Ohne das ließen sich zwei Breiten nicht in einer
+/// Arena gegeneinander stellen, und ein Größenvergleich wäre nicht messbar,
+/// sondern nur behauptbar.
 pub const POLICY_HIDDEN: usize = 32;
 
 /// Ein Zwei-Schicht-Netz mit einem Skalar als Ausgabe.
@@ -77,6 +82,11 @@ impl PolicyNet {
     /// ein Trainingsergebnis, das von der Zufallsinitialisierung abhängt, ist
     /// als Messung wertlos.
     pub fn new(inputs: usize, seed: u64) -> Self {
+        Self::with_hidden(inputs, POLICY_HIDDEN, seed)
+    }
+
+    /// Wie [`new`], aber mit frei gewählter Breite.
+    pub fn with_hidden(inputs: usize, hidden: usize, seed: u64) -> Self {
         let std = (2.0 / inputs as f32).sqrt();
         let mut zustand = seed | 1;
         let mut zufall = move || {
@@ -92,11 +102,11 @@ impl PolicyNet {
             (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
         };
         Self {
-            w1: (0..POLICY_HIDDEN)
+            w1: (0..hidden)
                 .map(|_| (0..inputs).map(|_| zufall() * std).collect())
                 .collect(),
-            b1: vec![0.0; POLICY_HIDDEN],
-            w2: (0..POLICY_HIDDEN).map(|_| zufall() * (2.0 / POLICY_HIDDEN as f32).sqrt()).collect(),
+            b1: vec![0.0; hidden],
+            w2: (0..hidden).map(|_| zufall() * (2.0 / hidden as f32).sqrt()).collect(),
             note: String::new(),
         }
     }
@@ -105,8 +115,12 @@ impl PolicyNet {
         self.w1.first().map_or(0, |r| r.len())
     }
 
+    /// Breite der verborgenen Schicht dieses Netzes.
+    pub fn hidden(&self) -> usize { self.w1.len() }
+
     pub fn param_count(&self) -> usize {
-        self.inputs() * POLICY_HIDDEN + POLICY_HIDDEN + POLICY_HIDDEN
+        let h = self.hidden();
+        self.inputs() * h + h + h
     }
 
     /// Logit für einen Zug.
@@ -122,7 +136,7 @@ impl PolicyNet {
     /// Wie [`score`], gibt aber die verborgenen Aktivierungen mit zurück — für
     /// die Rückwärtsrechnung im Training.
     pub fn forward(&self, f: &[f32]) -> (f32, Vec<f32>) {
-        let mut h = vec![0.0f32; POLICY_HIDDEN];
+        let mut h = vec![0.0f32; self.hidden()];
         let mut summe = 0.0;
         for (i, (zeile, &bias)) in self.w1.iter().zip(&self.b1).enumerate() {
             let a = (bias + zeile.iter().zip(f).map(|(&w, &x)| w * x).sum::<f32>()).max(0.0);
@@ -132,15 +146,29 @@ impl PolicyNet {
         (summe, h)
     }
 
+    /// Prüft die Form gegen die erwartete Eingabebreite.
+    ///
+    /// Ein **schmaleres** Netz ist zulässig und kein Fehler: der Merkmalsvektor
+    /// wird nur angehängt, nie umgeordnet, also hat ein älteres Netz auf dem
+    /// Anfangsstück genau dieselbe Bedeutung wie früher. Es sieht die neuen
+    /// Merkmale nicht, und das ist richtig so — es wurde ohne sie geschätzt.
+    ///
+    /// Ein **breiteres** Netz ist dagegen ein Fehler: dann wurde es gegen einen
+    /// Merkmalssatz trainiert, den es hier nicht gibt, und die Zuordnung der
+    /// Spalten wäre geraten.
     pub fn validate(&self, inputs: usize) -> Result<(), String> {
-        if self.w1.len() != POLICY_HIDDEN {
-            return Err(format!("w1: {POLICY_HIDDEN} Zeilen erwartet, {} geladen", self.w1.len()));
+        if self.w1.is_empty() {
+            return Err("w1 ist leer".into());
         }
-        if self.b1.len() != POLICY_HIDDEN || self.w2.len() != POLICY_HIDDEN {
-            return Err("b1/w2 passen nicht zur verborgenen Schicht".into());
+        if self.b1.len() != self.hidden() || self.w2.len() != self.hidden() {
+            return Err(format!("b1/w2 passen nicht zu {} verborgenen Einheiten", self.hidden()));
         }
-        if self.w1.iter().any(|r| r.len() != inputs) {
-            return Err(format!("w1: Zeilenbreite {inputs} erwartet"));
+        let breite = self.inputs();
+        if self.w1.iter().any(|r| r.len() != breite) {
+            return Err("w1: Zeilen verschieden breit".into());
+        }
+        if breite > inputs {
+            return Err(format!("w1: {breite} Eingaben, aber nur {inputs} Merkmale vorhanden"));
         }
         Ok(())
     }
@@ -209,7 +237,7 @@ mod tests {
         let f = [0.3, -0.2, 1.0, 0.5, -0.8];
         let (s, h) = netz.forward(&f);
         assert!((s - netz.score(&f)).abs() < 1e-6);
-        assert_eq!(h.len(), POLICY_HIDDEN);
+        assert_eq!(h.len(), netz.hidden());
         assert!(h.iter().all(|&x| x >= 0.0), "ReLU darf nicht negativ werden");
     }
 
@@ -220,7 +248,10 @@ mod tests {
         let netz = PolicyNet::default();
         netz.validate(crate::move_features::N_FEATURES)
             .expect("eingebautes Netz muss zur Merkmalszahl passen");
-        assert_eq!(netz.param_count(), 576);
+        assert_eq!(netz.hidden(), POLICY_HIDDEN);
+        // v1 wurde mit 16 Merkmalen geschätzt; seither sind welche
+        // hinzugekommen, die es nicht sieht. Siehe `validate`.
+        assert_eq!(netz.inputs(), 16);
     }
 
     /// Es muss Züge auch wirklich unterscheiden — ein Netz, das überall
@@ -246,7 +277,8 @@ mod tests {
     #[test]
     fn validate_erkennt_falsche_form() {
         let netz = PolicyNet::new(16, 1);
-        assert!(netz.validate(16).is_ok());
-        assert!(netz.validate(20).is_err());
+        assert!(netz.validate(16).is_ok(), "genau passend");
+        assert!(netz.validate(20).is_ok(), "schmaleres Netz ist zulässig");
+        assert!(netz.validate(8).is_err(), "breiteres Netz nicht");
     }
 }

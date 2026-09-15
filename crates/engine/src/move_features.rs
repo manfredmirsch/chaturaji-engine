@@ -38,7 +38,7 @@ use chaturaji_core::piece::{Color, PieceKind};
 use chaturaji_core::rules::Rules;
 
 /// Anzahl der Merkmale. Reihenfolge und Bedeutung siehe [`FEATURE_NAMES`].
-pub const N_FEATURES: usize = 16;
+pub const N_FEATURES: usize = 26;
 
 /// Namen in der Reihenfolge des Vektors — für die Gewichtstabelle.
 pub const FEATURE_NAMES: [&str; N_FEATURES] = [
@@ -60,6 +60,23 @@ pub const FEATURE_NAMES: [&str; N_FEATURES] = [
                              //     ungedeckte Figur
     "laesst_haengen",        // 15  gibt die einzige Deckung einer angegriffenen
                              //     eigenen Figur auf
+    // ─── Ab hier: für das Policy-Netz ergänzt ────────────────────────────────
+    //
+    // Für die Linearform wären das tote Gewichte gewesen: „Springer" allein
+    // sagt nichts, „Springer, der ins Zentrum zieht" schon. Erst ein Netz kann
+    // solche Wechselwirkungen darstellen — und erst seit das gemessen ist
+    // (Top-1 27,2 → 32,7 % bei gleichen Merkmalen), lohnt es, mehr Information
+    // hineinzugeben.
+    "ist_springer",          // 16  Figurenart, einzeln statt nur Bauer/König
+    "ist_laeufer",           // 17
+    "ist_boot",              // 18
+    "weg_nach_vorn",         // 19  Zielfeld näher an der eigenen Umwandlungslinie
+    "weg_zur_seite",         // 20  seitlicher Versatz, aus Sicht des Ziehenden
+    "weite",                 // 21  Länge des Zuges in Feldern
+    "zielfeld_gedeckt",      // 22  eigene Deckung des Zielfelds (0..1)
+    "angreifer_zahl",        // 23  wie viele Gegner das Zielfeld angreifen (0..1)
+    "schlaegt_gedeckten",    // 24  Schlag auf eine Figur, die ihre Seite deckt
+    "zug_zahl",              // 25  wie viele Züge zur Wahl stehen (Kontext)
 ];
 
 /// Größter Schlagwert im Spiel (Bishop und Boat). Normiert die Schlagfelder
@@ -249,6 +266,55 @@ fn features_cheap(board: &Board, mv: &Move, ctx: &MoveFeatureContext, f: &mut [f
         }
     }
 
+    // ─── Ergänzungen für das Policy-Netz ─────────────────────────────────────
+    if let Some(kind) = moving_kind {
+        f[16] = (kind == PieceKind::Knight) as u8 as f32;
+        f[17] = (kind == PieceKind::Bishop) as u8 as f32;
+        f[18] = (kind == PieceKind::Boat)   as u8 as f32;
+
+        // Richtung aus Sicht des Ziehenden: „vorwärts" ist für Rot Norden, für
+        // Grün Westen. Ohne diese Drehung wären die vier Farben vier
+        // verschiedene Aufgaben, und das Netz müsste jede einzeln lernen.
+        let vor_von = promotion_distance(mover, mv.from) as f32;
+        let vor_nach = promotion_distance(mover, mv.to) as f32;
+        f[19] = (vor_von - vor_nach) / 7.0;
+
+        let seite = |sq: u8| -> f32 {
+            match mover {
+                Color::Red | Color::Yellow => file_of(sq) as f32,
+                Color::Blue | Color::Green => rank_of(sq) as f32,
+            }
+        };
+        f[20] = (seite(mv.to) - seite(mv.from)).abs() / 7.0;
+
+        let dr = (rank_of(mv.to) as i32 - rank_of(mv.from) as i32).abs();
+        let df = (file_of(mv.to) as i32 - file_of(mv.from) as i32).abs();
+        f[21] = dr.max(df) as f32 / 7.0;
+    }
+
+    // Wie gut das Zielfeld gedeckt ist und von wie vielen angegriffen — die
+    // Aufteilung in „gedeckt/ungedeckt" war bisher binär, obwohl der
+    // Unterschied zwischen einem und drei Angreifern erheblich ist.
+    let ziel = bit(mv.to);
+    f[22] = ctx.gedeckt_ohne(ziel, mv.from) as u8 as f32;
+    f[23] = Color::ALL.iter()
+        .filter(|&&c| c != mover)
+        .filter(|&&c| ctx.attacked[c.idx()] & ziel != 0)
+        .count() as f32 / 3.0;
+
+    if let Some(victim) = mv.captured {
+        // Eine Figur, die selbst etwas deckt, zu schlagen hat eine Folge über
+        // den Materialwert hinaus: was sie deckte, hängt danach.
+        let deckt_etwas = ctx.covered[victim.color.idx()] & ziel != 0;
+        if deckt_etwas { f[24] = victim.kind.capture_value() as f32 / MAX_CAPTURE; }
+    }
+
+    // Wie viele Züge zur Wahl stehen. Kein Merkmal des Zuges, sondern des
+    // Kontexts — im Softmax über eine Stellung kürzt es sich weg. Es steht
+    // hier, weil das Netz es mit anderen Merkmalen verrechnen kann: ein
+    // Schlagzug unter fünf Möglichkeiten wiegt anders als unter vierzig.
+    f[25] = (ctx.mover_pieces.len() as f32 / 12.0).min(1.0);
+
     // ─── Zentrum ─────────────────────────────────────────────────────────────
     let (r, c) = (rank_of(mv.to), file_of(mv.to));
     if (2..=5).contains(&r) && (2..=5).contains(&c) {
@@ -391,6 +457,16 @@ pub const DEFAULT_WEIGHTS: [f32; N_FEATURES] = [
     -0.2194,  // ist_koenig
      1.3469,  // deckt_bedrohte
     -3.6410,  // laesst_haengen
+     0.0000,  // ist_springer     — die Linearform nutzt die Ergänzungen nicht;
+     0.0000,  // ist_laeufer         sie sind für das Policy-Netz da
+     0.0000,  // ist_boot
+     0.0000,  // weg_nach_vorn
+     0.0000,  // weg_zur_seite
+     0.0000,  // weite
+     0.0000,  // zielfeld_gedeckt
+     0.0000,  // angreifer_zahl
+     0.0000,  // schlaegt_gedeckten
+     0.0000,  // zug_zahl
 ];
 
 impl crate::policy::MovePrior for MoveModel {

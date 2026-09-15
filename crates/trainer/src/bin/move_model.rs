@@ -9,7 +9,7 @@
 
 use chaturaji_engine::move_features::{MoveModel, N_FEATURES};
 use chaturaji_trainer::move_model::{
-    accuracy, collect, compare_table, fit, fit_policy, heuristik_move_priority, print_accuracy,
+    accuracy, collect, compare_table, fit, heuristik_move_priority, print_accuracy,
     without_slow_features,
 };
 
@@ -26,6 +26,7 @@ fn main() {
     let mut pol_epochs  = 12u32;
     let mut pol_lr      = 0.01f32;
     let mut pol_batch   = 4096usize;
+    let mut pol_hidden  = chaturaji_engine::policy::POLICY_HIDDEN;
 
     let mut i = 1;
     while i < args.len() {
@@ -39,9 +40,10 @@ fn main() {
             "--pol-epochs" => { i += 1; if i < args.len() { pol_epochs = args[i].parse().unwrap_or(pol_epochs); } }
             "--pol-lr"     => { i += 1; if i < args.len() { pol_lr     = args[i].parse().unwrap_or(pol_lr); } }
             "--pol-batch"  => { i += 1; if i < args.len() { pol_batch  = args[i].parse().unwrap_or(pol_batch); } }
+            "--pol-hidden" => { i += 1; if i < args.len() { pol_hidden = args[i].parse().unwrap_or(pol_hidden); } }
             "--help" | "-h" => {
                 println!("move_model [--games <verz>] [--out <datei>] [--limit n] [--epochs n] [--lr f]");
-                println!("           [--policy] [--pol-epochs n] [--pol-lr f] [--pol-batch n]");
+                println!("           [--policy] [--pol-epochs n] [--pol-lr f] [--pol-batch n] [--pol-hidden n]");
                 return;
             }
             other => eprintln!("unbekanntes Argument: {other}"),
@@ -110,12 +112,14 @@ fn main() {
         println!("\n─── Policy-Netz (dieselben Merkmale, suchtauglich) ───");
         let train_schnell = without_slow_features(&train);
         let t_pol = std::time::Instant::now();
-        let (netz, _, erste) = fit_policy(&train_schnell, false, pol_epochs, pol_lr, pol_batch, 12345);
+        let start = chaturaji_engine::policy::PolicyNet::with_hidden(N_FEATURES, pol_hidden, 12345);
+        let (netz, _, erste) = chaturaji_trainer::move_model::fit_policy_from(
+            start, &train_schnell, false, pol_epochs, pol_lr, pol_batch, 12345);
         println!("  {} Parameter, erste Epoche {:+.5}, {:.1} s",
                  netz.param_count(), erste, t_pol.elapsed().as_secs_f32());
         print_accuracy("Policy-Netz", &accuracy(&test_schnell, |f| netz.score(f)));
 
-        let out_pol = out.replace(".json", "-policy.json");
+        let out_pol = out.replace(".json", &format!("-policy-h{pol_hidden}.json"));
         match std::fs::write(&out_pol, serde_json::to_string(&netz).unwrap_or_default()) {
             Ok(()) => println!("\nPolicy-Netz geschrieben: {out_pol}"),
             Err(e) => eprintln!("\nSchreiben fehlgeschlagen: {e}"),

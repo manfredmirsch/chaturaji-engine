@@ -42,7 +42,7 @@
 //!   sie nicht korrigiert hat. Bei 800 Simulationen ist dieser
 //!   Verbesserungsschritt schwach, der Nachahmungsfehler aber nicht.
 //!
-# Die zweite Umdrehung: auch nichts
+//! # Die zweite Umdrehung: auch nichts
 //!
 //! | Variante | Mittel gegen v1 |
 //! |---|---|

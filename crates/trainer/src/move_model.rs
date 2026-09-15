@@ -60,7 +60,7 @@ use crate::opening_book::{move_tokens, parse_meta};
 /// Zum Messen, was die Abkürzung in der Suche an Vorhersagekraft kostet.
 pub const SLOW_FEATURES: [usize; 2] = [7, 8];
 use crate::pgn_import::parse_move_token;
-use chaturaji_engine::policy::{PolicyNet, POLICY_HIDDEN};
+use chaturaji_engine::policy::PolicyNet;
 
 /// Eine beobachtete Entscheidung: die Merkmale aller legalen Züge, der Index
 /// des tatsächlich gespielten, und wie stark sie zählt.
@@ -408,7 +408,7 @@ mod tests {
     use super::*;
 
     fn entscheidung(feats: Vec<[f32; N_FEATURES]>, chosen: usize) -> Decision {
-        Decision { feats, chosen, weight: 1.0 }
+        Decision { feats, chosen, weight: 1.0, target: None }
     }
 
     /// Ein Merkmal, das der gewählte Zug hat und alle anderen nicht, muss ein
@@ -540,14 +540,17 @@ pub fn fit_policy_from(
 ) -> (PolicyNet, f32, f32) {
     let inputs = N_FEATURES;
     let mut netz = start;
+    // Breite aus dem Netz, nicht aus einer Konstanten — sonst ließen sich
+    // zwei Größen nicht vergleichen.
+    let breite = netz.hidden();
 
     // Adam-Momente, in derselben Form wie die Gewichte.
-    let mut m1 = vec![vec![0.0f32; inputs]; POLICY_HIDDEN];
-    let mut v1 = vec![vec![0.0f32; inputs]; POLICY_HIDDEN];
-    let mut mb = vec![0.0f32; POLICY_HIDDEN];
-    let mut vb = vec![0.0f32; POLICY_HIDDEN];
-    let mut m2 = vec![0.0f32; POLICY_HIDDEN];
-    let mut v2 = vec![0.0f32; POLICY_HIDDEN];
+    let mut m1 = vec![vec![0.0f32; inputs]; breite];
+    let mut v1 = vec![vec![0.0f32; inputs]; breite];
+    let mut mb = vec![0.0f32; breite];
+    let mut vb = vec![0.0f32; breite];
+    let mut m2 = vec![0.0f32; breite];
+    let mut v2 = vec![0.0f32; breite];
     const B1: f32 = 0.9;
     const B2: f32 = 0.999;
     const EPS: f32 = 1e-8;
@@ -592,9 +595,9 @@ pub fn fit_policy_from(
                     let p: Vec<f32> = exps.iter().map(|e| e / summe).collect();
 
                     // ∂ log P(gewählt) / ∂ score(m) = [m == gewählt] − P(m)
-                    let mut a1 = vec![vec![0.0f32; inputs]; POLICY_HIDDEN];
-                    let mut ab = vec![0.0f32; POLICY_HIDDEN];
-                    let mut a2 = vec![0.0f32; POLICY_HIDDEN];
+                    let mut a1 = vec![vec![0.0f32; inputs]; breite];
+                    let mut ab = vec![0.0f32; breite];
+                    let mut a2 = vec![0.0f32; breite];
                     // ∂/∂score(m) der Kreuzentropie ist π(m) − P(m); das
                     // One-Hot-Ziel ist davon nur der Sonderfall.
                     let ziel = |i: usize| match &d.target {
@@ -604,7 +607,7 @@ pub fn fit_policy_from(
                     for (i, f) in d.feats.iter().enumerate() {
                         let ds = gewicht * (ziel(i) - p[i]);
                         if ds == 0.0 { continue; }
-                        for h in 0..POLICY_HIDDEN {
+                        for h in 0..breite {
                             let akt = hidden[i][h];
                             a2[h] += ds * akt;
                             if akt <= 0.0 { continue; }   // ReLU sperrt
@@ -621,10 +624,10 @@ pub fn fit_policy_from(
                     (a1, ab, a2, gewicht * ll, gewicht)
                 })
                 .reduce(
-                    || (vec![vec![0.0f32; inputs]; POLICY_HIDDEN],
-                        vec![0.0f32; POLICY_HIDDEN], vec![0.0f32; POLICY_HIDDEN], 0.0f32, 0.0f32),
+                    || (vec![vec![0.0f32; inputs]; breite],
+                        vec![0.0f32; breite], vec![0.0f32; breite], 0.0f32, 0.0f32),
                     |(mut a1, mut ab, mut a2, la, wa), (b1v, bb, b2v, lb, wb)| {
-                        for h in 0..POLICY_HIDDEN {
+                        for h in 0..breite {
                             for k in 0..inputs { a1[h][k] += b1v[h][k]; }
                             ab[h] += bb[h];
                             a2[h] += b2v[h];
@@ -647,7 +650,7 @@ pub fn fit_policy_from(
                 *w += lr * (*m / bc1) / ((*v / bc2).sqrt() + EPS);
                 *w -= lr * LAMBDA * *w;
             };
-            for h in 0..POLICY_HIDDEN {
+            for h in 0..breite {
                 for k in 0..inputs {
                     adam(&mut netz.w1[h][k], &mut m1[h][k], &mut v1[h][k], g1[h][k] / norm);
                 }
@@ -664,6 +667,6 @@ pub fn fit_policy_from(
         }
     }
 
-    netz.note = format!("Policy-Netz, {POLICY_HIDDEN} verborgene, {inputs} Eingaben");
+    netz.note = format!("Policy-Netz, {breite} verborgene, {inputs} Eingaben");
     (netz, letzte, erste)
 }
