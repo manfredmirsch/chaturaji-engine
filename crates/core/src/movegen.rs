@@ -197,6 +197,93 @@ impl MoveGen {
         Self::gen_slider(board, mover, PieceKind::Boat, friendly, &DIRS, moves);
     }
 
+    // ─── Deckung ─────────────────────────────────────────────────────────────
+
+    /// Felder, die `color` **deckt** — einschließlich der Felder, auf denen
+    /// eigene Figuren stehen.
+    ///
+    /// Das ist bewusst etwas anderes als `Rules::attacked_squares`. Jenes
+    /// faltet über die generierten Züge, und ein Zug geht nie auf ein eigenes
+    /// Feld. Damit ist dort **nicht zu erkennen, dass eine Figur von der
+    /// eigenen Seite gedeckt wird** — genau die Information, die zählt, wenn
+    /// man wissen will, ob eine angegriffene Figur hängt.
+    ///
+    /// Das fehlte bis 2026-09-15 vollständig, und alle Merkmale in
+    /// `chaturaji_engine::move_features`, die „gedeckt" heißen, meinten
+    /// tatsächlich nur „von einem Dritten angegriffen".
+    ///
+    /// Gerechnet wird direkt auf der Geometrie, ohne Brett zu klonen und ohne
+    /// `Vec` — das ist billiger als der Umweg über die Zuggenerierung.
+    pub fn coverage(board: &Board, color: Color) -> u64 {
+        if !board.active[color.idx()] { return 0; }
+        let occ = board.all_occupied();
+        let mut out = 0u64;
+        for kind in PieceKind::ALL {
+            let mut bb = board.pieces(color, kind);
+            while bb != 0 {
+                let from = bb.trailing_zeros() as u8;
+                bb &= bb - 1;
+                out |= Self::coverage_from(color, kind, from, occ);
+            }
+        }
+        out
+    }
+
+    /// Was eine einzelne Figur von `from` aus deckt, bei gegebener Belegung.
+    ///
+    /// Für Läufer und Boot endet ein Strahl **auf** der ersten besetzten Figur:
+    /// die wird gedeckt, alles dahinter nicht mehr.
+    ///
+    /// Bauern decken nur ihre Schlagrichtungen, nicht das Feld vor sich — ein
+    /// Bauer kann geradeaus nicht schlagen und deckt dort folglich nichts.
+    pub fn coverage_from(color: Color, kind: PieceKind, from: u8, occ: u64) -> u64 {
+        const KNIGHT: [(i8, i8); 8] =
+            [(1,2),(2,1),(2,-1),(1,-2),(-1,-2),(-2,-1),(-2,1),(-1,2)];
+        const KING: [(i8, i8); 8] =
+            [(0,1),(1,1),(1,0),(1,-1),(0,-1),(-1,-1),(-1,0),(-1,1)];
+        const DIAG: [(i8, i8); 4] = [(-1,-1),(-1,1),(1,-1),(1,1)];
+        const ORTHO: [(i8, i8); 4] = [(-1,0),(1,0),(0,-1),(0,1)];
+
+        let f = file_of(from) as i8;
+        let r = rank_of(from) as i8;
+        let mut out = 0u64;
+
+        let mut springe = |deltas: &[(i8, i8)], out: &mut u64| {
+            for &(df, dr) in deltas {
+                if let Some(to) = Self::try_sq(f + df, r + dr) { *out |= bit(to); }
+            }
+        };
+        let mut strahle = |dirs: &[(i8, i8)], out: &mut u64| {
+            for &(df, dr) in dirs {
+                let (mut ff, mut rr) = (f + df, r + dr);
+                while (0..8).contains(&ff) && (0..8).contains(&rr) {
+                    let to = sq(ff as u8, rr as u8);
+                    *out |= bit(to);
+                    if bit(to) & occ != 0 { break; }
+                    ff += df; rr += dr;
+                }
+            }
+        };
+
+        match kind {
+            PieceKind::Knight => springe(&KNIGHT, &mut out),
+            PieceKind::King   => springe(&KING,   &mut out),
+            PieceKind::Bishop => strahle(&DIAG,   &mut out),
+            PieceKind::Boat   => strahle(&ORTHO,  &mut out),
+            PieceKind::Pawn => {
+                // Dieselben Richtungen wie in `gen_pawns`, nur die Schlagfelder.
+                let dirs: &[(i8, i8)] = match color {
+                    Color::Red    => &[(-1, 1), (1, 1)],
+                    Color::Blue   => &[(1, -1), (1, 1)],
+                    Color::Yellow => &[(-1,-1), (1,-1)],
+                    Color::Green  => &[(-1,-1), (-1,1)],
+                };
+                springe(dirs, &mut out);
+            }
+        }
+        out
+    }
+
     // ─── Utility ─────────────────────────────────────────────────────────────
 
     /// Returns `Some(square)` if (f, r) is on the board.
@@ -296,5 +383,84 @@ mod tests {
             .filter(|m| m.from == sq(0,0) && m.to == sq(1,0))
             .collect();
         assert!(king_to_b1.is_empty(), "king must not capture friendly bishop");
+    }
+
+    // ─── Deckung ─────────────────────────────────────────────────────────────
+
+    /// Der Unterschied, um den es geht: `attacked_squares` sieht eigene Figuren
+    /// nicht, `coverage` schon.
+    #[test]
+    fn coverage_sieht_eigene_figuren_attacked_squares_nicht() {
+        use crate::rules::Rules;
+        let board = Board::default();
+        // In der Startstellung deckt Rot einen Haufen eigener Figuren; die
+        // Angriffskarte enthält kein einziges eigenes Feld.
+        let eigene = board.occupied_by(Color::Red);
+        let angriff = Rules::attacked_squares(&board, Color::Red);
+        let deckung = MoveGen::coverage(&board, Color::Red);
+        assert_eq!(angriff & eigene, 0,
+            "attacked_squares darf keine eigenen Felder enthalten");
+        assert_ne!(deckung & eigene, 0,
+            "coverage muss eigene Figuren als gedeckt ausweisen");
+    }
+
+    /// Ein Läuferstrahl endet auf der ersten Figur — die ist gedeckt, was
+    /// dahinter liegt nicht mehr.
+    #[test]
+    fn strahl_endet_auf_der_ersten_figur() {
+        // Der Läufer allein, sonst deckte der Blocker selbst mit und das
+        // Ergebnis sagte nichts über den Strahl. (Erster Anlauf tat genau das:
+        // ein Bauer auf c3 deckt d4, und der Test schlug zu Unrecht fehl.)
+        let occ = bit(sq(2, 2));
+        let deckung = MoveGen::coverage_from(Color::Red, PieceKind::Bishop, sq(0, 0), occ);
+        assert_ne!(deckung & bit(sq(1, 1)), 0, "b2 liegt frei auf dem Strahl");
+        assert_ne!(deckung & bit(sq(2, 2)), 0, "die Figur auf c3 ist gedeckt");
+        assert_eq!(deckung & bit(sq(3, 3)), 0, "hinter der Figur endet der Strahl");
+    }
+
+    /// Ein Bauer deckt seine Schlagfelder, nicht das Feld vor sich — dort kann
+    /// er nicht schlagen und deckt folglich nichts.
+    #[test]
+    fn bauern_decken_nur_diagonal() {
+        let mut board = Board::empty();
+        board.active = [true; 4];
+        board.bb[Color::Red.idx()][PieceKind::Pawn.idx()] |= bit(sq(3, 3));
+        let deckung = MoveGen::coverage(&board, Color::Red);
+        assert_eq!(deckung & bit(sq(3, 4)), 0, "vor sich deckt ein Bauer nichts");
+        assert_ne!(deckung & bit(sq(2, 4)), 0, "links-vorne schon");
+        assert_ne!(deckung & bit(sq(4, 4)), 0, "rechts-vorne auch");
+    }
+
+    /// Die Richtung ist je Farbe eine andere — die klassische Fehlerquelle.
+    #[test]
+    fn bauerndeckung_stimmt_fuer_alle_vier_farben() {
+        let faelle = [
+            (Color::Red,    (3, 4)),   // nach Norden
+            (Color::Blue,   (4, 3)),   // nach Osten
+            (Color::Yellow, (3, 2)),   // nach Süden
+            (Color::Green,  (2, 3)),   // nach Westen
+        ];
+        for (farbe, (df, dr)) in faelle {
+            let mut board = Board::empty();
+            board.active = [true; 4];
+            board.bb[farbe.idx()][PieceKind::Pawn.idx()] |= bit(sq(3, 3));
+            let deckung = MoveGen::coverage(&board, farbe);
+            assert_eq!(deckung & bit(sq(df, dr)), 0,
+                "{farbe:?}: geradeaus darf nicht gedeckt sein");
+        }
+    }
+
+    /// Deckung und Angriff müssen außerhalb der eigenen Figuren übereinstimmen:
+    /// was ein Spieler schlagen kann, deckt er auch.
+    #[test]
+    fn coverage_deckt_alles_ab_was_attacked_squares_kennt() {
+        use crate::rules::Rules;
+        let board = Board::default();
+        for c in Color::ALL {
+            let angriff = Rules::attacked_squares(&board, c);
+            let deckung = MoveGen::coverage(&board, c);
+            assert_eq!(angriff & !deckung, 0,
+                "{c:?}: jedes angegriffene Feld muss auch gedeckt sein");
+        }
     }
 }

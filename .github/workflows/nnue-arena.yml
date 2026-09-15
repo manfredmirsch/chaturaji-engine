@@ -103,6 +103,14 @@ on:
         type: choice
         options: ['visits', 'value']
         default: 'visits'
+      a_model:
+        description: 'Zugmodell für A (Datei unter crates/nnue/arena_models/, leer = eingebaut)'
+        type: string
+        default: ''
+      b_model:
+        description: 'Zugmodell für B (leer = eingebaut)'
+        type: string
+        default: ''
 
 env:
   STATE_TAG: nnue-state
@@ -206,6 +214,8 @@ jobs:
             ${{ inputs.b_c_puct && format('--b-c-puct {0}', inputs.b_c_puct) || '' }} \
             --a-root '${{ inputs.a_root }}' \
             --b-root '${{ inputs.b_root }}' \
+            ${{ inputs.a_model && format('--a-model crates/nnue/arena_models/{0}', inputs.a_model) || '' }} \
+            ${{ inputs.b_model && format('--b-model crates/nnue/arena_models/{0}', inputs.b_model) || '' }} \
             --out "out/shard-$(printf '%03d' ${{ matrix.shard }}).json"
 
       - uses: actions/upload-artifact@v7

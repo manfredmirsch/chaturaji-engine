@@ -94,6 +94,9 @@ struct Args {
     b_c_puct: Option<f32>,
     a_root:   RootChoice,
     b_root:   RootChoice,
+    // Zugmodell je Seite als Datei. Ohne Angabe gilt das eingebaute.
+    a_model:  Option<String>,
+    b_model:  Option<String>,
 }
 
 /// Welches Suchverfahren eine Seite benutzt.
@@ -152,6 +155,7 @@ fn parse_args() -> Args {
         c_puct: chaturaji_nnue::mcts::DEFAULT_C_PUCT,
         a_iters: None, b_iters: None, a_c_puct: None, b_c_puct: None,
         a_root: RootChoice::Visits, b_root: RootChoice::Visits,
+        a_model: None, b_model: None,
     };
     let mut i = 1;
     while i < v.len() {
@@ -183,6 +187,8 @@ fn parse_args() -> Args {
             "--b-c-puct"      => a.b_c_puct = next(&mut i).parse().ok(),
             "--a-root"        => a.a_root = wurzelwahl(&next(&mut i)),
             "--b-root"        => a.b_root = wurzelwahl(&next(&mut i)),
+            "--a-model"       => a.a_model = Some(next(&mut i)),
+            "--b-model"       => a.b_model = Some(next(&mut i)),
             _ => {}
         }
         i += 1;
@@ -243,6 +249,7 @@ fn play(
     a_beam: BeamOrder, b_beam: BeamOrder,
     a_search: SearchKind, b_search: SearchKind, tt_mb: usize,
     mcts_a: &MctsConfig, mcts_b: &MctsConfig,
+    modell_a: &MoveModel, modell_b: &MoveModel,
     depth: u8, beam: usize, max_moves: usize, keys: &ZobristKeys,
     time_ms: u64, max_depth: u8,
 ) -> ([f32; 4], usize, [f64; 2], [f64; 2]) {
@@ -259,7 +266,6 @@ fn play(
     // Baum und Zugmodell einmal je Partie; der Baum wird je Zug geleert, die
     // Allokationen bleiben erhalten.
     let mut baum   = Mcts::new();
-    let modell     = MoveModel::default();
 
     while plies < max_moves && !Rules::is_game_over(&board) {
         let moves = Rules::legal_moves(&board);
@@ -313,8 +319,9 @@ fn play(
             SearchKind::Mcts => {
                 // MCTS kennt kein Zeitbudget; `--iters` steuert den Aufwand.
                 // Die Zeitspalte bleibt für diese Seite deshalb leer.
-                let cfg = if ist_a { mcts_a } else { mcts_b };
-                baum.search(&|b: &Board| net.forward(b), &modell, &board, cfg)
+                let cfg    = if ist_a { mcts_a } else { mcts_b };
+                let modell = if ist_a { modell_a } else { modell_b };
+                baum.search(&|b: &Board| net.forward(b), modell, &board, cfg)
                     .map(|r| r.best)
                     .unwrap_or(moves[0])
             }
@@ -342,6 +349,25 @@ fn main() {
     let net_a = load(&args.a);
     let net_b = load(&args.b);
     let keys = ZobristKeys::new();
+
+    // Zugmodell je Seite. Ohne Datei das eingebaute — so lässt sich ein neu
+    // geschätztes Modell gegen den Stand messen, ohne neu zu übersetzen.
+    let lade_modell = |pfad: &Option<String>| -> MoveModel {
+        match pfad {
+            None => MoveModel::default(),
+            Some(p) => {
+                let txt = std::fs::read_to_string(p)
+                    .unwrap_or_else(|e| { eprintln!("Zugmodell {p}: {e}"); std::process::exit(2) });
+                serde_json::from_str(&txt)
+                    .unwrap_or_else(|e| { eprintln!("Zugmodell {p}: {e}"); std::process::exit(2) })
+            }
+        }
+    };
+    let modell_a = lade_modell(&args.a_model);
+    let modell_b = lade_modell(&args.b_model);
+    if args.a_model.is_some() || args.b_model.is_some() {
+        println!("Zugmodell A: {} | B: {}", modell_a.note, modell_b.note);
+    }
 
     // Gruppen dieses Shards: reihum, damit jeder Shard dieselbe Mischung an
     // Eröffnungen sieht.
@@ -385,6 +411,7 @@ fn main() {
                                      &MctsConfig { iterations: args.b_iters.unwrap_or(args.iters),
                                                    c_puct:     args.b_c_puct.unwrap_or(args.c_puct),
                                                    root:       args.b_root },
+                                     &modell_a, &modell_b,
                                      args.depth, args.beam, args.max_moves, &keys,
                                      args.time_ms, args.max_depth);
                 d_a[0] += ta[0]; d_a[1] += ta[1];

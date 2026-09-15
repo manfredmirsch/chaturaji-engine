@@ -33,11 +33,12 @@
 use serde::{Deserialize, Serialize};
 
 use chaturaji_core::board::{bit, file_of, rank_of, Board, Move};
+use chaturaji_core::movegen::MoveGen;
 use chaturaji_core::piece::{Color, PieceKind};
 use chaturaji_core::rules::Rules;
 
 /// Anzahl der Merkmale. Reihenfolge und Bedeutung siehe [`FEATURE_NAMES`].
-pub const N_FEATURES: usize = 14;
+pub const N_FEATURES: usize = 16;
 
 /// Namen in der Reihenfolge des Vektors — für die Gewichtstabelle.
 pub const FEATURE_NAMES: [&str; N_FEATURES] = [
@@ -55,6 +56,10 @@ pub const FEATURE_NAMES: [&str; N_FEATURES] = [
     "zentrum",               // 11  Zielfeld in den inneren 4×4
     "ist_bauer",             // 12  Kontrollgröße: Figurenart
     "ist_koenig",            // 13  Kontrollgröße: Königszug
+    "deckt_bedrohte",        // 14  deckt eine eigene, angegriffene und bisher
+                             //     ungedeckte Figur
+    "laesst_haengen",        // 15  gibt die einzige Deckung einer angegriffenen
+                             //     eigenen Figur auf
 ];
 
 /// Größter Schlagwert im Spiel (Bishop und Boat). Normiert die Schlagfelder
@@ -65,8 +70,18 @@ const MAX_CAPTURE: f32 = 5.0;
 pub struct MoveFeatureContext {
     /// Angriffskarte je Spieler, in der Stellung *vor* dem Zug.
     attacked: [u64; 4],
+    /// Deckungskarte je Spieler — anders als `attacked` **einschließlich** der
+    /// Felder mit eigenen Figuren. Ohne das ist nicht zu erkennen, ob eine
+    /// angegriffene Figur gedeckt ist oder hängt; siehe `MoveGen::coverage`.
+    covered: [u64; 4],
     /// Angegriffen von irgendeinem anderen als dem Ziehenden.
     by_others: u64,
+    /// Was die einzelnen Figuren des Ziehenden decken, je Feld. Gebraucht, um
+    /// zu fragen „deckt außer dieser noch jemand?" — die Vereinigung aller
+    /// anderen lässt sich daraus je Zug billig bilden.
+    mover_pieces: Vec<(u8, PieceKind, u64)>,
+    /// Belegung vor dem Zug, für `coverage_from` des ziehenden Steins.
+    occ: u64,
     /// Wie viele Gegner den König des Ziehenden angreifen.
     own_king_attackers: u32,
     mover: Color,
@@ -84,26 +99,59 @@ impl MoveFeatureContext {
             .filter(|&&c| c != mover)
             .fold(0u64, |acc, &c| acc | attacked[c.idx()]);
 
+        let covered: [u64; 4] = std::array::from_fn(|i| {
+            MoveGen::coverage(board, Color::ALL[i])
+        });
+
+        let occ = board.all_occupied();
+        let mut mover_pieces = Vec::with_capacity(12);
+        for kind in PieceKind::ALL {
+            let mut bb = board.pieces(mover, kind);
+            while bb != 0 {
+                let from = bb.trailing_zeros() as u8;
+                bb &= bb - 1;
+                mover_pieces.push((from, kind, MoveGen::coverage_from(mover, kind, from, occ)));
+            }
+        }
+
         let king = board.pieces(mover, PieceKind::King);
         let own_king_attackers = Color::ALL.iter()
             .filter(|&&c| c != mover && board.active[c.idx()])
             .filter(|&&c| attacked[c.idx()] & king != 0)
             .count() as u32;
 
-        Self { attacked, by_others, own_king_attackers, mover }
+        Self { attacked, covered, by_others, mover_pieces, occ, own_king_attackers, mover }
     }
 
-    /// Angegriffen von einem anderen Spieler als dem Ziehenden, wobei der
-    /// Beitrag eines geschlagenen Steins wegfällt — der steht nach dem Zug
-    /// nicht mehr auf dem Brett und deckt nichts mehr.
+    /// Steht das Zielfeld nach dem Zug unter Beschuss?
+    ///
+    /// Der Beitrag eines geschlagenen Steins fällt weg — der steht nach dem Zug
+    /// nicht mehr auf dem Brett. **Die eigene Seite des Opfers zählt aber mit**,
+    /// und zwar über die Deckungs- statt die Angriffskarte: ein Läufer, der
+    /// einen eigenen Bauern deckt, kann dorthin nicht ziehen, also steht dieses
+    /// Feld nie in seiner Angriffskarte. Bis 2026-09-15 fehlte das, und ein
+    /// Schlag auf eine gedeckte Figur galt als frei.
     fn defended_by_others(&self, mv: &Move) -> bool {
         let target = bit(mv.to);
         match mv.captured {
             None => self.by_others & target != 0,
             Some(victim) => Color::ALL.iter()
-                .filter(|&&c| c != self.mover && c != victim.color)
-                .any(|&c| self.attacked[c.idx()] & target != 0),
+                .filter(|&&c| c != self.mover)
+                .any(|&c| if c == victim.color {
+                    // Der geschlagene Stein deckt sich nicht selbst; jede andere
+                    // Figur seiner Farbe schon.
+                    self.covered[c.idx()] & target != 0
+                } else {
+                    self.attacked[c.idx()] & target != 0
+                }),
         }
+    }
+
+    /// Deckt außer der Figur auf `ohne` noch eine eigene Figur das Feld `feld`?
+    fn gedeckt_ohne(&self, feld: u64, ohne: u8) -> bool {
+        self.mover_pieces.iter()
+            .filter(|(sq, _, _)| *sq != ohne)
+            .any(|(_, _, cov)| cov & feld != 0)
     }
 }
 
@@ -156,11 +204,49 @@ fn features_cheap(board: &Board, mv: &Move, ctx: &MoveFeatureContext, f: &mut [f
         let wert = kind.capture_value() as f32 / MAX_CAPTURE;
         let stand_im_angriff = ctx.by_others & bit(mv.from) != 0;
         let landet_im_angriff = ctx.defended_by_others(mv);
+        // „Eingestellt" heißt angegriffen **und** ungedeckt. Dass die eigene
+        // Deckung dabei mitzählt, ging bis 2026-09-15 unter — ein Zug auf ein
+        // angegriffenes, aber gut gedecktes Feld sah aus wie ein Fehler.
+        let eigene_deckung = ctx.gedeckt_ohne(bit(mv.to), mv.from);
         if stand_im_angriff && !landet_im_angriff { f[9]  = wert; }
-        if landet_im_angriff && mv.captured.is_none() { f[10] = wert; }
+        if landet_im_angriff && !eigene_deckung && mv.captured.is_none() { f[10] = wert; }
 
         f[12] = (kind == PieceKind::Pawn) as u8 as f32;
         f[13] = (kind == PieceKind::King) as u8 as f32;
+    }
+
+    // ─── Deckung eigener Figuren ─────────────────────────────────────────────
+    //
+    // Was die vorhandenen Merkmale 9 und 10 nicht erfassen: sie sehen nur den
+    // ziehenden Stein. Eine Figur, die stehen bleibt und durch den Zug ihre
+    // Deckung verliert, kam darin nicht vor — und genau das ist der Fall, über
+    // den sich in der Praxis geärgert wird.
+    //
+    // Näherung: gerechnet wird mit der Belegung *vor* dem Zug. Dass der
+    // ziehende Stein sein Ausgangsfeld räumt und damit Strahlen anderer Figuren
+    // öffnet, bleibt unberücksichtigt. Das exakt zu machen kostete eine neue
+    // Deckungskarte je Zug; für ein Sortiermerkmal ist das zu teuer.
+    if let Some(kind) = moving_kind {
+        let von_to = MoveGen::coverage_from(mover, kind, mv.to, ctx.occ);
+        let von_from = ctx.mover_pieces.iter()
+            .find(|(sq, _, _)| *sq == mv.from)
+            .map(|(_, _, cov)| *cov)
+            .unwrap_or(0);
+
+        for (feld, art, _) in &ctx.mover_pieces {
+            if *feld == mv.from { continue; }          // zieht ja gerade weg
+            let b = bit(*feld);
+            if ctx.by_others & b == 0 { continue; }    // nicht angegriffen, egal
+            let wert = art.capture_value() as f32 / MAX_CAPTURE;
+            let sonst_gedeckt = ctx.gedeckt_ohne(b, mv.from);
+
+            if !sonst_gedeckt && von_to & b != 0 && von_from & b == 0 {
+                f[14] += wert;   // neu gedeckt
+            }
+            if !sonst_gedeckt && von_from & b != 0 && von_to & b == 0 {
+                f[15] += wert;   // einzige Deckung aufgegeben
+            }
+        }
     }
 
     // ─── Zentrum ─────────────────────────────────────────────────────────────
@@ -271,25 +357,40 @@ pub struct MoveModel {
 /// |---|---|---|
 /// | Zufall | 8,0 % | 47,5 % |
 /// | die alte Handheuristik | 17,0 % | 54,6 % |
-/// | **diese Gewichte** | **25,6 %** | **74,3 %** |
+/// | die Gewichte vor dem 2026-09-15 | 25,6 % | 74,3 % |
+/// | **diese Gewichte** | **27,2 %** | **75,5 %** |
+///
+/// Der Sprung kommt aus der Deckung. Vorher konnte das Modell gar nicht sehen,
+/// dass eine Figur von der **eigenen** Seite gedeckt wird — `attacked_squares`
+/// faltet über generierte Züge, und die gehen nie auf ein eigenes Feld. Damit
+/// galt jeder Schlag auf eine gedeckte Figur als frei, und „eingestellt" hieß
+/// nur „landet im Beschuss", ohne Rücksicht auf die eigene Deckung. Mit
+/// `MoveGen::coverage` stimmt beides, und zwei neue Merkmale kommen hinzu.
+///
+/// `laesst_haengen` ist mit −3,64 das **gewichtigste Merkmal des Modells** —
+/// stärker als jeder Schlagwert. Die Anregung kam aus der Praxis: „Es sollte
+/// mehr Gewicht darauf gelegt werden, dass Figuren, die im nächsten Zug
+/// angegriffen werden können, gedeckt sind."
 ///
 /// Eingebaut statt als Datei geladen, damit die Engine ohne Fremdpfad
 /// auskommt — das Eröffnungsbuch ist optional, die Zugsortierung nicht.
 pub const DEFAULT_WEIGHTS: [f32; N_FEATURES] = [
-     2.0902,  // koenig_aus_schach
-     1.9385,  // schach_vermeiden
-     1.1251,  // umwandlung
-     0.3712,  // umwandlung_naeher
-     2.6058,  // schlag_ungedeckt
-     2.3519,  // schlag_gedeckt
-     2.6229,  // koenig_geschlagen
+     2.1158,  // koenig_aus_schach
+     1.9710,  // schach_vermeiden
+     1.1121,  // umwandlung
+     0.3909,  // umwandlung_naeher
+     3.8331,  // schlag_ungedeckt
+     2.5690,  // schlag_gedeckt
+     2.2588,  // koenig_geschlagen
      0.0000,  // schach_gegeben   — von `fast_features` nicht berechnet
      0.0000,  // doppelschach     — dito
-     1.4875,  // figur_gerettet
-    -1.4559,  // figur_eingestellt
-    -0.0905,  // zentrum
-     0.7584,  // ist_bauer
-    -0.2402,  // ist_koenig
+     1.4039,  // figur_gerettet
+    -2.8495,  // figur_eingestellt
+    -0.0753,  // zentrum
+     0.7208,  // ist_bauer
+    -0.2194,  // ist_koenig
+     1.3469,  // deckt_bedrohte
+    -3.6410,  // laesst_haengen
 ];
 
 impl Default for MoveModel {
