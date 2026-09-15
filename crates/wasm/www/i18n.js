@@ -29,7 +29,7 @@ const listeners = [];
 
 async function loadLang(lang) {
   if (dictionaries[lang]) return dictionaries[lang];
-  const r = await fetch('i18n/' + lang + '.json?v=2462553011');
+  const r = await fetch('i18n/' + lang + '.json?v=2608578673');
   if (!r.ok) throw new Error('language file not found: ' + lang);
   const data = await r.json();
   dictionaries[lang] = data;

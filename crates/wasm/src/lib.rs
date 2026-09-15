@@ -1,6 +1,14 @@
 //! WASM bindings für den Chaturaji Engine + neuronales Netz.
-
-mod network;
+//!
+//! Das Netz kommt aus `chaturaji_engine::nnue_network`. Diese Kiste hatte bis
+//! zum 2026-09-15 eine **eigene** Kopie von Netz und Merkmalsextraktor (56
+//! Eingaben, eigene Serde-Form). Die Kopie und der Trainer liefen auseinander,
+//! ohne dass es auffiel: die ausgelieferte `weights.json` gab in jeder Stellung
+//! denselben Vektor zurück, weil die Aktivierungen davonliefen und tanh am
+//! Anschlag stand. Für die Alpha-Beta-Suchen war das noch zu ertragen, für die
+//! Baumsuche nicht — ohne Unterschiede zwischen den Blättern wählt PUCT nur
+//! noch nach dem Zug-Prior. Deshalb jetzt ein Extraktor und ein Forward-Pass
+//! für Trainer, Arena und Browser.
 
 use wasm_bindgen::prelude::*;
 use serde::Serialize;
@@ -13,7 +21,7 @@ use chaturaji_engine::book::OpeningBook;
 use chaturaji_engine::mcts::{Mcts, MctsConfig, DEFAULT_C_PUCT};
 use chaturaji_engine::move_features::MoveModel;
 use chaturaji_engine::search::{Engine as SearchEngine, SearchAlgo};
-use network::Network;
+use chaturaji_engine::nnue_network::NnueNetwork as Network;
 
 // ─── JS-facing types ──────────────────────────────────────────────────────────
 
@@ -595,10 +603,14 @@ impl WasmEngine {
 
     pub fn load_network_json(&mut self, json: &str) -> Option<String> {
         match serde_json::from_str::<Network>(json) {
-            Ok(net) => {
+            Ok(mut net) => {
                 if let Err(e) = net.validate() {
                     return Some(format!("Netzwerk-Architektur passt nicht: {e}"));
                 }
+                // Checkpoints von vor den dichten Merkmalen haben kürzere
+                // L1-Zeilen; die fehlenden Spalten mit Null aufzufüllen ist
+                // genau das, was der Trainer beim Weiterlernen auch tut.
+                net.ensure_input_size();
                 self.network = Some(net);
                 self.invalidate_mcts();
                 None
@@ -684,4 +696,82 @@ fn sq_to_eng(sq: u8) -> String {
     let file = (b'a' + (sq & 7)) as char;
     let rank = (sq >> 3) + 1;
     format!("{}{}", file, rank)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lädt das Netz, das die Seite tatsächlich ausliefert.
+    ///
+    /// `www/weights.json` steht in `.gitignore` — 4 MB Gewichte gehören nicht
+    /// in den Verlauf, sie liegen im Release `nnue-state`. In einem frischen
+    /// Klon fehlt die Datei deshalb, und dann prüfen diese Tests eben nichts,
+    /// statt fehlzuschlagen. Das ist die ehrliche Variante: ein roter Test, der
+    /// nur eine fehlende Datei meldet, wird nach dem zweiten Mal ignoriert und
+    /// deckt dann auch echte Fehler nicht mehr auf.
+    fn ausgeliefertes_netz() -> Option<Network> {
+        let pfad = concat!(env!("CARGO_MANIFEST_DIR"), "/www/weights.json");
+        let json = match std::fs::read_to_string(pfad) {
+            Ok(j) => j,
+            Err(_) => {
+                eprintln!("übersprungen: {pfad} fehlt (steht in .gitignore)");
+                return None;
+            }
+        };
+        let mut netz: Network = serde_json::from_str(&json)
+            .expect("www/weights.json muss ladbar sein");
+        netz.validate().expect("Architektur muss zur einkompilierten passen");
+        netz.ensure_input_size();
+        Some(netz)
+    }
+
+    /// Eine Bewertungsfunktion, die überall dasselbe liefert, ist wertlos — und
+    /// für die Baumsuche schlimmer als wertlos: ohne Unterschiede zwischen den
+    /// Blättern ist Q überall gleich, PUCT wählt dann nur noch nach dem
+    /// Zug-Prior und sucht gar nicht mehr.
+    ///
+    /// Am 2026-09-15 war genau das der Fall, unbemerkt über Monate: die alte,
+    /// in dieser Kiste gepflegte Netzkopie gab in jeder Stellung
+    /// [−1, −1, +1, −1] zurück. Merkmale in [0, 1] wie vorgesehen, aber a2 max
+    /// 107,7 und vor tanh [−31,8, −45,6, +49,6, −79,8] — die Aktivierungen
+    /// liefen davon, tanh stand am Anschlag. Diese Prüfung hätte das sofort
+    /// gezeigt.
+    #[test]
+    fn das_ausgelieferte_netz_unterscheidet_stellungen() {
+        let Some(netz) = ausgeliefertes_netz() else { return };
+        let mut brett = Board::default();
+        let mut gesehen = vec![netz.forward(&brett)];
+        for _ in 0..6 {
+            let zug = Rules::legal_moves(&brett)[0];
+            brett = Rules::apply_with_effects(&brett, zug);
+            gesehen.push(netz.forward(&brett));
+        }
+        let erste = gesehen[0];
+        let unterschiedlich = gesehen.iter()
+            .any(|v| v.iter().zip(&erste).any(|(a, b)| (a - b).abs() > 1e-4));
+        assert!(unterschiedlich, "Netz liefert in allen Stellungen dasselbe: {erste:?}");
+    }
+
+    /// Eine gesättigte Ausgabe trägt keine Information: tanh ist dort flach,
+    /// verschiedene Stellungen fallen auf denselben Wert zusammen.
+    #[test]
+    fn das_ausgelieferte_netz_ist_nicht_gesaettigt() {
+        let Some(netz) = ausgeliefertes_netz() else { return };
+        let v = netz.forward(&Board::default());
+        let am_anschlag = v.iter().filter(|x| x.abs() > 0.999).count();
+        assert!(am_anschlag == 0,
+            "Ausgaben am Anschlag: {v:?} — tanh ist gesättigt");
+    }
+
+    /// Die Summe der vier Platzwerte ist 0. Ein Netz, das darauf trainiert ist,
+    /// muss in der symmetrischen Startstellung nahe bei null liegen; läuft die
+    /// Summe weg, ist die Zielkodierung nicht die, für die die Suche rechnet.
+    #[test]
+    fn die_startstellung_ist_ungefaehr_ausgeglichen() {
+        let Some(netz) = ausgeliefertes_netz() else { return };
+        let v = netz.forward(&Board::default());
+        let summe: f32 = v.iter().sum();
+        assert!(summe.abs() < 0.5, "Startstellung nicht ausgeglichen: {v:?}, Summe {summe:.3}");
+    }
 }

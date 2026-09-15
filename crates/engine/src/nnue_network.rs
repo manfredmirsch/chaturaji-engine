@@ -18,7 +18,7 @@
 
 use chaturaji_core::board::Board;
 
-use crate::features::{
+use crate::nnue_features::{
     dense_features, for_each_feature, DENSE_FEATURES, INPUT_SIZE, PIECE_FEATURES,
 };
 use rand::SeedableRng;
@@ -306,6 +306,38 @@ impl NnueNetwork {
         init(&mut self.l1, H1, INPUT_SIZE);
         init(&mut self.l2, H2, H1);
         init(&mut self.l3, OUTPUT, H2);
+    }
+
+    /// Prüft, ob die geladenen Schichten zur einkompilierten Architektur passen.
+    ///
+    /// Gedacht für Aufrufer, die eine fremde Datei laden — das Frontend lässt
+    /// den Benutzer eine beliebige `weights.json` auswählen. `ensure_input_size`
+    /// füllt kurze L1-Zeilen mit Nullen auf, damit alte Checkpoints
+    /// weiterlaufen; eine Datei mit *falscher Zeilenzahl* ist dagegen kein
+    /// alter Checkpoint, sondern eine andere Architektur, und die soll nicht
+    /// stillschweigend halb geladen werden.
+    pub fn validate(&self) -> Result<(), String> {
+        let pruefe = |name: &str, l: &Layer, out: usize, inp: usize| -> Result<(), String> {
+            if l.w.len() != out {
+                return Err(format!("{name}: {out} Zeilen erwartet, {} geladen", l.w.len()));
+            }
+            if l.b.len() != out {
+                return Err(format!("{name}: {out} Bias-Werte erwartet, {} geladen", l.b.len()));
+            }
+            // L1 darf kürzer sein (alter Checkpoint vor den dichten Features),
+            // aber niemals breiter — das wäre eine andere Eingabekodierung.
+            let zu_breit = l.w.iter().any(|r| r.len() > inp);
+            let uneinheitlich = l.w.iter().any(|r| r.len() != l.w[0].len());
+            if zu_breit || uneinheitlich {
+                return Err(format!("{name}: Zeilenbreite {} passt nicht zu {inp}",
+                                   l.w.first().map_or(0, |r| r.len())));
+            }
+            Ok(())
+        };
+        pruefe("l1", &self.l1, H1, INPUT_SIZE)?;
+        pruefe("l2", &self.l2, H2, H1)?;
+        pruefe("l3", &self.l3, OUTPUT, H2)?;
+        Ok(())
     }
 
     pub fn param_count(&self) -> usize {

@@ -2,6 +2,8 @@ pub mod book;
 pub mod eval;
 pub mod mcts;
 pub mod move_features;
+pub mod nnue_features;
+pub mod nnue_network;
 pub mod ordering;
 pub mod outcome;
 pub mod search;
