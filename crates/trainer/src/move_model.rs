@@ -520,8 +520,26 @@ mod tests {
 pub fn fit_policy(
     data: &[Decision], weighted: bool, epochs: u32, lr: f32, batch: usize, seed: u64,
 ) -> (PolicyNet, f32, f32) {
+    fit_policy_from(PolicyNet::new(N_FEATURES, seed), data, weighted, epochs, lr, batch, seed)
+}
+
+/// Wie [`fit_policy`], aber von einem vorhandenen Netz aus.
+///
+/// Gebraucht für den zweiten Anlauf des Selbstspiel-Kreislaufs. Der erste
+/// begann bei Zufall und **ersetzte** damit, was aus 862.206 menschlichen
+/// Entscheidungen gelernt war, durch 71.947 eigene Stellungen — zwölfmal
+/// weniger Daten von einem schwächeren Lehrer. Ergebnis: −0,037 Platzwert.
+///
+/// Von v1 aus weiterzutrainieren behält das menschliche Wissen und legt die
+/// Suchkorrektur darauf. Die Lernrate gehört dabei deutlich kleiner gewählt:
+/// bei der Rate des Neuanfangs wäre der Startpunkt nach wenigen Schritten
+/// vergessen, und man landete wieder bei v2.
+pub fn fit_policy_from(
+    start: PolicyNet, data: &[Decision], weighted: bool,
+    epochs: u32, lr: f32, batch: usize, seed: u64,
+) -> (PolicyNet, f32, f32) {
     let inputs = N_FEATURES;
-    let mut netz = PolicyNet::new(inputs, seed);
+    let mut netz = start;
 
     // Adam-Momente, in derselben Form wie die Gewichte.
     let mut m1 = vec![vec![0.0f32; inputs]; POLICY_HIDDEN];

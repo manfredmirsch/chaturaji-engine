@@ -42,11 +42,30 @@
 //!   sie nicht korrigiert hat. Bei 800 Simulationen ist dieser
 //!   Verbesserungsschritt schwach, der Nachahmungsfehler aber nicht.
 //!
-//! Naheliegende nächste Fassung: von v1 aus **weitertrainieren** statt bei
-//! Zufall zu beginnen, mit kleiner Lernrate — dann bleibt das menschliche
-//! Wissen erhalten und die Suchkorrektur kommt obendrauf. Und die Partien mit
-//! mehr Simulationen erzeugen, damit der Lehrer deutlicher über seinem
-//! eigenen Prior liegt.
+# Die zweite Umdrehung: auch nichts
+//!
+//! | Variante | Mittel gegen v1 |
+//! |---|---|
+//! | v2 — nur Suche, Kaltstart | −0,037 |
+//! | v3 — nur Suche, Warmstart von v1 (lr 0,001) | −0,038 |
+//! | v5 — menschliche **und** Suchdaten, Gewicht 4:1 | ±0,000 |
+//!
+//! Die erste Erklärung oben war falsch: es sind 719.463 Stellungen mit Suche,
+//! nicht 71.947 — letzteres war der Testteil. An zu wenig Daten lag es nicht.
+//! Der Warmstart bringt ebenfalls nichts, weil der Startpunkt nach wenigen
+//! Epochen vergessen ist. Und gemeinsames Training holt v1s Niveau zurück,
+//! ohne darüber hinauszukommen: **die Suchkorrektur trägt bei 800
+//! Simulationen nichts bei.**
+//!
+//! An den Rohdaten gemessen (45.244 Stellungen): der Abstand zwischen
+//! Spitzenzug und Platz 2 liegt im Median bei 0,163 der Besuche — aber in
+//! **29,6 %** der Stellungen unter 0,05. Dort ist die Wahl der Suche ein
+//! Münzwurf, und das Netz lernt ihn mit. Kein reines Rauschen, aber ein
+//! knappes Drittel davon.
+//!
+//! Wer es weiterverfolgt: Stellungen mit knappem Abstand herausfiltern oder
+//! nach dem Abstand gewichten, und die Partien mit deutlich mehr Simulationen
+//! erzeugen, damit der Lehrer klarer über seinem eigenen Prior steht.
 //!
 //! # Aufruf
 //!
@@ -66,7 +85,7 @@ use chaturaji_core::notation::parse_move;
 use chaturaji_core::rules::Rules;
 use chaturaji_engine::move_features::{fast_features, MoveFeatureContext};
 use chaturaji_engine::policy::{MovePrior, PolicyNet};
-use chaturaji_trainer::move_model::{accuracy, fit_policy, print_accuracy, Decision};
+use chaturaji_trainer::move_model::{accuracy, fit_policy_from, print_accuracy, Decision};
 
 fn main() {
     let mut games  = String::new();
@@ -74,6 +93,21 @@ fn main() {
     let mut epochs = 30u32;
     let mut lr     = 0.01f32;
     let mut batch  = 4096usize;
+    /// Von einem vorhandenen Netz aus weitertrainieren statt bei Zufall zu
+    /// beginnen. `"eingebaut"` nimmt Policy v1 aus der Engine.
+    let mut init   = String::new();
+    /// Menschliche Partien zusätzlich einbeziehen statt nur die eigenen.
+    ///
+    /// Der erste Anlauf ersetzte 862.206 menschliche Entscheidungen durch
+    /// 71.947 eigene und verlor damit 0,037 Platzwert. Beide Quellen zusammen
+    /// zu nehmen ist die naheliegende Verbesserung: das Wissen von außen
+    /// bleibt, die Suchkorrektur kommt dazu.
+    let mut human  = String::new();
+    /// Wie stark die Selbstspiel-Stellungen gegenüber den menschlichen zählen.
+    ///
+    /// Ohne das entschiede die schiere Menge: zwölfmal mehr menschliche
+    /// Entscheidungen hieße, die Suchkorrektur ginge im Rauschen unter.
+    let mut mix    = 4.0f32;
     // Anteil der Partien, der zum Messen zurückgehalten wird.
     let mut test_anteil = 10usize;
 
@@ -87,8 +121,13 @@ fn main() {
             "--epochs" => { epochs = wert.parse().unwrap_or(epochs); i += 1; }
             "--lr"     => { lr     = wert.parse().unwrap_or(lr); i += 1; }
             "--batch"  => { batch  = wert.parse().unwrap_or(batch); i += 1; }
+            "--init"   => { init   = wert; i += 1; }
+            "--human"  => { human  = wert; i += 1; }
+            "--mix"    => { mix    = wert.parse().unwrap_or(mix); i += 1; }
             "--help" | "-h" => {
                 println!("policy_selfplay --games <jsonl> [--out datei] [--epochs n] [--lr f] [--batch n]");
+                println!("                [--init eingebaut|<datei>]   von dort aus weitertrainieren");
+                println!("                [--human <verz>] [--mix f]   menschliche Partien dazunehmen");
                 return;
             }
             other => { eprintln!("unbekanntes Argument: {other}"); std::process::exit(2); }
@@ -113,11 +152,38 @@ fn main() {
     let schnitt = daten.len() * (100 - test_anteil.min(50)) / 100;
     let mut daten = daten;
     let test  = daten.split_off(schnitt);
-    let train = daten;
-    println!("Lernen auf {}, Test auf {}\n", train.len(), test.len());
+    let mut train = daten;
+    let aus_suche = train.len();
 
-    println!("─── Policy-Netz auf der Besuchsverteilung ───");
-    let (netz, letzte, erste) = fit_policy(&train, false, epochs, lr, batch, 20260915);
+    // Menschliche Entscheidungen dazu, mit eigenem Gewicht. Getestet wird
+    // weiterhin nur gegen die Suche — die Frage ist ja, ob das Ergebnis die
+    // Suche besser nachbildet, nicht ob es Menschen besser nachahmt.
+    if !human.is_empty() {
+        let mut menschlich = chaturaji_trainer::move_model::collect(&human, 0);
+        for d in &mut menschlich { d.weight = 1.0; }
+        // Die Selbstspiel-Stellungen hochgewichten, sonst entschiede die
+        // schiere Menge.
+        for d in &mut train { d.weight = mix; }
+        println!("dazu {} menschliche Entscheidungen (Gewicht 1 gegen {mix})", menschlich.len());
+        train.extend(menschlich);
+    }
+    println!("Lernen auf {} ({aus_suche} aus der Suche), Test auf {}\n", train.len(), test.len());
+
+    let (start, woher) = match init.as_str() {
+        "" => (PolicyNet::new(chaturaji_engine::move_features::N_FEATURES, 20260915),
+               "Zufall".to_string()),
+        "eingebaut" => (PolicyNet::default(), "Policy v1 (eingebaut)".to_string()),
+        pfad => {
+            let txt = std::fs::read_to_string(pfad)
+                .unwrap_or_else(|e| { eprintln!("{pfad}: {e}"); std::process::exit(2) });
+            let n: PolicyNet = serde_json::from_str(&txt)
+                .unwrap_or_else(|e| { eprintln!("{pfad}: {e}"); std::process::exit(2) });
+            (n, pfad.to_string())
+        }
+    };
+    println!("─── Policy-Netz auf der Besuchsverteilung, Start: {woher} ───");
+    let (netz, letzte, erste) =
+        fit_policy_from(start, &train, !human.is_empty(), epochs, lr, batch, 20260915);
     println!("  {} Parameter, {:+.5} → {:+.5}", netz.param_count(), erste, letzte);
 
     // Gemessen wird gegen den meistbesuchten Zug: trifft das Modell den Zug,
@@ -132,7 +198,7 @@ fn main() {
     print_accuracy("Policy v2 (Suche)",      &accuracy(&test, |f| netz.logit(f)));
 
     let mut netz = netz;
-    netz.note = format!("Policy v2, auf Besuchsverteilung aus {partien} Selbstspielpartien");
+    netz.note = format!("Policy auf Besuchsverteilung aus {partien} Partien, Start: {woher}");
     match std::fs::write(&out, serde_json::to_string(&netz).unwrap_or_default()) {
         Ok(()) => println!("\nGeschrieben: {out}"),
         Err(e) => eprintln!("\nSchreiben fehlgeschlagen: {e}"),
