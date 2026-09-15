@@ -1,0 +1,126 @@
+name: NNUE-Policy
+
+# Den Zug-Prior aus den menschlichen Partien schätzen.
+#
+# Läuft lokal etwa eine halbe Stunde je Breite; hier laufen mehrere Breiten
+# als Matrix nebeneinander, und der Rechner muss nicht anbleiben.
+#
+# Schreibt nichts ins Release — die fertigen Netze kommen als Artefakt heraus
+# und werden von Hand übernommen, nachdem die Arena sie bestätigt hat.
+
+on:
+  workflow_dispatch:
+    inputs:
+      hidden:
+        description: 'Breiten der verborgenen Schicht, durch Komma getrennt'
+        type: string
+        default: '64,128'
+      epochs:
+        description: 'Epochen'
+        type: string
+        default: '40'
+      lr:
+        description: 'Lernrate'
+        type: string
+        default: '0.01'
+      batch:
+        description: 'Mini-Batch-Größe'
+        type: string
+        default: '4096'
+      limit:
+        description: 'Nur so viele Partien (0 = alle)'
+        type: string
+        default: '0'
+
+env:
+  STATE_TAG: nnue-state
+  CARGO_TERM_COLOR: always
+  GH_REPO: ${{ github.repository }}
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        run: |
+          set -euo pipefail
+          echo "matrix=$(echo '${{ inputs.hidden }}' | tr ',' '\n' \
+            | sed 's/ //g' | grep -v '^$' | jq -R . | jq -s -c .)" >> "$GITHUB_OUTPUT"
+
+  train:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        hidden: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Cargo-Cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Trainer bauen
+        run: cargo build --release -p chaturaji-trainer --bin move_model
+
+      - name: Partien holen
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release download "$STATE_TAG" --pattern 'game_data.tar.gz' --dir . --clobber
+          mkdir -p game_data
+          tar xzf game_data.tar.gz
+          # Das Archiv kann die Dateien mit oder ohne führendes Verzeichnis
+          # enthalten; beides soll funktionieren.
+          if [ ! -e game_data ] || [ -z "$(ls -A game_data 2>/dev/null)" ]; then
+            mkdir -p game_data && mv ./*.json game_data/ 2>/dev/null || true
+          fi
+          echo "$(ls game_data/*.json | wc -l) Partien"
+
+      - name: Schätzen
+        run: |
+          set -euo pipefail
+          ./target/release/move_model \
+            --games game_data \
+            --limit ${{ inputs.limit }} \
+            --policy \
+            --pol-epochs ${{ inputs.epochs }} \
+            --pol-lr     ${{ inputs.lr }} \
+            --pol-batch  ${{ inputs.batch }} \
+            --pol-hidden ${{ matrix.hidden }} \
+            --out p.json | tee lauf.log
+          ls -la p*.json
+
+      - name: Zusammenfassung
+        if: always()
+        run: |
+          {
+            echo "### Policy-Netz, ${{ matrix.hidden }} verborgene Einheiten"
+            echo
+            echo '```'
+            sed -n '/Trefferquoten/,$p' lauf.log | head -20
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: policy-h${{ matrix.hidden }}
+          path: |
+            p-policy-h${{ matrix.hidden }}.json
+            lauf.log
+          retention-days: 14
+          if-no-files-found: error
