@@ -8,8 +8,31 @@
 //!
 //! * was das Netz von der Folgestellung hält (aus Sicht des Ziehenden),
 //! * was der Zug-Prior sagt (die Größe, nach der MCTS die Besuche verteilt),
-//! * und vor allem das **Schiedsurteil**: eine tiefe Max^n-Suche mit breitem
-//!   Beam, also deutlich mehr Rechnung als beide Verfahren im Frontend haben.
+//! * und das **Schiedsurteil**: eine tiefe Max^n-Suche mit breitem Beam, also
+//!   deutlich mehr Rechnung als beide Verfahren im Frontend haben.
+//!
+//! # Vorsicht mit dem Schiedsurteil
+//!
+//! Es ist **nicht** stabil. Dieselbe Stellung (Partie 108644945, Halbzug 26),
+//! zwei Einstellungen des Schiedsrichters:
+//!
+//! | Zug   | Tiefe 6 / Beam 8 | Tiefe 7 / Beam 12 |
+//! |-------|------------------|-------------------|
+//! | f3e5  | 0,343 (Platz 14) | 0,444 (Platz 5)   |
+//! | f2e2  | 0,335 (Platz 15) | 0,440 (Platz 6)   |
+//! | f3h2  | 0,455 (Platz 1)  | außerhalb der 10  |
+//! | d1c2  | 0,434 (Platz 4)  | 0,400 (Platz 9)   |
+//!
+//! Die Rangfolge dreht sich fast vollständig. Der Beam ist der Grund: was
+//! außerhalb der besten `b` Züge liegt, sieht die Suche nicht, und eine
+//! Widerlegung, die bei Beam 8 herausfällt, taucht bei Beam 12 auf. Die
+//! Abstände zwischen den Zügen (0,05 bis 0,1 Platzwert) liegen damit innerhalb
+//! dessen, was die Methode selbst an Rauschen erzeugt.
+//!
+//! **Folgerung:** Dieses Werkzeug taugt, um eine Stellung zu verstehen — wer
+//! greift was an, was sieht das Netz, wohin gehen die Besuche. Es taugt
+//! **nicht**, um zwei Suchverfahren gegeneinander zu entscheiden. Dafür bleibt
+//! die Arena zuständig, mit hunderten Partien und mehreren Seeds.
 //!
 //! ```text
 //! cargo run --release -p chaturaji-nnue --example stellung -- \
