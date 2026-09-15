@@ -3,7 +3,7 @@
 // wird per wasm-bindgen exportiert. `engine` hält den einzigen globalen Spiel-
 // zustand; alles UI-seitige (Highlights, Animation, Chat) lebt in dieser Datei.
 import init, { WasmEngine } from './pkg/chaturaji_wasm.js?v=2609150915';
-import { initI18n, setLang, t, getLang, onLanguageChange, applyTranslations, SUPPORTED_LANGS } from './i18n.js';
+import { initI18n, setLang, t, getLang, onLanguageChange, applyTranslations, SUPPORTED_LANGS } from './i18n.js?v=2609150915';
 
 await init({ module_or_path: './pkg/chaturaji_wasm_bg.wasm?v=2609150915' });
 const engine = new WasmEngine();

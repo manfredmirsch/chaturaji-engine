@@ -598,6 +598,12 @@ main {
   padding: var(--rem-040) var(--rem-075);
   border-radius: var(--radius-xl);
 }
+/* Muss nach `.control-group` stehen und dessen `display: flex` aufheben: In
+   dieser Datei gibt es keine allgemeine `.hidden`-Regel, jede Verwendung ist
+   einzeln qualifiziert. Ohne diese Zeile trug das Element die Klasse, blieb
+   aber sichtbar. Gebraucht für Suchtiefe und Simulationen — je nach
+   Suchverfahren ignoriert die Engine den einen oder den anderen Wert. */
+.control-group.hidden { display: none; }
 .control-group label { font-size: var(--rem-085); color: var(--text-dim); }
 input[type=range] { width: var(--px-60); accent-color: var(--color-accent); }
 
