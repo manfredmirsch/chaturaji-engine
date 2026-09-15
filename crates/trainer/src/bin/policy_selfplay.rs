@@ -19,6 +19,35 @@
 //! geholfen haben. Der Prior ist der Teil, den das Selbstspiel bisher gar
 //! nicht trainiert hat.
 //!
+//! # Was die erste Umdrehung ergab: nichts Gutes
+//!
+//! Am 2026-09-15 durchgerechnet — 6.400 Selbstspielpartien mit MCTS 800,
+//! 71.947 Stellungen, daraus ein Netz allein auf der Besuchsverteilung. Es
+//! sagt die Wahl der Suche deutlich besser vorher als das menschlich
+//! trainierte (Top-1 42,3 gegen 37,3 %) und **spielt trotzdem schlechter**:
+//!
+//! | Seed | 1 | 42 | 7 | 99 | Mittel |
+//! |---|---|---|---|---|---|
+//! | v2 gegen v1 | +0,0046 | −0,0567 | −0,0480 | −0,0463 | **−0,037** |
+//!
+//! Zwei Erklärungen, die beide zutreffen dürften:
+//!
+//! * **Die Datenmenge.** v1 lernte aus 862.206 Entscheidungen von Spielern ab
+//!   2400 Elo — eine Wissensquelle von außen. v2 ersetzte das durch 71.947
+//!   Stellungen aus dem eigenen Spiel, also zwölfmal weniger Daten von einem
+//!   schwächeren Lehrer. Ersetzen war der Fehler, nicht Ergänzen.
+//! * **Das Ziel enthält den Prior selbst.** Die Besuche stammen aus einer
+//!   Suche, die v1 folgt. Wer sie nachbildet, lernt „v1 plus Korrektur" — und
+//!   übernimmt dabei auch v1s systematische Fehler überall dort, wo die Suche
+//!   sie nicht korrigiert hat. Bei 800 Simulationen ist dieser
+//!   Verbesserungsschritt schwach, der Nachahmungsfehler aber nicht.
+//!
+//! Naheliegende nächste Fassung: von v1 aus **weitertrainieren** statt bei
+//! Zufall zu beginnen, mit kleiner Lernrate — dann bleibt das menschliche
+//! Wissen erhalten und die Suchkorrektur kommt obendrauf. Und die Partien mit
+//! mehr Simulationen erzeugen, damit der Lehrer deutlicher über seinem
+//! eigenen Prior liegt.
+//!
 //! # Aufruf
 //!
 //! ```text
