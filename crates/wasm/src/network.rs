@@ -202,3 +202,68 @@ fn dense_tanh(layer: &Layer, input: &[f32]) -> Vec<f32> {
         (bias + row.iter().zip(input).map(|(&w, &x)| w * x).sum::<f32>()).tanh()
     }).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chaturaji_core::rules::Rules;
+
+    /// Lädt das Netz, das die Seite ausliefert.
+    fn ausgeliefertes_netz() -> Network {
+        let pfad = concat!(env!("CARGO_MANIFEST_DIR"), "/www/weights.json");
+        let json = std::fs::read_to_string(pfad).expect("www/weights.json muss vorhanden sein");
+        serde_json::from_str(&json).expect("www/weights.json muss ladbar sein")
+    }
+
+    /// Eine Bewertungsfunktion, die überall dasselbe liefert, ist wertlos — und
+    /// für die Baumsuche schlimmer als wertlos: ohne Unterschiede zwischen den
+    /// Blättern wählt PUCT nur noch nach dem Zug-Prior und sucht gar nicht mehr.
+    /// Am 2026-09-15 war genau das der Fall, ohne dass es auffiel: die Ausgabe
+    /// war in jeder Stellung [−1, −1, +1, −1]. Nachgerechnet Schicht für
+    /// Schicht, Startstellung: Merkmale in [0, 1] wie vorgesehen, a1 max 9,0,
+    /// a2 max 107,7, vor tanh [−31,8, −45,6, +49,6, −79,8] — die Aktivierungen
+    /// laufen zwischen l1 und l2 davon, tanh steht danach am Anschlag. Die
+    /// Gewichte selbst sind unauffällig (|w| max 1,03), das Netz ist also nicht
+    /// kaputt geladen, sondern so trainiert worden.
+    ///
+    /// Beide Prüfungen sind `#[ignore]`, damit sie den Build nicht brechen.
+    /// Sobald ein brauchbares Netz ausgeliefert wird, gehört das `#[ignore]`
+    /// weg — dann schützen sie davor, dass so etwas unbemerkt wiederkehrt.
+    /// Schlägt heute fehl — siehe die Notiz unten. `--ignored` zum Nachstellen.
+    #[test]
+    #[ignore = "www/weights.json ist entartet; Kennzeichen des Mangels, kein Regressionsschutz"]
+    fn das_ausgelieferte_netz_unterscheidet_stellungen() {
+        let netz = ausgeliefertes_netz();
+        netz.validate().expect("Architektur muss zur Datei passen");
+
+        // Eine Handvoll deutlich verschiedener Stellungen: Start, sowie je eine
+        // nach ein, zwei und drei Zügen.
+        let mut brett = Board::default();
+        let mut gesehen = Vec::new();
+        gesehen.push(netz.forward(&brett));
+        for _ in 0..3 {
+            let zug = Rules::legal_moves(&brett)[0];
+            brett = Rules::apply_with_effects(&brett, zug);
+            gesehen.push(netz.forward(&brett));
+        }
+
+        let erste = gesehen[0];
+        let unterschiedlich = gesehen.iter()
+            .any(|v| v.iter().zip(&erste).any(|(a, b)| (a - b).abs() > 1e-4));
+        assert!(unterschiedlich,
+            "Netz liefert in allen Stellungen dasselbe: {erste:?}");
+    }
+
+    /// Eine gesättigte Ausgabe trägt keine Information mehr: tanh ist dort flach,
+    /// alle Stellungen fallen auf denselben Wert zusammen.
+    #[test]
+    #[ignore = "www/weights.json ist entartet; Kennzeichen des Mangels, kein Regressionsschutz"]
+    fn das_ausgelieferte_netz_ist_nicht_gesaettigt() {
+        let netz = ausgeliefertes_netz();
+        let v = netz.forward(&Board::default());
+        let am_anschlag = v.iter().filter(|x| x.abs() > 0.999).count();
+        assert!(am_anschlag < 4,
+            "alle vier Ausgaben am Anschlag: {v:?} — tanh ist gesättigt");
+    }
+
+}
