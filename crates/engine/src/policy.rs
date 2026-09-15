@@ -48,15 +48,16 @@ impl MovePrior for PolicyNet {
 
 /// Vorgabe für die Breite der verborgenen Schicht.
 ///
-/// Klein gehalten: das Netz läuft je Zug einmal, bei ~30 Zügen je Knoten und
-/// tausenden Knoten je Suche. 32 Einheiten über 16 Eingaben sind 576 Gewichte —
-/// gegenüber dem Bewertungsnetz mit 348.000 nicht der Rede wert.
+/// Klein gehalten: das Netz läuft je **Zug**, nicht je Blatt wie das
+/// Bewertungsnetz, und ist deshalb nicht so billig, wie die 1.792 Gewichte
+/// gegenüber dessen 348.000 vermuten lassen — von 32 auf 64 Einheiten kostet
+/// gemessen 5,5 % Rechenzeit.
 ///
 /// Nur die **Vorgabe**: ein geladenes Netz bringt seine Breite selbst mit
 /// ([`PolicyNet::hidden`]). Ohne das ließen sich zwei Breiten nicht in einer
 /// Arena gegeneinander stellen, und ein Größenvergleich wäre nicht messbar,
 /// sondern nur behauptbar.
-pub const POLICY_HIDDEN: usize = 32;
+pub const POLICY_HIDDEN: usize = 64;
 
 /// Ein Zwei-Schicht-Netz mit einem Skalar als Ausgabe.
 ///
@@ -188,10 +189,18 @@ impl PolicyNet {
 /// |---|---|---|
 /// | Netz statt Linearform (16 Merkmale) | +0,1343 / +0,0648 / +0,1111 / +0,1053 | **+0,104** |
 /// | 26 statt 16 Merkmale | +0,1372 / +0,1337 | **+0,135** |
+/// | 64 statt 32 Einheiten | +0,0220 / +0,0266 / +0,0451 / +0,0168 | **+0,028** |
 ///
-/// Zusammen rund **+0,24 Platzwert**. Über die bekannte Beziehung von 0,051 je
-/// Verdopplung des Suchaufwands entspricht das gut vier Verdopplungen — als
-/// wären es 12.800 statt 800 Simulationen, ohne die sechzehnfache Rechenzeit.
+/// Zusammen rund **+0,27 Platzwert**. Über die bekannte Beziehung von 0,051 je
+/// Verdopplung des Suchaufwands entspricht das gut fünf Verdopplungen — als
+/// wären es 25.600 statt 800 Simulationen, ohne die zweiunddreißigfache
+/// Rechenzeit.
+///
+/// Die breitere Schicht ist der einzige der drei Schritte, der überhaupt etwas
+/// kostet: gemessen 5,5 % mehr Rechenzeit (66,6 gegen 63,1 s über 24 Partien).
+/// Auf derselben Kurve sind das 0,004 Platzwert — der Handel geht klar auf.
+/// Die vier Seeds liegen einzeln im Rauschen (t 0,73 bis 1,78), aber alle vier
+/// positiv und mit einheitlicher Größe.
 ///
 /// Der zweite Schritt war erst nach dem ersten möglich: die zehn neuen
 /// Merkmale wären für eine Linearform tote Gewichte gewesen. „Springer" allein
@@ -251,8 +260,10 @@ mod tests {
         let netz = PolicyNet::default();
         netz.validate(crate::move_features::N_FEATURES)
             .expect("eingebautes Netz muss zur Merkmalszahl passen");
-        assert_eq!(netz.hidden(), POLICY_HIDDEN);
         assert_eq!(netz.inputs(), crate::move_features::N_FEATURES);
+        // Die Breite ist frei; `POLICY_HIDDEN` ist nur die Vorgabe für ein
+        // frisch angelegtes Netz, nicht die des ausgelieferten.
+        assert!(netz.hidden() >= 16, "unplausibel schmal: {}", netz.hidden());
     }
 
     /// Es muss Züge auch wirklich unterscheiden — ein Netz, das überall
