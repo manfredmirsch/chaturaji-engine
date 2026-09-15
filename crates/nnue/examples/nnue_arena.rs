@@ -96,11 +96,11 @@ struct Args {
     a_root:   RootChoice,
     b_root:   RootChoice,
     // Zugmodell je Seite als Datei. Ohne Angabe gilt das eingebaute.
-    a_model:  Option<String>,
-    b_model:  Option<String>,
-    // Policy-Netz als Prior statt der Linearform, je Seite.
-    a_policy: Option<String>,
-    b_policy: Option<String>,
+    // Prior je Seite als Datei — Linearform oder Policy-Netz, die Datei sagt
+    // selbst, welches von beidem. Zwei getrennte Eingaben dafür wären eine zu
+    // viel: GitHub lässt je Workflow höchstens 25 zu.
+    a_prior:  Option<String>,
+    b_prior:  Option<String>,
 }
 
 /// Welches Suchverfahren eine Seite benutzt.
@@ -159,7 +159,7 @@ fn parse_args() -> Args {
         c_puct: chaturaji_nnue::mcts::DEFAULT_C_PUCT,
         a_iters: None, b_iters: None, a_c_puct: None, b_c_puct: None,
         a_root: RootChoice::Visits, b_root: RootChoice::Visits,
-        a_model: None, b_model: None, a_policy: None, b_policy: None,
+        a_prior: None, b_prior: None,
     };
     let mut i = 1;
     while i < v.len() {
@@ -191,10 +191,8 @@ fn parse_args() -> Args {
             "--b-c-puct"      => a.b_c_puct = next(&mut i).parse().ok(),
             "--a-root"        => a.a_root = wurzelwahl(&next(&mut i)),
             "--b-root"        => a.b_root = wurzelwahl(&next(&mut i)),
-            "--a-model"       => a.a_model = Some(next(&mut i)),
-            "--b-model"       => a.b_model = Some(next(&mut i)),
-            "--a-policy"      => a.a_policy = Some(next(&mut i)),
-            "--b-policy"      => a.b_policy = Some(next(&mut i)),
+            "--a-prior"       => a.a_prior = Some(next(&mut i)),
+            "--b-prior"       => a.b_prior = Some(next(&mut i)),
             _ => {}
         }
         i += 1;
@@ -358,42 +356,41 @@ fn main() {
 
     // Zugmodell je Seite. Ohne Datei das eingebaute — so lässt sich ein neu
     // geschätztes Modell gegen den Stand messen, ohne neu zu übersetzen.
-    let lade_modell = |pfad: &Option<String>| -> MoveModel {
-        match pfad {
-            None => MoveModel::default(),
-            Some(p) => {
-                let txt = std::fs::read_to_string(p)
-                    .unwrap_or_else(|e| { eprintln!("Zugmodell {p}: {e}"); std::process::exit(2) });
-                serde_json::from_str(&txt)
-                    .unwrap_or_else(|e| { eprintln!("Zugmodell {p}: {e}"); std::process::exit(2) })
-            }
+    // Prior je Seite laden. Ob die Datei eine Linearform oder ein Policy-Netz
+    // enthält, entscheidet ihr Inhalt: das Netz hat `w1`, die Linearform `w`.
+    // Ein Schalter dafür wäre eine Fehlerquelle mehr — eine vertauschte Datei
+    // fiele erst an den Ergebnissen auf, und dann als Rauschen.
+    enum Prior { Linear(MoveModel), Netz(PolicyNet) }
+    let lade_prior = |pfad: &Option<String>| -> Prior {
+        let Some(p) = pfad else { return Prior::Linear(MoveModel::default()) };
+        let txt = std::fs::read_to_string(p)
+            .unwrap_or_else(|e| { eprintln!("Prior {p}: {e}"); std::process::exit(2) });
+        let roh: serde_json::Value = serde_json::from_str(&txt)
+            .unwrap_or_else(|e| { eprintln!("Prior {p}: {e}"); std::process::exit(2) });
+        if roh.get("w1").is_some() {
+            let netz: PolicyNet = serde_json::from_value(roh)
+                .unwrap_or_else(|e| { eprintln!("Prior {p}: {e}"); std::process::exit(2) });
+            netz.validate(N_FEATURES)
+                .unwrap_or_else(|e| { eprintln!("Prior {p}: {e}"); std::process::exit(2) });
+            Prior::Netz(netz)
+        } else {
+            Prior::Linear(serde_json::from_value(roh)
+                .unwrap_or_else(|e| { eprintln!("Prior {p}: {e}"); std::process::exit(2) }))
         }
     };
-    let lin_a = lade_modell(&args.a_model);
-    let lin_b = lade_modell(&args.b_model);
-    let lade_policy = |pfad: &Option<String>| -> Option<PolicyNet> {
-        pfad.as_ref().map(|p| {
-            let txt = std::fs::read_to_string(p)
-                .unwrap_or_else(|e| { eprintln!("Policy-Netz {p}: {e}"); std::process::exit(2) });
-            let netz: PolicyNet = serde_json::from_str(&txt)
-                .unwrap_or_else(|e| { eprintln!("Policy-Netz {p}: {e}"); std::process::exit(2) });
-            netz.validate(N_FEATURES)
-                .unwrap_or_else(|e| { eprintln!("Policy-Netz {p}: {e}"); std::process::exit(2) });
-            netz
-        })
-    };
-    let pol_a = lade_policy(&args.a_policy);
-    let pol_b = lade_policy(&args.b_policy);
-    // Der Trait-Verweis zeigt entweder auf das Netz oder auf die Linearform.
-    let modell_a: &dyn MovePrior = match &pol_a { Some(n) => n, None => &lin_a };
-    let modell_b: &dyn MovePrior = match &pol_b { Some(n) => n, None => &lin_b };
-    if args.a_model.is_some() || args.b_model.is_some()
-        || args.a_policy.is_some() || args.b_policy.is_some() {
-        let name = |p: &Option<PolicyNet>, l: &MoveModel| match p {
-            Some(n) => n.note.clone(),
-            None    => l.note.clone(),
+    let prior_a = lade_prior(&args.a_prior);
+    let prior_b = lade_prior(&args.b_prior);
+    fn als_trait(p: &Prior) -> &dyn MovePrior {
+        match p { Prior::Linear(m) => m, Prior::Netz(n) => n }
+    }
+    let modell_a = als_trait(&prior_a);
+    let modell_b = als_trait(&prior_b);
+    if args.a_prior.is_some() || args.b_prior.is_some() {
+        let name = |p: &Prior| match p {
+            Prior::Linear(m) => format!("linear: {}", m.note),
+            Prior::Netz(n)   => format!("Netz: {}", n.note),
         };
-        println!("Prior A: {} | B: {}", name(&pol_a, &lin_a), name(&pol_b, &lin_b));
+        println!("Prior A: {} | B: {}", name(&prior_a), name(&prior_b));
     }
 
     // Gruppen dieses Shards: reihum, damit jeder Shard dieselbe Mischung an
