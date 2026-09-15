@@ -95,12 +95,16 @@ const MAX_DESCENT: usize = 200;
 
 /// Wonach der Zug an der Wurzel gewählt wird.
 ///
-/// AlphaZero nimmt die Besuchszahl, und das ist bei großem Budget auch richtig:
-/// sie fasst zusammen, wohin die Suche ihre Aufmerksamkeit gelenkt hat, und ist
-/// robuster als ein einzelner Mittelwert. Bei kleinem Budget kippt das
-/// Argument: bei 800 Simulationen auf 30 Züge bekommt jeder Zug nur rund 27
-/// Besuche, und die Verteilung folgt dann überwiegend dem Prior — also dem,
-/// was ein Mensch gespielt hätte, nicht dem, was die Suche herausgefunden hat.
+/// AlphaZero nimmt die Besuchszahl. Die Überlegung, dass das bei kleinem Budget
+/// kippen müsste — bei 800 Simulationen auf 30 Züge bekommt jeder Zug nur rund
+/// 27 Besuche, die Verteilung folgt also überwiegend dem Prior —, ist
+/// **gemessen falsch**: `Value` verliert gegen `Visits` um −0,156 und −0,137
+/// Platzwert (je 576 Partien, zwei Seeds, gleiches Netz, 2026-09-15).
+///
+/// Dasselbe Muster wie bei [`DEFAULT_C_PUCT`]: die Besuchszahl mittelt über
+/// alle Simulationen, die durch ein Kind liefen, der Q-Wert nur über dessen
+/// eigene. Gerade bei wenigen Besuchen ist er das rauschigere Maß, nicht das
+/// schärfere. `Value` bleibt als Schalter für weitere Versuche erhalten.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootChoice {
     /// Meistbesuchter Zug.
