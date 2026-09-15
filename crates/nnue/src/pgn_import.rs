@@ -133,7 +133,7 @@ pub fn load_games_from_json_dir(dir: &str) -> Vec<ParsedGame> {
 
 // ─── Internes Parsing ─────────────────────────────────────────────────────────
 
-fn parse_positions_from_pgn(text: &str) -> Option<Vec<Board>> {
+pub fn parse_positions_from_pgn(text: &str) -> Option<Vec<Board>> {
     let mut move_text = String::new();
     let mut in_header = false;
 

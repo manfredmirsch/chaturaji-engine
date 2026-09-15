@@ -250,7 +250,7 @@ fn apply_beam(board: &Board, moves: &mut Vec<Move>, beam_width: usize, order: Be
 ///
 /// Die TT speichert (Tiefe, Scorevektor); ein Eintrag wird nur verwendet,
 /// wenn die gespeicherte Tiefe ≥ der angefragten Tiefe ist.
-fn nnue_maxn(
+pub fn nnue_maxn(
     net:        &NnueNetwork,
     board:      &Board,
     depth:      u8,
