@@ -2,10 +2,10 @@
 // Die gesamte Spiel-Logik (Zuggenerierung, Suche, Bewertung) liegt in Rust und
 // wird per wasm-bindgen exportiert. `engine` hält den einzigen globalen Spiel-
 // zustand; alles UI-seitige (Highlights, Animation, Chat) lebt in dieser Datei.
-import init, { WasmEngine } from './pkg/chaturaji_wasm.js?v=2609150915';
-import { initI18n, setLang, t, getLang, onLanguageChange, applyTranslations, SUPPORTED_LANGS } from './i18n.js?v=2609150915';
+import init, { WasmEngine } from './pkg/chaturaji_wasm.js?v=2462553011';
+import { initI18n, setLang, t, getLang, onLanguageChange, applyTranslations, SUPPORTED_LANGS } from './i18n.js?v=2462553011';
 
-await init({ module_or_path: './pkg/chaturaji_wasm_bg.wasm?v=2609150915' });
+await init({ module_or_path: './pkg/chaturaji_wasm_bg.wasm?v=2462553011' });
 const engine = new WasmEngine();
 
 // Sprache (Default: en) frühestmöglich anwenden — vor dem ersten draw().
