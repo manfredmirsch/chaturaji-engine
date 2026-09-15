@@ -92,6 +92,19 @@ pub struct GenTrainConfig {
     pub lr:             f32,
     pub epochs:         u32,
     /// Gewicht der Suchbewertung gegenüber dem Partieausgang, 0…1.
+    ///
+    /// `Ziel = (1 − q) · Partieausgang + q · Suchbewertung`.
+    ///
+    /// Stand seit Einführung auf 0,10 und war bis 2026-09-15 nie geprüft. Dann
+    /// nachgemessen: vier `gen`-Runden mit 0,30 gegen vier mit 0,10, gleiches
+    /// Startnetz, gleicher `run_seed`, sonst identisch. In der Arena über vier
+    /// Seeds +0,0174 / −0,0017 / −0,0185 / +0,0122, im Mittel **+0,002** —
+    /// kein Befund, und damit ein weiterer Regler, der den Fixpunkt des
+    /// Selbstspiels nicht bewegt.
+    ///
+    /// Der Trainingsverlust sinkt dabei deutlich (0,181 statt 0,270). Das ist
+    /// erwartbar und aussagelos: mit höherem `q` besteht das Ziel zu einem
+    /// größeren Teil aus dem, was das Netz ohnehin denkt.
     pub q_weight:       f32,
 }
 
