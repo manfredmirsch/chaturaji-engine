@@ -192,8 +192,18 @@ impl PolicyNet {
 /// | 64 statt 32 Einheiten | +0,0220 / +0,0266 / +0,0451 / +0,0168 | **+0,028** |
 /// | 34 statt 26 Merkmale | +0,1036 / +0,1134 | **+0,109** |
 /// | 40 statt 34 Merkmale | −0,0243 / +0,0388 / +0,0816 / +0,0411 | **+0,034** |
+/// | nur Züge von Platz 1 und 2 | +0,0527 / +0,0440 / +0,0411 / +0,0087 | **+0,037** |
 ///
-/// Zusammen rund **+0,41 Platzwert**, nach Abzug der Rechenzeit +0,39. Über die bekannte Beziehung von 0,051 je
+/// Zusammen rund **+0,45 Platzwert**, nach Abzug der Rechenzeit +0,43.
+///
+/// Der letzte Schritt kostet nichts und wirft trotzdem Daten weg: gelernt wird
+/// nur noch aus den Zügen der Erst- und Zweitplatzierten, 472.375 statt
+/// 862.206 Entscheidungen. Ein Viertplatzierter hat sichtbar etwas falsch
+/// gemacht, und seine Züge als Vorbild zu nehmen lehrt genau das mit.
+///
+/// Sanfter zu gewichten statt hart auszuwählen ist dagegen schlechter
+/// (−0,016), und eine höhere Ratinggrenze bringt nichts (−0,013 bei 2600) —
+/// alle Partien stammen ohnehin von Spielern ab 2400. Über die bekannte Beziehung von 0,051 je
 /// Verdopplung des Suchaufwands entspricht das gut sieben Verdopplungen — als
 /// liefen 100.000 statt 800 Simulationen.
 ///
