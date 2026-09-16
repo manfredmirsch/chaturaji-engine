@@ -15,14 +15,21 @@ header('Content-Type: application/json; charset=utf-8');
 // Aufrufe vom Bookmarklet kommen aus einer chess.com-Seite, sind also
 // site-fremd. Ohne diese Köpfe schickt der Browser die Anfrage zwar ab, hält
 // die Antwort aber zurück, und das Bookmarklet könnte nicht sagen, ob das
-// Speichern geklappt hat. Nur chess.com wird zugelassen; ein offenes `*`
-// erlaubte jeder beliebigen Seite, hier Dateien abzulegen.
+// Speichern geklappt hat.
+//
+// **Diese Köpfe schützen nichts.** `Access-Control-Allow-Origin` weist keine
+// Anfrage ab; es sagt dem *Browser* nur, ob er die Antwort an das aufrufende
+// Skript weiterreichen darf. Die Anfrage selbst kommt an und wird ausgeführt,
+// und wer nicht im Browser sitzt — curl, ein Skript, irgendein Server —
+// ignoriert CORS vollständig. Bis 2026-09-16 konnte deshalb jeder beliebige
+// Dateien hier ablegen; nachgewiesen mit einem curl-Aufruf ohne Herkunft. Was
+// den Zugang regelt, ist das Token weiter unten.
 $erlaubt = ['https://www.chess.com', 'https://chess.com'];
 $herkunft = $_SERVER['HTTP_ORIGIN'] ?? '';
 if (in_array($herkunft, $erlaubt, true)) {
     header('Access-Control-Allow-Origin: ' . $herkunft);
     header('Vary: Origin');
-    header('Access-Control-Allow-Headers: Content-Type');
+    header('Access-Control-Allow-Headers: Content-Type, X-Chaturaji-Token');
     header('Access-Control-Allow-Methods: POST, OPTIONS');
     header('Access-Control-Max-Age: 86400');
 }
@@ -45,9 +52,49 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     fail(405, 'Nur POST erlaubt');
 }
 
+// ─── Zugang ──────────────────────────────────────────────────────────────────
+//
+// Das Token liegt in `token.php`, einer Datei, die es zurückgibt statt es
+// auszugeben: wer sie im Browser aufruft, bekommt eine leere Seite, weil PHP
+// sie ausführt. Sie steht in `.gitignore` und wird nur per FTP hochgeladen.
+//
+// Fehlt sie, wird **abgewiesen**, nicht durchgelassen. Ein vergessenes
+// Hochladen soll das Speichern hörbar kaputtmachen und nicht still die Tür
+// wieder öffnen.
+// Der Körper wird einmal gelesen und weitergereicht. `php://input` mehrfach
+// zu öffnen ist je nach PHP-Aufbau nicht verlässlich.
 $raw = file_get_contents('php://input');
 if ($raw === false || $raw === '') {
     fail(400, 'Leerer Request-Body');
+}
+
+// Obergrenze. Die größte der 6.367 vorhandenen Analysen misst 157 KB, im
+// Mittel sind es 44 KB; ein Megabyte ist reichlich und begrenzt trotzdem, was
+// ein einzelner Aufruf anrichten kann.
+const MAX_BYTES = 1048576;
+if (strlen($raw) > MAX_BYTES) {
+    fail(413, 'Spiel-Objekt zu groß (über ' . (MAX_BYTES / 1024) . ' KB).');
+}
+
+$tokenDatei = __DIR__ . '/token.php';
+$erwartet = is_file($tokenDatei) ? (include $tokenDatei) : null;
+if (!is_string($erwartet) || strlen($erwartet) < 16) {
+    fail(503, 'Kein Token hinterlegt — token.php fehlt oder ist unbrauchbar.');
+}
+
+// Kopf bevorzugt; das Feld im Körper ist für Aufrufer ohne eigene Kopfzeilen.
+$gesendet = $_SERVER['HTTP_X_CHATURAJI_TOKEN'] ?? '';
+
+// `hash_equals` statt `===`: der Vergleich läuft in konstanter Zeit und
+// verrät über die Dauer nicht, wie viele Zeichen schon stimmten.
+if (!is_string($gesendet) || !hash_equals($erwartet, $gesendet)) {
+    // Der Körper darf ein `token`-Feld tragen, für Aufrufer ohne eigene
+    // Kopfzeilen.
+    $vorab = json_decode($raw, true);
+    $imKoerper = is_array($vorab) ? ($vorab['token'] ?? '') : '';
+    if (!is_string($imKoerper) || !hash_equals($erwartet, $imKoerper)) {
+        fail(403, 'Token fehlt oder stimmt nicht.');
+    }
 }
 
 $payload = json_decode($raw, true);
@@ -59,10 +106,18 @@ $filename = $payload['filename'] ?? '';
 $game     = $payload['game'] ?? null;
 $baseFile = $payload['baseFile'] ?? null; // gesetzt, wenn ein bestehendes Spiel aufgezeichnet wurde
 
-// Dateiname streng validieren (kein Path-Traversal, nur *.json)
+// Dateiname streng validieren. Erlaubt ist nur, was die App selbst erzeugt:
+//
+//   108644945.json        eine heruntergeladene Partie
+//   108644945-1.json      eine Aufzeichnung als Variante davon
+//   recording-1758…json   eine frisch aufgezeichnete Partie
+//
+// Vorher galt `[\w.-]+\.json`, also praktisch jeder Name — damit ließe sich
+// eine bestehende Analyse unter ihrem eigenen Namen überschreiben. Alle 6.367
+// vorhandenen Dateien passen in das engere Muster.
 if (!is_string($filename)
     || strpos($filename, '..') !== false
-    || !preg_match('/^[\w.-]+\.json$/', $filename)) {
+    || !preg_match('/^(\d+(-\d+)?|recording-\d+)\.json$/', $filename)) {
     fail(400, 'Ungültiger Dateiname');
 }
 $filename = basename($filename); // doppelt absichern

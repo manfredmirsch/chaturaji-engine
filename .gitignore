@@ -24,3 +24,4 @@ progress.json
 opt_state.bin
 *.jsonl
 scripts/__pycache__/
+crates/wasm/www/token.php

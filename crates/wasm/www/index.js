@@ -2,10 +2,10 @@
 // Die gesamte Spiel-Logik (Zuggenerierung, Suche, Bewertung) liegt in Rust und
 // wird per wasm-bindgen exportiert. `engine` hält den einzigen globalen Spiel-
 // zustand; alles UI-seitige (Highlights, Animation, Chat) lebt in dieser Datei.
-import init, { WasmEngine } from './pkg/chaturaji_wasm.js?v=6223097985';
-import { initI18n, setLang, t, getLang, onLanguageChange, applyTranslations, SUPPORTED_LANGS } from './i18n.js?v=6223097985';
+import init, { WasmEngine } from './pkg/chaturaji_wasm.js?v=0597204877';
+import { initI18n, setLang, t, getLang, onLanguageChange, applyTranslations, SUPPORTED_LANGS } from './i18n.js?v=0597204877';
 
-await init({ module_or_path: './pkg/chaturaji_wasm_bg.wasm?v=6223097985' });
+await init({ module_or_path: './pkg/chaturaji_wasm_bg.wasm?v=0597204877' });
 const engine = new WasmEngine();
 
 // Sprache (Default: en) frühestmöglich anwenden — vor dem ersten draw().
@@ -903,6 +903,24 @@ function closeSaveDialog() {
   document.getElementById('record-save-dialog').classList.add('hidden');
 }
 
+// Das Token für save-game.php, einmal erfragt und danach im Browser behalten.
+//
+// Ohne Token schreibt der Server nicht mehr — vorher konnte jeder per curl
+// beliebige Dateien ablegen, weil CORS Anfragen nicht abweist, sondern nur
+// Antworten zurückhält. Es steht bewusst nicht im Quelltext: was die Seite
+// ausliefert, ist öffentlich.
+function holeToken() {
+  let t = null;
+  try { t = localStorage.getItem('chaturaji.token'); } catch (e) {}
+  if (!t) {
+    t = prompt('Speicher-Token (einmalig, steht in token.php auf dem Server):');
+    if (!t) return null;
+    try { localStorage.setItem('chaturaji.token', t.trim()); } catch (e) {}
+    t = t.trim();
+  }
+  return t;
+}
+
 // Baut das Spiel-JSON (gleiches Format wie gespeicherte Spiele) und schreibt es
 // serverseitig über save-game.php (lokal: Node-Pendant in server.js). Danach App-Liste neu laden.
 async function saveRecording() {
@@ -911,7 +929,12 @@ async function saveRecording() {
   let filename = ($('rec-dlg-filename').value || '').trim();
   if (!filename) filename = 'recording-' + Date.now() + '.json';
   if (!filename.endsWith('.json')) filename += '.json';
-  if (!/^[\w.-]+$/.test(filename)) { alert(t('record.badFilename')); return; }
+  // Dasselbe Muster wie in save-game.php: Spielnummer, Variante davon, oder
+  // eine frische Aufzeichnung. Hier geprüft, damit der Fehler im Dialog
+  // auffällt und nicht erst als 400 vom Server.
+  if (!/^(\d+(-\d+)?|recording-\d+)\.json$/.test(filename)) {
+    alert(t('record.badFilename')); return;
+  }
 
   const engMoves = [...recordPrefix.map(m => m.engine), ...recordedMoves.map(m => m.engine)];
   const times    = [...recordPrefix.map(m => m.time),   ...recordedMoves.map(m => m.time)];
@@ -934,11 +957,19 @@ async function saveRecording() {
     // Aufzeichnung eines bestehenden Spiels: der Server vergibt anhand von
     // baseFile den nächsten freien Namen "alterName-<Nr>.json" (autoritativ, auch
     // bei zwischenzeitlich veraltetem Client-Index).
+    const token = holeToken();
+    if (!token) return;
     const r = await fetch('save-game.php', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Chaturaji-Token': token },
       body: JSON.stringify({ filename, game, baseFile: lastLoadedFile || undefined }),
     });
+    if (r.status === 403) {
+      // Falsches Token: einmal vergessen ist besser als dauerhaft festhalten.
+      localStorage.removeItem('chaturaji.token');
+      alert('Das Speicher-Token stimmt nicht. Beim nächsten Versuch wird erneut gefragt.');
+      return;
+    }
     if (!r.ok) { alert(t('record.saveFailed', { err: r.status + ' ' + await r.text() })); return; }
     let savedFile = filename;
     try { const j = await r.json(); if (j && j.file) savedFile = j.file; } catch { /* Antwort optional */ }
@@ -1001,7 +1032,7 @@ unloadBtn.addEventListener('click', () => {
 // File-Picker bleibt als manueller Override.
 (async () => {
   try {
-    const r = await fetch('weights.json?v=6223097985');
+    const r = await fetch('weights.json?v=0597204877');
     if (!r.ok) return;
     const text = await r.text();
     const err  = engine.load_network_json(text);
@@ -1026,7 +1057,7 @@ unloadBtn.addEventListener('click', () => {
 (async () => {
   const bookStatus = document.getElementById('book-status');
   try {
-    const r = await fetch('opening_book.json?v=6223097985');
+    const r = await fetch('opening_book.json?v=0597204877');
     if (!r.ok) return;
     const text = await r.text();
     const err  = engine.load_book_json(text);
