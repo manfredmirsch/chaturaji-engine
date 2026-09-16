@@ -178,8 +178,10 @@ impl WasmEngine {
             iters:   800,
             c_puct:  DEFAULT_C_PUCT,
             root:    RootChoice::Visits,
-            fpu:     Fpu::Null,
-            reuse:   false,
+            // Beide gemessen: Wiederverwendung +0,064, FPU +0,067, zusammen
+            // +0,112 Platzwert über vier Seeds — bei messbar null Kosten.
+            fpu:     Fpu::ElternMinus(0.2),
+            reuse:   true,
             sims_per_ms: 3.0,
             mcts_cache:  None,
         }
@@ -269,6 +271,23 @@ impl WasmEngine {
     /// zeigten die Kandidatenpfeile die Züge der vorigen Stellung.
     fn invalidate_mcts(&mut self) { self.mcts_cache = None; }
 
+    /// Nach einem gespielten Zug: Baum auf das entsprechende Kind umsetzen.
+    ///
+    /// Muss nach **jedem** Halbzug geschehen, auch nach denen der Gegner — die
+    /// nächste eigene Entscheidung liegt vier Halbzüge weiter, und nur wer alle
+    /// dazwischen mitgeht, findet seinen Teilbaum wieder. `board_davor` ist die
+    /// Stellung **vor** dem Zug.
+    fn mcts_advance(&mut self, board_davor: &Board, mv: chaturaji_core::board::Move) {
+        self.mcts_cache = None;
+        if self.reuse { self.mcts.advance(board_davor, mv); } else { self.mcts.reset(); }
+    }
+
+    /// Bei allem, was nicht ein einzelner Zug vorwärts ist: Baum wegwerfen.
+    fn mcts_reset(&mut self) {
+        self.mcts_cache = None;
+        self.mcts.reset();
+    }
+
     /// Buchzug, falls die Stellung im geladenen Buch steht.
     ///
     /// Die Alpha-Beta-Suchen fragen das Buch selbst ab. MCTS tut das nicht,
@@ -331,9 +350,10 @@ impl WasmEngine {
     pub fn apply_move(&mut self, notation: &str) -> bool {
         match parse_move(&self.board, notation) {
             Ok(mv) => {
-                self.history.push(self.board.clone());
-                self.board = Rules::apply_with_effects(&self.board, mv);
-                self.invalidate_mcts();
+                let davor = self.board.clone();
+                self.history.push(davor.clone());
+                self.board = Rules::apply_with_effects(&davor, mv);
+                self.mcts_advance(&davor, mv);
                 true
             }
             Err(_) => false,
@@ -343,7 +363,8 @@ impl WasmEngine {
     pub fn undo(&mut self) -> bool {
         if let Some(prev) = self.history.pop() {
             self.board = prev;
-            self.invalidate_mcts();
+            // Zurücknehmen ist kein Schritt vorwärts — der Baum passt nicht mehr.
+            self.mcts_reset();
             true
         } else { false }
     }
@@ -362,7 +383,7 @@ impl WasmEngine {
         };
         if !self.board.active[c.idx()] { return false; }
         self.history.push(self.board.clone());
-        self.invalidate_mcts();
+        self.mcts_reset();
         self.board.active[c.idx()] = false;
         if self.board.to_move == c {
             let mut next = c.next();
@@ -581,9 +602,10 @@ impl WasmEngine {
             let gewaehlt = self.engine.book_move(&self.board)
                 .or_else(|| self.mcts_search().map(|r| r.best));
             if let Some(mv) = gewaehlt {
-                self.history.push(self.board.clone());
-                self.board = Rules::apply_with_effects(&self.board, mv);
-                self.invalidate_mcts();
+                let davor = self.board.clone();
+                self.history.push(davor.clone());
+                self.board = Rules::apply_with_effects(&davor, mv);
+                self.mcts_advance(&davor, mv);
                 return true;
             }
             // Kein Netz geladen: unten weiter mit BRS statt gar nicht zu ziehen.
@@ -602,9 +624,10 @@ impl WasmEngine {
             AlphaBeta::Paranoid => engine.search_paranoid(board, depth, net_eval),
         };
         if let Some(mv) = result.best_move {
-            self.history.push(self.board.clone());
-            self.board = Rules::apply_with_effects(&self.board, mv);
-            self.invalidate_mcts();
+            let davor = self.board.clone();
+            self.history.push(davor.clone());
+            self.board = Rules::apply_with_effects(&davor, mv);
+            self.mcts_advance(&davor, mv);
             true
         } else { false }
     }
@@ -631,7 +654,8 @@ impl WasmEngine {
                 // genau das, was der Trainer beim Weiterlernen auch tut.
                 net.ensure_input_size();
                 self.network = Some(net);
-                self.invalidate_mcts();
+                // Anderes Netz heißt andere Bewertungen — der alte Baum ist wertlos.
+                self.mcts_reset();
                 None
             }
             Err(e)  => Some(format!("Fehler: {e}")),
@@ -646,7 +670,7 @@ impl WasmEngine {
         serde_wasm_bindgen::to_value(&info).unwrap()
     }
 
-    pub fn unload_network(&mut self) { self.network = None; self.invalidate_mcts(); }
+    pub fn unload_network(&mut self) { self.network = None; self.mcts_reset(); }
 
     // ── Eröffnungsbuch ────────────────────────────────────────────────────────
 
@@ -692,7 +716,7 @@ impl WasmEngine {
                 self.history.clear();
                 self.board = board;
                 self.engine.new_game();
-                self.invalidate_mcts();
+                self.mcts_reset();
                 None
             }
             Err(e) => Some(e),
@@ -707,7 +731,7 @@ impl WasmEngine {
         self.history.clear();
         self.board = Board::default();
         self.engine.new_game();
-        self.invalidate_mcts();
+        self.mcts_reset();
     }
 }
 

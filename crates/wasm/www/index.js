@@ -2,10 +2,10 @@
 // Die gesamte Spiel-Logik (Zuggenerierung, Suche, Bewertung) liegt in Rust und
 // wird per wasm-bindgen exportiert. `engine` hält den einzigen globalen Spiel-
 // zustand; alles UI-seitige (Highlights, Animation, Chat) lebt in dieser Datei.
-import init, { WasmEngine } from './pkg/chaturaji_wasm.js?v=0490457573';
-import { initI18n, setLang, t, getLang, onLanguageChange, applyTranslations, SUPPORTED_LANGS } from './i18n.js?v=0490457573';
+import init, { WasmEngine } from './pkg/chaturaji_wasm.js?v=7629318515';
+import { initI18n, setLang, t, getLang, onLanguageChange, applyTranslations, SUPPORTED_LANGS } from './i18n.js?v=7629318515';
 
-await init({ module_or_path: './pkg/chaturaji_wasm_bg.wasm?v=0490457573' });
+await init({ module_or_path: './pkg/chaturaji_wasm_bg.wasm?v=7629318515' });
 const engine = new WasmEngine();
 
 // Sprache (Default: en) frühestmöglich anwenden — vor dem ersten draw().
@@ -1001,7 +1001,7 @@ unloadBtn.addEventListener('click', () => {
 // File-Picker bleibt als manueller Override.
 (async () => {
   try {
-    const r = await fetch('weights.json?v=0490457573');
+    const r = await fetch('weights.json?v=7629318515');
     if (!r.ok) return;
     const text = await r.text();
     const err  = engine.load_network_json(text);
@@ -1026,7 +1026,7 @@ unloadBtn.addEventListener('click', () => {
 (async () => {
   const bookStatus = document.getElementById('book-status');
   try {
-    const r = await fetch('opening_book.json?v=0490457573');
+    const r = await fetch('opening_book.json?v=7629318515');
     if (!r.ok) return;
     const text = await r.text();
     const err  = engine.load_book_json(text);
