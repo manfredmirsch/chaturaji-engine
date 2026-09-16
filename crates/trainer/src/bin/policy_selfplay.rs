@@ -93,23 +93,28 @@ fn main() {
     let mut epochs = 30u32;
     let mut lr     = 0.01f32;
     let mut batch  = 4096usize;
-    /// Von einem vorhandenen Netz aus weitertrainieren statt bei Zufall zu
-    /// beginnen. `"eingebaut"` nimmt Policy v1 aus der Engine.
+    // Von einem vorhandenen Netz aus weitertrainieren statt bei Zufall zu
     let mut init   = String::new();
-    /// Menschliche Partien zusätzlich einbeziehen statt nur die eigenen.
-    ///
-    /// Der erste Anlauf ersetzte 862.206 menschliche Entscheidungen durch
-    /// 71.947 eigene und verlor damit 0,037 Platzwert. Beide Quellen zusammen
-    /// zu nehmen ist die naheliegende Verbesserung: das Wissen von außen
-    /// bleibt, die Suchkorrektur kommt dazu.
+    // Menschliche Partien zusätzlich einbeziehen statt nur die eigenen.
+    //
+    // Der erste Anlauf ersetzte 862.206 menschliche Entscheidungen durch
     let mut human  = String::new();
-    /// Wie stark die Selbstspiel-Stellungen gegenüber den menschlichen zählen.
-    ///
-    /// Ohne das entschiede die schiere Menge: zwölfmal mehr menschliche
-    /// Entscheidungen hieße, die Suchkorrektur ginge im Rauschen unter.
+    // Wie stark die Selbstspiel-Stellungen gegenüber den menschlichen zählen.
+    //
+    // Ohne das entschiede die schiere Menge: zwölfmal mehr menschliche
     let mut mix    = 4.0f32;
     // Anteil der Partien, der zum Messen zurückgehalten wird.
     let mut test_anteil = 10usize;
+    // Stellungen überspringen, in denen die Suche selbst kaum entschieden hat.
+    //
+    // Gemessen über 45.244 Stellungen: der Abstand zwischen Spitzenzug und
+    // Platz 2 liegt im Median bei 0,163 der Besuche, aber in 29,6 % darunter
+    // 0,05. Dort ist die Wahl ein Münzwurf, und ein Netz, das darauf
+    // trainiert, lernt Rauschen als wäre es Wissen.
+    let mut min_abstand = 0.0f32;
+    // Statt zu filtern nach dem Abstand gewichten — sanfter, und es wirft
+    // keine Stellung ganz weg.
+    let mut abstand_gewicht = false;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -124,10 +129,14 @@ fn main() {
             "--init"   => { init   = wert; i += 1; }
             "--human"  => { human  = wert; i += 1; }
             "--mix"    => { mix    = wert.parse().unwrap_or(mix); i += 1; }
+            "--min-abstand"    => { min_abstand = wert.parse().unwrap_or(0.0); i += 1; }
+            "--abstand-gewicht" => { abstand_gewicht = true; }
             "--help" | "-h" => {
                 println!("policy_selfplay --games <jsonl> [--out datei] [--epochs n] [--lr f] [--batch n]");
                 println!("                [--init eingebaut|<datei>]   von dort aus weitertrainieren");
                 println!("                [--human <verz>] [--mix f]   menschliche Partien dazunehmen");
+                println!("                [--min-abstand f]            knappe Entscheidungen überspringen");
+                println!("                [--abstand-gewicht]          nach dem Abstand gewichten");
                 return;
             }
             other => { eprintln!("unbekanntes Argument: {other}"); std::process::exit(2); }
@@ -137,13 +146,13 @@ fn main() {
     if games.is_empty() { eprintln!("--games fehlt"); std::process::exit(2); }
 
     let t0 = std::time::Instant::now();
-    let (daten, partien, ohne_suche) = sammle(&games);
+    let (daten, partien, ohne_suche, knapp) = sammle(&games, min_abstand, abstand_gewicht);
     if daten.is_empty() {
         eprintln!("Keine Stellungen mit Besuchsverteilung — wurde mit --record-visits erzeugt?");
         std::process::exit(1);
     }
     println!(
-        "{partien} Partien, {} Stellungen mit Suche ({ohne_suche} ohne), {:.1} s",
+        "{partien} Partien, {} Stellungen mit Suche ({ohne_suche} ohne, {knapp} zu knapp), {:.1} s",
         daten.len(), t0.elapsed().as_secs_f32(),
     );
 
@@ -183,7 +192,8 @@ fn main() {
     };
     println!("─── Policy-Netz auf der Besuchsverteilung, Start: {woher} ───");
     let (netz, letzte, erste) =
-        fit_policy_from(start, &train, !human.is_empty(), epochs, lr, batch, 20260915);
+        fit_policy_from(start, &train, !human.is_empty() || abstand_gewicht,
+                        epochs, lr, batch, 20260915);
     println!("  {} Parameter, {:+.5} → {:+.5}", netz.param_count(), erste, letzte);
 
     // Gemessen wird gegen den meistbesuchten Zug: trifft das Modell den Zug,
@@ -211,7 +221,8 @@ fn main() {
 ///
 /// Rückgabe: Entscheidungen, Zahl der Partien, Zahl der übersprungenen
 /// Halbzüge (Buchzug, ε-Zufallszug — dort hat keine Suche stattgefunden).
-fn sammle(pfad: &str) -> (Vec<Decision>, usize, usize) {
+fn sammle(pfad: &str, min_abstand: f32, abstand_gewicht: bool)
+    -> (Vec<Decision>, usize, usize, usize) {
     let text = match std::fs::read_to_string(pfad) {
         Ok(t) => t,
         Err(e) => { eprintln!("{pfad}: {e}"); std::process::exit(1); }
@@ -220,6 +231,7 @@ fn sammle(pfad: &str) -> (Vec<Decision>, usize, usize) {
     let mut alle = Vec::new();
     let mut partien = 0usize;
     let mut ohne_suche = 0usize;
+    let mut knapp = 0usize;
 
     for zeile in text.lines() {
         let json: serde_json::Value = match serde_json::from_str(zeile) {
@@ -264,7 +276,19 @@ fn sammle(pfad: &str) -> (Vec<Decision>, usize, usize) {
                     .map(|(i, _)| i).unwrap_or(0);
 
                 if legal.len() > 1 {
-                    alle.push(Decision { feats, chosen, weight: 1.0, target: Some(target) });
+                    // Wie deutlich hat die Suche entschieden? Der Abstand
+                    // zwischen dem meistbesuchten Zug und dem zweitbesten,
+                    // als Anteil aller Besuche.
+                    let mut sortiert: Vec<f32> = target.clone();
+                    sortiert.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+                    let abstand = sortiert[0] - sortiert.get(1).copied().unwrap_or(0.0);
+
+                    if abstand < min_abstand {
+                        knapp += 1;
+                    } else {
+                        let gewicht = if abstand_gewicht { abstand.max(0.01) } else { 1.0 };
+                        alle.push(Decision { feats, chosen, weight: gewicht, target: Some(target) });
+                    }
                 }
             } else {
                 ohne_suche += 1;
@@ -280,5 +304,5 @@ fn sammle(pfad: &str) -> (Vec<Decision>, usize, usize) {
         }
     }
 
-    (alle, partien, ohne_suche)
+    (alle, partien, ohne_suche, knapp)
 }

@@ -25,7 +25,7 @@ use chaturaji_core::notation::move_to_str;
 use chaturaji_core::zobrist::{hash_board, ZobristKeys};
 use chaturaji_engine::book::OpeningBook;
 use chaturaji_engine::move_features::{fast_features, MoveFeatureContext, MoveModel};
-use crate::mcts::{Fpu, Mcts, MctsConfig, RootChoice};
+use crate::mcts::{Mcts, MctsConfig};
 use crate::network::NnueNetwork;
 
 pub struct SelfPlayConfig {
@@ -484,8 +484,7 @@ pub fn play_game(
                 }
                 Generator::Mcts { iterations, c_puct } => {
                     let r = baum.search(&|b: &Board| net.forward(b), &modell, &board,
-                                        &MctsConfig { iterations, c_puct, root: RootChoice::Visits,
-                                                      fpu: Fpu::Null, reuse: false });
+                                        &MctsConfig { iterations, c_puct, ..Default::default() });
                     match r {
                         Some(r) => {
                             // Die Wurzelbewertung von MCTS ist der Mittelwert
@@ -508,6 +507,11 @@ pub fn play_game(
 
         steps.push(Step { board: board.clone(), value, search_value, visits: besuche });
         move_log.push(move_to_str(&chosen));
+        // Baum auf den gespielten Zug umsetzen — nach **jedem** Halbzug, auch
+        // nach Buch- und Zufallszügen. Ohne das greift die Stellungsprüfung in
+        // `Mcts::search` und der Baum wird jedes Mal verworfen; die
+        // Wiederverwendung liefe dann ins Leere.
+        baum.advance(&board, chosen);
         board = Rules::apply_with_effects(&board, chosen);
     }
 
