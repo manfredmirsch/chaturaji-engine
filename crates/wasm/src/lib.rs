@@ -180,7 +180,7 @@ impl WasmEngine {
             root:    RootChoice::Visits,
             // Beide gemessen: Wiederverwendung +0,064, FPU +0,067, zusammen
             // +0,112 Platzwert über vier Seeds — bei messbar null Kosten.
-            fpu:     Fpu::ElternMinus(0.2),
+            fpu:     Fpu::ElternMinus(0.4),
             reuse:   true,
             sims_per_ms: 3.0,
             mcts_cache:  None,

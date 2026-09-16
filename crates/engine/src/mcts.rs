@@ -152,16 +152,26 @@ pub struct MctsConfig {
 impl Default for MctsConfig {
     fn default() -> Self {
         // Die Vorgaben sind der gemessene Bestand: Wiederverwendung +0,064,
-        // FPU 0,2 +0,067, zusammen +0,112 Platzwert über vier Seeds und je 576
-        // Partien, bei messbar null Mehrkosten (40,3 gegen 40,9 s über 24
-        // Partien — der Unterschied liegt im Rauschen).
+        // FPU +0,067, zusammen +0,112 Platzwert über vier Seeds und je 576
+        // Partien — und die Wiederverwendung ist dabei 30 % **schneller**
+        // (104 und 92 s gegen zweimal 142 über volle Partien).
+        //
+        // Der Abschlag 0,4 ist ausgemessen, nicht geraten:
+        //
+        //   gegen 0,2:  0,1 → −0,027   0,4 → +0,062
+        //   gegen 0,4:  0,6 → +0,035   1,0 → −0,108
+        //
+        // Das Optimum liegt zwischen 0,4 und 0,6. Dass ein Abschlag oberhalb
+        // der typischen Wertespanne (Median 0,28) am besten wirkt, passt zum
+        // Befund, dass die Wurzelwahl nach Q schlechter ist als nach Besuchen:
+        // Q ist an schwach besuchten Knoten zu verrauscht, um beizutragen.
         //
         // `reuse` wirkt nur, wenn der Aufrufer nach jedem Halbzug
         // [`Mcts::advance`] ruft; sonst greift die Stellungsprüfung und der
         // Baum wird verworfen. Das ist kein Fehler, nur eine verschenkte
         // Gelegenheit.
         Self { iterations: 400, c_puct: DEFAULT_C_PUCT, root: RootChoice::Visits,
-               fpu: Fpu::ElternMinus(0.2), reuse: true }
+               fpu: Fpu::ElternMinus(0.4), reuse: true }
     }
 }
 
@@ -721,7 +731,7 @@ mod tests {
                 &MctsConfig { iterations: 800, fpu, ..Default::default() }).unwrap().visits
         };
         let a = lauf(Fpu::Null);
-        let b = lauf(Fpu::ElternMinus(0.2));
+        let b = lauf(Fpu::ElternMinus(0.4));
         assert_ne!(a, b, "FPU hat keinerlei Wirkung");
     }
 }
