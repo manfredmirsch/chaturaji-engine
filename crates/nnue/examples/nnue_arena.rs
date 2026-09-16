@@ -43,7 +43,7 @@ use chaturaji_core::zobrist::ZobristKeys;
 use chaturaji_nnue::network::NnueNetwork;
 use chaturaji_nnue::outcome::place_values;
 use chaturaji_nnue::selfplay::{nnue_best_move, nnue_best_move_timed, BeamOrder};
-use chaturaji_nnue::mcts::{Mcts, MctsConfig, RootChoice};
+use chaturaji_nnue::mcts::{Fpu, Mcts, MctsConfig, RootChoice};
 use chaturaji_engine::move_features::{MoveModel, N_FEATURES};
 use chaturaji_engine::policy::{MovePrior, PolicyNet};
 use chaturaji_engine::Engine;
@@ -95,6 +95,10 @@ struct Args {
     b_c_puct: Option<f32>,
     a_root:   RootChoice,
     b_root:   RootChoice,
+    a_fpu:    Fpu,
+    b_fpu:    Fpu,
+    a_reuse:  bool,
+    b_reuse:  bool,
     // Zugmodell je Seite als Datei. Ohne Angabe gilt das eingebaute.
     // Prior je Seite als Datei — Linearform oder Policy-Netz, die Datei sagt
     // selbst, welches von beidem. Zwei getrennte Eingaben dafür wären eine zu
@@ -159,6 +163,7 @@ fn parse_args() -> Args {
         c_puct: chaturaji_nnue::mcts::DEFAULT_C_PUCT,
         a_iters: None, b_iters: None, a_c_puct: None, b_c_puct: None,
         a_root: RootChoice::Visits, b_root: RootChoice::Visits,
+        a_fpu: Fpu::Null, b_fpu: Fpu::Null, a_reuse: false, b_reuse: false,
         a_prior: None, b_prior: None,
     };
     let mut i = 1;
@@ -191,6 +196,10 @@ fn parse_args() -> Args {
             "--b-c-puct"      => a.b_c_puct = next(&mut i).parse().ok(),
             "--a-root"        => a.a_root = wurzelwahl(&next(&mut i)),
             "--b-root"        => a.b_root = wurzelwahl(&next(&mut i)),
+            "--a-fpu"         => a.a_fpu = fpu_wahl(&next(&mut i)),
+            "--b-fpu"         => a.b_fpu = fpu_wahl(&next(&mut i)),
+            "--a-reuse"       => a.a_reuse = true,
+            "--b-reuse"       => a.b_reuse = true,
             "--a-prior"       => a.a_prior = Some(next(&mut i)),
             "--b-prior"       => a.b_prior = Some(next(&mut i)),
             _ => {}
@@ -239,6 +248,15 @@ fn opening(plies: usize, seed: u64) -> Board {
 /// `visits` (Vorgabe) oder `value`. Alles andere bricht ab, statt still die
 /// Vorgabe zu nehmen — eine vertippte Einstellung soll nicht als Messergebnis
 /// durchgehen.
+/// `null` (bisheriges Verhalten) oder eine Zahl als Abschlag vom Elternwert.
+fn fpu_wahl(s: &str) -> Fpu {
+    if s == "null" { return Fpu::Null; }
+    match s.parse::<f32>() {
+        Ok(v) if v.is_finite() && v >= 0.0 => Fpu::ElternMinus(v),
+        _ => { eprintln!("Unbekanntes --fpu '{s}' — erlaubt sind 'null' oder eine Zahl ab 0."); std::process::exit(2); }
+    }
+}
+
 fn wurzelwahl(s: &str) -> RootChoice {
     match s {
         "visits" => RootChoice::Visits,
@@ -269,7 +287,11 @@ fn play(
     let mut eng_b = (b_search == SearchKind::Brs).then(|| Engine::new(tt_mb));
     // Baum und Zugmodell einmal je Partie; der Baum wird je Zug geleert, die
     // Allokationen bleiben erhalten.
-    let mut baum   = Mcts::new();
+    // Je Seite ein eigener Baum. Bei Wiederverwendung wäre ein gemeinsamer
+    // falsch: die Priors der beiden Seiten können verschieden sein, und ein
+    // geerbter Teilbaum trüge dann die Einschätzung des Gegners.
+    let mut baum_a = Mcts::new();
+    let mut baum_b = Mcts::new();
 
     while plies < max_moves && !Rules::is_game_over(&board) {
         let moves = Rules::legal_moves(&board);
@@ -325,11 +347,18 @@ fn play(
                 // Die Zeitspalte bleibt für diese Seite deshalb leer.
                 let cfg    = if ist_a { mcts_a } else { mcts_b };
                 let modell = if ist_a { modell_a } else { modell_b };
+                let baum   = if ist_a { &mut baum_a } else { &mut baum_b };
                 baum.search(&|b: &Board| net.forward(b), modell, &board, cfg)
                     .map(|r| r.best)
                     .unwrap_or(moves[0])
             }
         };
+        // Beide Bäume nach **jedem** Halbzug fortschalten, nicht nur nach den
+        // eigenen: die nächste eigene Entscheidung liegt vier Halbzüge weiter,
+        // und nur wer alle drei Gegnerzüge mitgeht, findet seinen Teilbaum
+        // wieder.
+        if a_search == SearchKind::Mcts { baum_a.advance(&board, mv); }
+        if b_search == SearchKind::Mcts { baum_b.advance(&board, mv); }
         board = Rules::apply_with_effects(&board, mv);
         plies += 1;
     }
@@ -431,10 +460,14 @@ fn main() {
                                      args.a_search, args.b_search, args.tt_mb,
                                      &MctsConfig { iterations: args.a_iters.unwrap_or(args.iters),
                                                    c_puct:     args.a_c_puct.unwrap_or(args.c_puct),
-                                                   root:       args.a_root },
+                                                   root:       args.a_root,
+                                                   fpu:        args.a_fpu,
+                                                   reuse:      args.a_reuse },
                                      &MctsConfig { iterations: args.b_iters.unwrap_or(args.iters),
                                                    c_puct:     args.b_c_puct.unwrap_or(args.c_puct),
-                                                   root:       args.b_root },
+                                                   root:       args.b_root,
+                                                   fpu:        args.b_fpu,
+                                                   reuse:      args.b_reuse },
                                      modell_a, modell_b,
                                      args.depth, args.beam, args.max_moves, &keys,
                                      args.time_ms, args.max_depth);

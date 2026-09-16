@@ -25,7 +25,7 @@ use chaturaji_core::notation::move_to_str;
 use chaturaji_core::zobrist::{hash_board, ZobristKeys};
 use chaturaji_engine::book::OpeningBook;
 use chaturaji_engine::move_features::{fast_features, MoveFeatureContext, MoveModel};
-use crate::mcts::{Mcts, MctsConfig, RootChoice};
+use crate::mcts::{Fpu, Mcts, MctsConfig, RootChoice};
 use crate::network::NnueNetwork;
 
 pub struct SelfPlayConfig {
@@ -484,7 +484,8 @@ pub fn play_game(
                 }
                 Generator::Mcts { iterations, c_puct } => {
                     let r = baum.search(&|b: &Board| net.forward(b), &modell, &board,
-                                        &MctsConfig { iterations, c_puct, root: RootChoice::Visits });
+                                        &MctsConfig { iterations, c_puct, root: RootChoice::Visits,
+                                                      fpu: Fpu::Null, reuse: false });
                     match r {
                         Some(r) => {
                             // Die Wurzelbewertung von MCTS ist der Mittelwert

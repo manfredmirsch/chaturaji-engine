@@ -128,7 +128,9 @@ fn main() {
     // ── Was die beiden Verfahren wählen ──────────────────────────────────────
     let r = Mcts::new().search(&|b: &Board| netz.forward(b), &modell, board,
                                &MctsConfig { iterations: iters, c_puct: chaturaji_engine::mcts::DEFAULT_C_PUCT,
-                                             root: RootChoice::Visits })
+                                             root: RootChoice::Visits,
+                                             fpu: chaturaji_engine::mcts::Fpu::Null,
+                                             reuse: false })
         .expect("Stellung hat Züge");
     let summe: u32 = r.visits.iter().map(|(_, n)| n).sum();
     println!("Baumsuche, {iters} Simulationen — Wurzelwert {:.3} für Sitz {sitz}", r.value[sitz]);

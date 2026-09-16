@@ -18,7 +18,7 @@ use chaturaji_core::notation::{move_to_str, parse_move, GameRecord};
 use chaturaji_core::piece::Color;
 use chaturaji_core::rules::Rules;
 use chaturaji_engine::book::OpeningBook;
-use chaturaji_engine::mcts::{Mcts, MctsConfig, RootChoice, DEFAULT_C_PUCT};
+use chaturaji_engine::mcts::{Fpu, Mcts, MctsConfig, RootChoice, DEFAULT_C_PUCT};
 use chaturaji_engine::policy::PolicyNet;
 use chaturaji_engine::search::{Engine as SearchEngine, SearchAlgo};
 use chaturaji_engine::nnue_network::NnueNetwork as Network;
@@ -141,6 +141,11 @@ pub struct WasmEngine {
     iters:   u32,
     c_puct:  f32,
     root:    RootChoice,
+    fpu:     Fpu,
+    /// Baum zwischen den Zügen weiterverwenden. Braucht, dass bei **jeder**
+    /// Brettänderung `advance` gerufen wird; die Stellungsprüfung in
+    /// `Mcts::search` fängt ein Versäumnis ab, kostet dann aber den Baum.
+    reuse:   bool,
     /// Gemessene Simulationen je Millisekunde, für `best_move_timed`.
     ///
     /// Der Startwert ist eine Schätzung; nach dem ersten Zug steht die
@@ -173,6 +178,8 @@ impl WasmEngine {
             iters:   800,
             c_puct:  DEFAULT_C_PUCT,
             root:    RootChoice::Visits,
+            fpu:     Fpu::Null,
+            reuse:   false,
             sims_per_ms: 3.0,
             mcts_cache:  None,
         }
@@ -243,7 +250,10 @@ impl WasmEngine {
     fn mcts_search(&mut self) -> Option<chaturaji_engine::mcts::SearchResult> {
         if self.algo != Algorithm::Mcts { return None; }
         let net = self.network.as_ref()?;
-        let cfg = MctsConfig { iterations: self.iters, c_puct: self.c_puct, root: self.root };
+        let cfg = MctsConfig {
+            iterations: self.iters, c_puct: self.c_puct, root: self.root,
+            fpu: self.fpu, reuse: self.reuse,
+        };
         // Feldweise ausleihen: der Baum wird verändert, während das Netz
         // gelesen wird.
         let board = &self.board;

@@ -111,6 +111,10 @@ on:
         description: 'Prior für B (leer = eingebaut)'
         type: string
         default: ''
+      extra:
+        description: 'Zusätzliche Schalter, z.B. "--a-reuse --b-fpu 0.2" (GitHub lässt nur 25 Eingaben zu)'
+        type: string
+        default: ''
 
 env:
   STATE_TAG: nnue-state
@@ -217,6 +221,7 @@ jobs:
             --b-root '${{ inputs.b_root }}' \
             ${{ inputs.a_prior && format('--a-prior crates/nnue/arena_models/{0}', inputs.a_prior) || '' }} \
             ${{ inputs.b_prior && format('--b-prior crates/nnue/arena_models/{0}', inputs.b_prior) || '' }} \
+            ${{ inputs.extra }} \
             --out "out/shard-$(printf '%03d' ${{ matrix.shard }}).json"
 
       - uses: actions/upload-artifact@v7
