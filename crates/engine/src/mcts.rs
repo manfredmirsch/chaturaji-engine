@@ -158,10 +158,13 @@ impl Default for MctsConfig {
         //
         // Der Abschlag 0,4 ist ausgemessen, nicht geraten:
         //
-        //   gegen 0,2:  0,1 → −0,027   0,4 → +0,062
-        //   gegen 0,4:  0,6 → +0,035   1,0 → −0,108
+        //   gegen 0,2:  0,1 → −0,027 (2 Seeds)   0,4 → +0,062 (2)
+        //   gegen 0,4:  0,6 → +0,011 (4 Seeds)   1,0 → −0,108 (2)
         //
-        // Das Optimum liegt zwischen 0,4 und 0,6. Dass ein Abschlag oberhalb
+        // 0,6 sah nach zwei Seeds mit +0,035 noch nach einem Vorteil aus; mit
+        // vier bleibt +0,011, zwei positiv und zwei negativ. Das Optimum ist
+        // flach zwischen 0,4 und 0,6 und fällt jenseits davon steil ab.
+        // Dass ein Abschlag oberhalb
         // der typischen Wertespanne (Median 0,28) am besten wirkt, passt zum
         // Befund, dass die Wurzelwahl nach Q schlechter ist als nach Besuchen:
         // Q ist an schwach besuchten Knoten zu verrauscht, um beizutragen.
