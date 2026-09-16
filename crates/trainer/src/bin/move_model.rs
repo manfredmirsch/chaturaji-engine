@@ -9,7 +9,7 @@
 
 use chaturaji_engine::move_features::{MoveModel, N_FEATURES};
 use chaturaji_trainer::move_model::{
-    accuracy, collect, compare_table, fit, heuristik_move_priority, print_accuracy,
+    accuracy, compare_table, fit, heuristik_move_priority, print_accuracy,
     without_slow_features,
 };
 
@@ -27,6 +27,7 @@ fn main() {
     let mut pol_lr      = 0.01f32;
     let mut pol_batch   = 4096usize;
     let mut pol_hidden  = chaturaji_engine::policy::POLICY_HIDDEN;
+    let mut wahl = chaturaji_trainer::move_model::Auswahl::default();
 
     let mut i = 1;
     while i < args.len() {
@@ -41,9 +42,13 @@ fn main() {
             "--pol-lr"     => { i += 1; if i < args.len() { pol_lr     = args[i].parse().unwrap_or(pol_lr); } }
             "--pol-batch"  => { i += 1; if i < args.len() { pol_batch  = args[i].parse().unwrap_or(pol_batch); } }
             "--pol-hidden" => { i += 1; if i < args.len() { pol_hidden = args[i].parse().unwrap_or(pol_hidden); } }
+            "--min-rating" => { i += 1; if i < args.len() { wahl.min_rating = args[i].parse().unwrap_or(0.0); } }
+            "--max-platz"  => { i += 1; if i < args.len() { wahl.max_platz  = args[i].parse().unwrap_or(4); } }
+            "--platz-gewicht" => { wahl.nach_platz_gewichten = true; }
             "--help" | "-h" => {
                 println!("move_model [--games <verz>] [--out <datei>] [--limit n] [--epochs n] [--lr f]");
                 println!("           [--policy] [--pol-epochs n] [--pol-lr f] [--pol-batch n] [--pol-hidden n]");
+                println!("           [--min-rating f] [--max-platz n] [--platz-gewicht]  Datenauswahl");
                 return;
             }
             other => eprintln!("unbekanntes Argument: {other}"),
@@ -52,7 +57,12 @@ fn main() {
     }
 
     let t0 = std::time::Instant::now();
-    let mut data = collect(&games, limit);
+    let mut data = chaturaji_trainer::move_model::collect_mit(&games, limit, wahl);
+    if wahl.min_rating > 0.0 || wahl.max_platz < 4 || wahl.nach_platz_gewichten {
+        println!("Auswahl: Rating ab {}, Platz bis {}, Gewichtung {}",
+                 wahl.min_rating, wahl.max_platz,
+                 if wahl.nach_platz_gewichten { "nach Platz" } else { "gleich" });
+    }
     if data.is_empty() {
         eprintln!("Keine Entscheidungen gesammelt — stimmt --games?");
         std::process::exit(1);

@@ -98,7 +98,36 @@ pub fn place_weight(rank: u32) -> f32 {
 ///
 /// `limit` begrenzt die Zahl der Partien (0 = alle) — für einen schnellen
 /// ersten Durchlauf, bevor man eine Stunde rechnen lässt.
+/// Welche Entscheidungen aus den menschlichen Partien überhaupt gesammelt
+/// werden.
+///
+/// Bisher alle: jeder Zug jedes Spielers ab 2400. Ungeprüft war, ob eine
+/// Auswahl besser trägt — ein Viertplatzierter hat schließlich sichtbar etwas
+/// falsch gemacht, und in einer Blitzpartie stehen mehr Versehen als in einer
+/// mit Bedenkzeit.
+#[derive(Debug, Clone, Copy)]
+pub struct Auswahl {
+    /// Nur Züge von Spielern mit mindestens diesem Rating (0 = alle).
+    pub min_rating: f64,
+    /// Nur Züge von Spielern, die höchstens diesen Platz belegt haben
+    /// (4 = alle, 2 = nur die obere Hälfte).
+    pub max_platz: u32,
+    /// Nach der Platzierung gewichten (1,0 bis 0,25) statt gleich zu zählen.
+    pub nach_platz_gewichten: bool,
+}
+
+impl Default for Auswahl {
+    fn default() -> Self {
+        Self { min_rating: 0.0, max_platz: 4, nach_platz_gewichten: false }
+    }
+}
+
 pub fn collect(dir: &str, limit: usize) -> Vec<Decision> {
+    collect_mit(dir, limit, Auswahl::default())
+}
+
+/// Wie [`collect`], aber mit Auswahl.
+pub fn collect_mit(dir: &str, limit: usize, wahl: Auswahl) -> Vec<Decision> {
     let mut paths: Vec<_> = match fs::read_dir(Path::new(dir)) {
         Ok(rd) => rd.flatten().map(|e| e.path())
             .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
@@ -111,13 +140,13 @@ pub fn collect(dir: &str, limit: usize) -> Vec<Decision> {
     println!("{} Partien werden gelesen …", paths.len());
 
     let alle: Vec<Vec<Decision>> = paths.par_iter()
-        .map(|path| decisions_from_file(path).unwrap_or_default())
+        .map(|path| decisions_from_file(path, wahl).unwrap_or_default())
         .collect();
 
     alle.into_iter().flatten().collect()
 }
 
-fn decisions_from_file(path: &Path) -> Option<Vec<Decision>> {
+fn decisions_from_file(path: &Path, wahl: Auswahl) -> Option<Vec<Decision>> {
     let text = fs::read_to_string(path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
     let pgn4 = json.get("pgn4")?.as_str()?;
@@ -139,9 +168,15 @@ fn decisions_from_file(path: &Path) -> Option<Vec<Decision>> {
             None => break,
         };
 
+        let sitz  = board.to_move.idx();
+        let platz = meta.ranks[sitz];
+        // Auswahl: schwächere Spieler und schlechtere Platzierungen
+        // überspringen. Vor der teuren Merkmalsberechnung, nicht danach.
+        let genommen = platz <= wahl.max_platz && meta.ratings[sitz] >= wahl.min_rating;
+
         // Mit nur einem legalen Zug ist nichts zu entscheiden und nichts zu
         // lernen — die Wahrscheinlichkeit ist unabhängig von `w` immer 1.
-        if legal.len() > 1 {
+        if legal.len() > 1 && genommen {
             let ctx = MoveFeatureContext::new(&board);
             let feats: Vec<[f32; N_FEATURES]> = legal.iter()
                 .map(|mv| {
@@ -152,7 +187,7 @@ fn decisions_from_file(path: &Path) -> Option<Vec<Decision>> {
             out.push(Decision {
                 feats,
                 chosen,
-                weight: place_weight(meta.ranks[board.to_move.idx()]),
+                weight: if wahl.nach_platz_gewichten { place_weight(platz) } else { 1.0 },
                 // Menschliche Partie: das Ziel ist der gespielte Zug.
                 target: None,
             });
