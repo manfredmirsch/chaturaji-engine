@@ -191,8 +191,9 @@ impl PolicyNet {
 /// | 26 statt 16 Merkmale | +0,1372 / +0,1337 | **+0,135** |
 /// | 64 statt 32 Einheiten | +0,0220 / +0,0266 / +0,0451 / +0,0168 | **+0,028** |
 /// | 34 statt 26 Merkmale | +0,1036 / +0,1134 | **+0,109** |
+/// | 40 statt 34 Merkmale | −0,0243 / +0,0388 / +0,0816 / +0,0411 | **+0,034** |
 ///
-/// Zusammen rund **+0,38 Platzwert**. Über die bekannte Beziehung von 0,051 je
+/// Zusammen rund **+0,41 Platzwert**, nach Abzug der Rechenzeit +0,39. Über die bekannte Beziehung von 0,051 je
 /// Verdopplung des Suchaufwands entspricht das gut sieben Verdopplungen — als
 /// liefen 100.000 statt 800 Simulationen.
 ///
@@ -200,10 +201,20 @@ impl PolicyNet {
 /// jedes Mal erst möglich, weil ein Netz sie verarbeitet. Für die Linearform
 /// vom Morgen wären alle achtzehn neuen Merkmale tote Gewichte gewesen.
 ///
-/// Rechenzeit, gemessen statt geschätzt: die breitere Schicht kostet 5,5 %
-/// (66,6 gegen 63,1 s über 24 Partien), die acht Drohungs- und
-/// Vierpersonen-Merkmale 3,2 % (57,4 gegen 55,7 s). Auf derselben Kurve sind
-/// das 0,004 und 0,002 Platzwert — beide Handel gehen klar auf.
+/// Rechenzeit, gemessen statt geschätzt — und der letzte Schritt war der erste,
+/// bei dem sie ins Gewicht fällt:
+///
+/// | Schritt | Rechenzeit | entspricht | Gewinn |
+/// |---|---|---|---|
+/// | 64 statt 32 Einheiten | +5,5 % | 0,004 | +0,028 |
+/// | 34 statt 26 Merkmale | +3,2 % | 0,002 | +0,109 |
+/// | 40 statt 34 Merkmale | **+15,4 %** | **0,011** | +0,034 |
+/// | 128 statt 64 Einheiten | **+47,5 %** | **0,029** | +0,027 → **verworfen** |
+///
+/// `spiess` läuft je Zug vier Strahlen ab, `freibauer` alle gegnerischen
+/// Bauern — deshalb der Sprung. Und 128 Einheiten sind der erste Schritt, den
+/// die Kosten vollständig aufzehren: der Gewinn ist über beide Seeds stabil
+/// und trotzdem wertlos.
 ///
 /// Bei der Breite liegen die vier Seeds einzeln im Rauschen (t 0,73 bis 1,78),
 /// aber alle vier positiv und mit einheitlicher Größe.
