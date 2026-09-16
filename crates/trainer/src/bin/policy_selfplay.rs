@@ -63,9 +63,38 @@
 //! Münzwurf, und das Netz lernt ihn mit. Kein reines Rauschen, aber ein
 //! knappes Drittel davon.
 //!
-//! Wer es weiterverfolgt: Stellungen mit knappem Abstand herausfiltern oder
-//! nach dem Abstand gewichten, und die Partien mit deutlich mehr Simulationen
-//! erzeugen, damit der Lehrer klarer über seinem eigenen Prior steht.
+//! # Die dritte Umdrehung: schlechter als je zuvor
+//!
+//! Am 2026-09-16 mit allen Einwänden von oben behoben: Partien neu erzeugt aus
+//! der inzwischen um 0,58 Platzwert stärkeren Suche (Wiederverwendung und FPU),
+//! Prior mit 40 Merkmalen, und der Münzwurf-Anteil behandelt — einmal durch
+//! Filtern (181.524 von 699.093 Stellungen verworfen), einmal durch Gewichten
+//! nach dem Abstand.
+//!
+//! | Variante | Seed 1 | Seed 42 | Mittel |
+//! |---|---|---|---|
+//! | gefiltert | −0,1071 | −0,0920 | **−0,100** |
+//! | abstandsgewichtet | −0,0556 | −0,0932 | **−0,074** |
+//!
+//! Fünf Varianten, keine hat gewirkt, und die letzten beiden schaden am
+//! stärksten — obwohl sie die Wahl der Suche mit 50,8 % am besten vorhersagen
+//! (gegenüber 41,4 % des Vergleichsstandes).
+//!
+//! **Die Erklärung, die dazu passt:** Der Prior soll die Suche nicht
+//! *vorhersagen*, sondern sie *lenken*. Sein Wert liegt gerade darin, ein
+//! **anderes** Signal beizusteuern als die Suche selbst — menschliches Wissen,
+//! das die Suche dann korrigiert. Bringt man beide zur Deckung, fällt genau
+//! diese Ergänzung weg: die Suche bestätigt dann nur noch, was der Prior
+//! ohnehin sagt, und beide Fehler zeigen in dieselbe Richtung.
+//!
+//! Dazu passt, dass **mehr menschliche Daten** dem Prior helfen und **mehr
+//! eigene** ihm schaden, und dass die Auswahl nach Platzierung (+0,037) besser
+//! ist als jede Menge Selbstspieldaten.
+//!
+//! **Diese Linie ist damit abgeschlossen.** Wer sie wieder aufnimmt, sollte
+//! einen anderen Ansatz wählen als Nachahmung — etwa den Prior nur dort
+//! anzupassen, wo die Suche ihm deutlich *widerspricht*, statt ihn überall auf
+//! ihre Ausgabe zu ziehen.
 //!
 //! # Aufruf
 //!
