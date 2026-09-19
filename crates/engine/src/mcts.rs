@@ -117,7 +117,7 @@ pub enum RootChoice {
 }
 
 /// Untergrenze, ab der ein Mittelwert an der Wurzel zählt.
-const MIN_VISITS_FOR_Q: u32 = 8;
+pub const MIN_VISITS_FOR_Q: u32 = 8;
 
 /// Abschlag für noch nicht besuchte Züge („First Play Urgency").
 ///
@@ -249,6 +249,15 @@ pub struct SearchResult {
     /// Trainingsziel für einen Policy-Kopf. Heute wird sie nur zur Zugwahl
     /// benutzt.
     pub visits: Vec<(Move, u32)>,
+    /// Mittelwert und Besuchszahl je Wurzelzug, aus Sicht des Ziehenden,
+    /// in derselben Reihenfolge wie `visits`.
+    ///
+    /// `visits` allein sagt, *welchen* Zug die Suche vorzieht, nicht *wie
+    /// deutlich*. Für den Abstand zwischen bestem und gespieltem Zug — den
+    /// Verlust, den die Partieanalyse ausweist — braucht es die Mittelwerte.
+    /// Die Besuchszahl steht daneben, weil ein Q mit wenigen Besuchen Rauschen
+    /// ist; [`MIN_VISITS_FOR_Q`] ist die Grenze, ab der er zählt.
+    pub root_q: Vec<(Move, f32, u32)>,
     /// Angelegte Baumknoten — das Gegenstück zu `nodes` der Alpha-Beta-Suche.
     pub nodes:  u64,
     /// Längster Abstieg in Halbzügen. Anders als bei fester Tiefe ist das ein
@@ -396,9 +405,17 @@ impl Mcts {
                     .unwrap_or_else(|| visits.first().map(|(m, _)| *m).unwrap_or(moves[0]))
             }
         };
+        let seat = board.to_move.idx();
+        let root_q: Vec<(Move, f32, u32)> = visits.iter().map(|(mv, n)| {
+            let k = self.nodes[root.kids.clone()].iter()
+                .find(|k| k.mv == Some(*mv))
+                .expect("jeder Zug aus `visits` stammt aus `kids`");
+            (*mv, k.q(seat), *n)
+        }).collect();
+
         let value = std::array::from_fn(|i| root.q(i));
         Some(SearchResult {
-            best, value, visits,
+            best, value, visits, root_q,
             nodes: self.nodes.len() as u64,
             depth: self.tiefe.min(u8::MAX as usize) as u8,
         })

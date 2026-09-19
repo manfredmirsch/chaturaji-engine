@@ -3,29 +3,66 @@ name: NNUE-Analyse
 # Alle Partien aus dem Datensatz mit der Engine durchrechnen und die
 # Auffälligkeiten annotieren.
 #
-# Warum in der Cloud: Tiefe 4 mit dem echten NNUE kostet rund 220 Rechenstunden.
-# Auf vier Kernen sind das gut 60 Stunden am Stück; auf 32 Shards à 4 vCPU
-# knapp drei Stunden je Job, und die laufen zwanzig gleichzeitig.
+# Warum in der Cloud: die Suche kostet in der Größenordnung 200 Rechenstunden.
+# Auf vier Kernen sind das gut 50 Stunden am Stück; auf 32 Shards à 4 vCPU
+# wenige Stunden je Job, und die laufen zwanzig gleichzeitig.
 #
 # Die Analyse ist zustandslos: keine Zufallszahlen, keine Reihenfolge über
 # Partien hinweg. Jeder Shard nimmt jede n-te Datei der sortierten Liste, und
 # ein Wiederholungslauf liefert dasselbe Ergebnis.
+#
+# MCTS wandert die Partie mit einem einzigen Baum ab (`advance` nach jedem
+# Halbzug). Das ist billiger als ein Neustart je Stellung, koppelt die
+# Stellungen innerhalb einer Partie aber aneinander — die Reihenfolge *in* der
+# Partie zählt also, die über Partien hinweg nach wie vor nicht.
 
 on:
   workflow_dispatch:
     inputs:
+      search:
+        description: 'Suche, die das Urteil fällt'
+        type: choice
+        options: ['mcts', 'brs']
+        default: 'mcts'
+      iters:
+        description: 'Simulationen je Stellung (nur mcts)'
+        type: number
+        default: 25600
       depth:
-        description: 'Suchtiefe (3 ist ~20x billiger als 4)'
+        description: 'Suchtiefe (nur brs; 3 ist ~20x billiger als 4)'
         type: number
         default: 3
       shards:
         description: 'Parallele Runner (20 laufen gleichzeitig, der Rest wird angestellt)'
         type: number
         default: 4
+      # MCTS braucht zwingend ein Netz — die Handbewertung taugt nicht als
+      # Blattbewertung, weil sie nicht auf der Platzwertskala liegt.
+      #
+      # Die Vorgabe ist bewusst nicht 'weights.json': dieses Asset trägt seit
+      # dem 15.09. das Ergebnis des q_weight-Versuchs (7.201.530 Schritte),
+      # nicht das ausgelieferte Netz. Ein Lauf mit den Vorgaben nähme sonst
+      # still das schwächere.
       weights:
-        description: 'Netz für die Suche (Asset im Release nnue-state, leer = Handbewertung)'
+        description: 'Netz für die Suche (Asset im Release nnue-state)'
         type: string
-        default: 'weights.json'
+        default: 'weights-gen-r12.json'
+      skip_book:
+        description: 'Halbzüge am Partieanfang, die ungeprüft bleiben (Buchzüge)'
+        type: number
+        default: 16
+      loss_min:
+        description: 'Verlustschwelle für Anmerkungen in Platzwert (nur mcts)'
+        type: string
+        default: '0.05'
+      calibrate:
+        description: 'Nur die Verteilung der Verluste messen, nichts schreiben'
+        type: boolean
+        default: false
+      limit:
+        description: 'Partien je Shard (0 = alle; zum Kalibrieren z. B. 10)'
+        type: number
+        default: 0
       data_asset:
         description: 'Partiendatensatz (Asset im Release nnue-state)'
         type: string
@@ -134,11 +171,18 @@ jobs:
           chmod +x target/release/analyze_games
           WEIGHTS=""
           [ -n '${{ inputs.weights }}' ] && WEIGHTS="--weights input/${{ inputs.weights }}"
+          EXTRA=""
+          [ '${{ inputs.calibrate }}' = 'true' ] && EXTRA="--calibrate"
           ./target/release/analyze_games \
+            --limit ${{ inputs.limit }} $EXTRA \
             --in  games \
             --out out \
+            --search    ${{ inputs.search }} \
+            --iters     ${{ inputs.iters }} \
             --depth     ${{ inputs.depth }} \
             --threshold ${{ inputs.threshold }} \
+            --skip-book ${{ inputs.skip_book }} \
+            --loss-min  ${{ inputs.loss_min }} \
             --shard  ${{ matrix.shard }} \
             --shards ${{ inputs.shards }} \
             --force \
@@ -164,7 +208,31 @@ jobs:
           merge-multiple: true
           path: shards
 
+      - name: Verteilung der Verluste
+        if: ${{ inputs.calibrate }}
+        run: |
+          set -euo pipefail
+          mkdir -p roh
+          for f in shards/*.tar.gz; do tar xf "$f" -C roh; done
+          cat roh/losses-*.txt > alle.txt
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          v = sorted(float(x) for x in open('alle.txt'))
+          n = len(v)
+          q = lambda p: v[round((n - 1) * p)]
+          anteil = lambda s: sum(1 for x in v if x >= s) / n * 100
+          print(f"## Kalibrierung\n\n{n:,} geprüfte Halbzüge\n")
+          print("| Quantil | Verlust |\n|---|---|")
+          for p in (0.50, 0.75, 0.90, 0.95, 0.975, 0.99):
+              print(f"| {p*100:.1f} % | {q(p):.3f} |")
+          print(f"\nMittel {sum(v)/n:.3f}, Maximum {v[-1]:.3f}\n")
+          print("| loss-min | Anmerkungen | davon ? | ⚠ | ⚡ |\n|---|---|---|---|---|")
+          for s in (0.05, 0.08, 0.10, 0.12, 0.15, 0.20):
+              print(f"| {s:.2f} | {anteil(s):.1f} % | {anteil(s)-anteil(s*3):.1f} % "
+                    f"| {anteil(s*3)-anteil(s*8):.1f} % | {anteil(s*8):.2f} % |")
+          PY
+
       - name: Zusammenlegen
+        if: ${{ !inputs.calibrate }}
         id: pack
         run: |
           set -euo pipefail
@@ -178,6 +246,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Zusammenfassung
+        if: ${{ !inputs.calibrate }}
         run: |
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import glob, json, collections
@@ -200,6 +269,7 @@ jobs:
           PY
 
       - name: Ans Release hängen
+        if: ${{ !inputs.calibrate }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
