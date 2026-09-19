@@ -54,7 +54,7 @@ on:
       loss_min:
         description: 'Verlustschwelle für Anmerkungen in Platzwert (nur mcts)'
         type: string
-        default: '0.05'
+        default: '0.12'
       calibrate:
         description: 'Nur die Verteilung der Verluste messen, nichts schreiben'
         type: boolean
@@ -226,9 +226,9 @@ jobs:
               print(f"| {p*100:.1f} % | {q(p):.3f} |")
           print(f"\nMittel {sum(v)/n:.3f}, Maximum {v[-1]:.3f}\n")
           print("| loss-min | Anmerkungen | davon ? | ⚠ | ⚡ |\n|---|---|---|---|---|")
-          for s in (0.05, 0.08, 0.10, 0.12, 0.15, 0.20):
-              print(f"| {s:.2f} | {anteil(s):.1f} % | {anteil(s)-anteil(s*3):.1f} % "
-                    f"| {anteil(s*3)-anteil(s*8):.1f} % | {anteil(s*8):.2f} % |")
+          for s in (0.08, 0.10, 0.11, 0.12, 0.13, 0.15):
+              print(f"| {s:.2f} | {anteil(s):.1f} % | {anteil(s)-anteil(s*2.5):.1f} % "
+                    f"| {anteil(s*2.5)-anteil(s*3.75):.1f} % | {anteil(s*3.75):.2f} % |")
           PY
 
       - name: Zusammenlegen

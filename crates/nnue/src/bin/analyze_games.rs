@@ -50,6 +50,16 @@ use chaturaji_nnue::dist::load_or_init_weights;
 use chaturaji_nnue::network::NnueNetwork;
 use chaturaji_nnue::pgn_import::parse_move_token;
 
+/// Wie oft der gespielte Zug zu wenige Besuche hatte und eigens nachgemessen
+/// werden musste.
+///
+/// Die Zahl ist ein Kostenposten: jede Nachmessung ist eine zusätzliche Suche.
+/// Feuert sie bei jedem zweiten Halbzug, kostet die Analyse deutlich mehr als
+/// die Simulationszahl vermuten lässt — und das fiele über 828.000 Halbzüge
+/// erst an der Rechnung auf.
+static NACHMESSUNGEN: AtomicUsize = AtomicUsize::new(0);
+static GEPRUEFT:      AtomicUsize = AtomicUsize::new(0);
+
 /// Welche Suche das Urteil fällt.
 ///
 /// `Brs` ist der bisherige Stand und bleibt erhalten, damit sich beide Urteile
@@ -185,6 +195,13 @@ fn main() {
               t0.elapsed().as_secs_f64() / 60.0,
               done.load(Ordering::Relaxed), plies.load(Ordering::Relaxed),
               failed.load(Ordering::Relaxed));
+
+    let nm = NACHMESSUNGEN.load(Ordering::Relaxed);
+    let gp = GEPRUEFT.load(Ordering::Relaxed);
+    if gp > 0 {
+        eprintln!("Nachmessungen: {nm} von {gp} geprüften Halbzügen ({:.1} %), je {} Simulationen",
+                  100.0 * nm as f64 / gp as f64, (a.iters / 8).max(64));
+    }
 
     let v = alle.into_inner().unwrap();
     if !v.is_empty() {
@@ -331,12 +348,22 @@ fn analyze_file(
 /// Zeitüberschreitungen verschoben in 1.131 Partien die Zuordnung.
 /// Abstände zur Ungenauigkeitsschwelle, in Vielfachen von `loss_min`.
 ///
-/// Zum Einordnen: 0,051 Platzwert ist eine Verdopplung des Suchaufwands, und
-/// der Median zwischen bestem und zweitbestem Zug liegt bei 0,039. Ein Fehler
-/// wirft also mehr weg, als doppelte Rechenzeit einbringt; ein Blunder ein
-/// Mehrfaches davon.
-const LOSS_FEHLER:  f32 = 3.0;
-const LOSS_BLUNDER: f32 = 8.0;
+/// Ausgemessen an 25.723 geprüften Halbzügen aus 200 Partien (Lauf vom
+/// 19.09.2026, 25.600 Simulationen). Mit der Vorgabe `loss_min = 0,12` liegen
+/// die Schwellen bei 0,12 / 0,30 / 0,45 und ergeben 14,2 % Ungenauigkeiten,
+/// 3,0 % Fehler und 1,8 % Blunder — zusammen so viele Anmerkungen wie bisher,
+/// aber mit der Pyramide richtig herum. Die alte Einstufung führte 7,9 % aller
+/// Halbzüge als Blunder, ein Artefakt von [`calc_score`] am Partieanfang.
+///
+/// Geraten wären die Werte nicht zu setzen: die Verteilung ist schief
+/// (Median 0,014, Mittel 0,066, Maximum 1,50), und eine einzelne Partie gibt
+/// sie nicht her — im Probelauf lag deren 90 %-Quantil bei 0,102 gegenüber
+/// 0,203 über alle 200.
+///
+/// Zum Einordnen: 0,051 Platzwert ist eine Verdopplung des Suchaufwands. Eine
+/// Ungenauigkeit wirft also gut zwei Verdopplungen weg, ein Blunder neun.
+const LOSS_FEHLER:  f32 = 2.5;
+const LOSS_BLUNDER: f32 = 3.75;
 
 fn annotate(
     game:      &Value,
@@ -521,6 +548,7 @@ fn analyze_game(
                     (best, top, None)
                 }
                 SearchKind::Mcts => {
+                    GEPRUEFT.fetch_add(1, Ordering::Relaxed);
                     let eval_fn = net_eval.ok_or("MCTS braucht ein Netz (--weights)")?;
                     let r = s.baum.search(eval_fn, prior, &board, &cfg)
                         .ok_or("MCTS fand keinen Zug in einer Stellung mit legalen Zügen")?;
@@ -545,6 +573,7 @@ fn analyze_game(
                         // aus zwei Simulationen zu bewerten, hieße den Fall zu
                         // verfehlen, für den die Zahl da ist.
                         _ => {
+                            NACHMESSUNGEN.fetch_add(1, Ordering::Relaxed);
                             let danach = Rules::apply_with_effects(&board, mv);
                             s.hilfs.reset();
                             s.hilfs.search(eval_fn, prior, &danach, &MctsConfig {
@@ -672,7 +701,7 @@ fn parse_args() -> Args {
         search:  SearchKind::Mcts,
         iters:   25_600,
         skip_book: 16,
-        loss_min: 0.05,
+        loss_min: 0.12,
         calibrate: false,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
